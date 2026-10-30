@@ -13,7 +13,7 @@ ROOT = Path(__file__).resolve().parents[1]
 TOOLKIT_DIR = ROOT / ".deps" / "xboxrecomp"
 TOOLKIT_URL = "https://github.com/sp00nznet/xboxrecomp.git"
 TOOLKIT_BASE = "f0f8a461496a4f23d9b0aeaa284b8d70ba7ab82b"
-TOOLKIT_TREE = "8d57b4ceb02054f4921a88a7233e6722625c14ff"
+TOOLKIT_TREE = "a4489cd69600a1489edea98ac19cf20db242b6d2"
 LOCAL_PATCHES = (
     ROOT / "patches" / "xboxrecomp" / "0001-bound-extra-thunks.patch",
     ROOT / "patches" / "xboxrecomp" / "0002-model-wbinvd.patch",
@@ -38,6 +38,7 @@ LOCAL_PATCHES = (
     ROOT / "patches" / "xboxrecomp" / "0021-gpu-window-clip.patch",
     ROOT / "patches" / "xboxrecomp" / "0022-gpu-depth-clear-offload.patch",
     ROOT / "patches" / "xboxrecomp" / "0023-flip-only-frame-captures.patch",
+    ROOT / "patches" / "xboxrecomp" / "0024-gpu-shared-presentation.patch",
 )
 
 # PRs #262, #280, #277, and #278, in their tested application order.

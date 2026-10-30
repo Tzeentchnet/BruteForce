@@ -1,0 +1,317 @@
+diff --git a/src/video/fb_present.c b/src/video/fb_present.c
+index cee70c0..24e21d4 100644
+--- a/src/video/fb_present.c
++++ b/src/video/fb_present.c
+@@ -63,6 +63,7 @@ static uint32_t     *s_rgb;           /* converted 32-bit copy for GDI */
+  * the buffer the window is still reading. */
+ static uint32_t     *s_present[2];
+ static LONG          s_present_idx = -1;   /* -1 until the first flip */
++static uint64_t      s_present_id;
+ static SRWLOCK       s_present_lock = SRWLOCK_INIT;
+ 
+ /* The last PVIDEO frame shown. A frame stays on screen until the next one or
+@@ -202,10 +203,20 @@ void xbox_FramebufferWindowPresent(uint32_t fb_va, uint32_t pitch)
+         }
+     }
+     s_present_idx = next;
++    s_present_id++;
+     ReleaseSRWLockExclusive(&s_present_lock);
+ }
+ 
+-static int fb_copy_presented_frame(uint32_t *dst)
++uint64_t xbox_FramebufferWindowNextFrameId(void)
++{
++    uint64_t id;
++    AcquireSRWLockShared(&s_present_lock);
++    id = s_present_id + 1;
++    ReleaseSRWLockShared(&s_present_lock);
++    return id;
++}
++
++static int fb_copy_presented_frame_id(uint32_t *dst, uint64_t *frame_id)
+ {
+     int copied = 0;
+ 
+@@ -213,12 +224,19 @@ static int fb_copy_presented_frame(uint32_t *dst)
+     if (s_present_idx >= 0) {
+         memcpy(dst, s_present[s_present_idx],
+                (size_t)s_fb_width * s_fb_height * 4);
++        if (frame_id)
++            *frame_id = s_present_id;
+         copied = 1;
+     }
+     ReleaseSRWLockShared(&s_present_lock);
+     return copied;
+ }
+ 
++static int fb_copy_presented_frame(uint32_t *dst)
++{
++    return fb_copy_presented_frame_id(dst, NULL);
++}
++
+ /* Title bar, the way ps3recomp's window shows it. Written by the flip,
+  * read once a second by the window thread; a torn read shows one stale
+  * number for a second, which nobody can tell apart from a real one. */
+@@ -483,10 +501,11 @@ static void gdi_blit(HWND hwnd, HDC hdc, const BITMAPINFO *bi)
+ 
+ /* The converted frame in s_rgb, on screen: D3D11 when it is up (which waits
+  * for vsync, so returns 1 when the loop is already paced), else GDI. */
+-static int fb_show(HWND hwnd, HDC hdc, const BITMAPINFO *bi)
++static int fb_show(HWND hwnd, HDC hdc, const BITMAPINFO *bi, uint64_t frame_id)
+ {
+     if (gpu_present_active())
+-        return gpu_present_frame(s_rgb);
++        return gpu_present_frame(s_rgb, !getenv("RECOMP_FB_VA") && !s_pvideo_source,
++                                 frame_id);
+     gdi_blit(hwnd, hdc, bi);
+     return 0;
+ }
+@@ -568,17 +587,18 @@ static DWORD WINAPI fb_thread(LPVOID unused)
+     while (InterlockedCompareExchange(&s_fb_running, 1, 1)) {
+         MSG msg;
+         int paced = 0;
++        uint64_t frame_id = 0;
+         while (PeekMessageA(&msg, NULL, 0, 0, PM_REMOVE)) {
+             TranslateMessage(&msg);
+             DispatchMessageA(&msg);
+         }
+-        if (s_rgb && fb_copy_presented_frame(s_rgb)) {
++        if (s_rgb && fb_copy_presented_frame_id(s_rgb, &frame_id)) {
+             /* A finished frame, published by the flip. Copied into s_rgb so
+              * the dump path and GDI see one consistent image even if the
+              * next flip lands mid-blit. */
+             if (!fb_pinned)
+                 fb_overlay();
+-            paced = fb_show(hwnd, hdc, &bi);
++            paced = fb_show(hwnd, hdc, &bi, frame_id);
+         } else if (s_fb_va && s_fb_pitch && s_rgb) {
+             /* No flip yet, or pinned with RECOMP_FB_VA: read guest memory as
+              * before, which is also what a title that never flips needs. */
+@@ -587,7 +607,7 @@ static DWORD WINAPI fb_thread(LPVOID unused)
+             fb_convert(src, s_fb_pitch / s_fb_width);
+             if (!fb_pinned)
+                 fb_overlay();
+-            paced = fb_show(hwnd, hdc, &bi);
++            paced = fb_show(hwnd, hdc, &bi, 0);
+         }
+         {
+             /* One dump a few seconds in, so the title has had time to render
+diff --git a/src/video/gpu_present.c b/src/video/gpu_present.c
+index 4e122b1..18c932e 100644
+--- a/src/video/gpu_present.c
++++ b/src/video/gpu_present.c
+@@ -39,6 +39,13 @@ static HWND                      s_hwnd;
+ static uint32_t                  s_w, s_h;      /* frame size */
+ static uint32_t                  s_bw, s_bh;    /* back buffer (client) size */
+ static int                       s_vsync = 1;
++static volatile LONG             s_shared_ready;
++static SRWLOCK                   s_shared_lock = SRWLOCK_INIT;
++static HANDLE                    s_pending_shared, s_shared_handle;
++static uint64_t                  s_pending_frame_id;
++static ID3D11Texture2D          *s_shared_texture;
++static ID3D11ShaderResourceView *s_shared_srv;
++static IDXGIKeyedMutex          *s_shared_mutex;
+ 
+ /* A triangle covering the viewport, from the vertex id; uv 0..1. */
+ static const char s_hlsl[] =
+@@ -164,18 +171,121 @@ int gpu_present_init(HWND hwnd, uint32_t width, uint32_t height)
+     fprintf(stderr, "  [D3D] presenting through D3D11 (%ux%u frame, vsync %s, %s filter)\n",
+             width, height, s_vsync ? "on" : "off",
+             smp.Filter == D3D11_FILTER_MIN_MAG_MIP_POINT ? "point" : "linear");
++    InterlockedExchange(&s_shared_ready, 1);
+     return 1;
+ }
+ 
++int gpu_present_shared_ready(uint32_t width, uint32_t height)
++{
++    return InterlockedCompareExchange(&s_shared_ready, 0, 0) &&
++           width == s_w && height == s_h && !getenv("RECOMP_FB_VA");
++}
++
++int gpu_present_submit_shared(HANDLE handle, uint32_t width, uint32_t height,
++                              uint64_t frame_id)
++{
++    int submitted = 0;
++    if (!handle || !frame_id || !gpu_present_shared_ready(width, height))
++        return 0;
++    AcquireSRWLockExclusive(&s_shared_lock);
++    if (InterlockedCompareExchange(&s_shared_ready, 0, 0) && !s_pending_shared) {
++        s_pending_shared = handle;
++        s_pending_frame_id = frame_id;
++        submitted = 1;
++    }
++    ReleaseSRWLockExclusive(&s_shared_lock);
++    return submitted;
++}
++
++static void release_shared_resources(void)
++{
++    if (s_shared_srv) ID3D11ShaderResourceView_Release(s_shared_srv);
++    if (s_shared_mutex) IDXGIKeyedMutex_Release(s_shared_mutex);
++    if (s_shared_texture) ID3D11Texture2D_Release(s_shared_texture);
++    s_shared_srv = NULL;
++    s_shared_mutex = NULL;
++    s_shared_texture = NULL;
++    s_shared_handle = NULL;
++}
++
++static ID3D11ShaderResourceView *take_shared(int allow_shared, uint64_t frame_id, int *held)
++{
++    HANDLE handle;
++    uint64_t pending_id;
++    HRESULT hr;
++
++    *held = 0;
++    AcquireSRWLockExclusive(&s_shared_lock);
++    handle = s_pending_shared;
++    pending_id = s_pending_frame_id;
++    if (handle && allow_shared && frame_id < pending_id) {
++        ReleaseSRWLockExclusive(&s_shared_lock);
++        return NULL;
++    }
++    s_pending_shared = NULL;
++    ReleaseSRWLockExclusive(&s_shared_lock);
++    if (!handle)
++        return NULL;
++    if (handle != s_shared_handle) {
++        release_shared_resources();
++        hr = ID3D11Device_OpenSharedResource(s_dev, handle, &IID_ID3D11Texture2D,
++                                            (void **)&s_shared_texture);
++        if (SUCCEEDED(hr))
++            hr = ID3D11Texture2D_QueryInterface(s_shared_texture, &IID_IDXGIKeyedMutex,
++                                                (void **)&s_shared_mutex);
++        if (SUCCEEDED(hr))
++            hr = ID3D11Device_CreateShaderResourceView(s_dev, (ID3D11Resource *)s_shared_texture,
++                                                       NULL, &s_shared_srv);
++        if (FAILED(hr)) {
++            fprintf(stderr, "  [D3D] shared frame open failed 0x%08lX; using CPU frames\n",
++                    (unsigned long)hr);
++            release_shared_resources();
++            InterlockedExchange(&s_shared_ready, 0);
++            return NULL;
++        }
++        s_shared_handle = handle;
++    }
++    hr = IDXGIKeyedMutex_AcquireSync(s_shared_mutex, 1, 0);
++    if (hr == WAIT_TIMEOUT) {
++        AcquireSRWLockExclusive(&s_shared_lock);
++        if (!s_pending_shared && InterlockedCompareExchange(&s_shared_ready, 0, 0)) {
++            s_pending_shared = handle;
++            s_pending_frame_id = pending_id;
++        }
++        ReleaseSRWLockExclusive(&s_shared_lock);
++        return NULL;
++    }
++    if (hr != S_OK) {
++        fprintf(stderr, "  [D3D] shared frame acquire failed 0x%08lX; using CPU frames\n",
++                (unsigned long)hr);
++        InterlockedExchange(&s_shared_ready, 0);
++        return NULL;
++    }
++    if (!allow_shared || frame_id != pending_id) {
++        hr = IDXGIKeyedMutex_ReleaseSync(s_shared_mutex, 0);
++        if (FAILED(hr)) {
++            fprintf(stderr, "  [D3D] shared frame release failed 0x%08lX; using CPU frames\n",
++                    (unsigned long)hr);
++            InterlockedExchange(&s_shared_ready, 0);
++        }
++        return NULL;
++    }
++    *held = 1;
++    return s_shared_srv;
++}
++
+ /* Returns 0 when nothing was shown: the window is occluded or the display
+  * is off, and Present does not wait for vsync then -- the caller must pace
+  * itself instead of spinning. The pixels are read before this returns. */
+-int gpu_present_frame(const uint32_t *pixels)
++int gpu_present_frame(const uint32_t *pixels, int allow_shared, uint64_t frame_id)
+ {
+     static const float black[4] = {0, 0, 0, 1};
+     D3D11_VIEWPORT vp;
++    ID3D11ShaderResourceView *frame, *none = NULL;
++    HRESULT present_hr, hr;
+     uint32_t cw, ch;
+     float sx, sy;
++    int held;
+ 
+     if (!s_rtv || !pixels)
+         return 0;
+@@ -190,8 +300,12 @@ int gpu_present_frame(const uint32_t *pixels)
+             return 0;
+         s_bw = cw; s_bh = ch;
+     }
+-    ID3D11DeviceContext_UpdateSubresource(s_ctx, (ID3D11Resource *)s_frame, 0, NULL,
+-                                          pixels, s_w * 4, 0);
++    frame = take_shared(allow_shared, frame_id, &held);
++    if (!frame) {
++        ID3D11DeviceContext_UpdateSubresource(s_ctx, (ID3D11Resource *)s_frame, 0, NULL,
++                                              pixels, s_w * 4, 0);
++        frame = s_srv;
++    }
+     ID3D11DeviceContext_OMSetRenderTargets(s_ctx, 1, &s_rtv, NULL);
+     ID3D11DeviceContext_ClearRenderTargetView(s_ctx, s_rtv, black);
+     /* The largest rectangle of the frame's shape that fits, centred. */
+@@ -207,16 +321,36 @@ int gpu_present_frame(const uint32_t *pixels)
+     ID3D11DeviceContext_IASetInputLayout(s_ctx, NULL);
+     ID3D11DeviceContext_VSSetShader(s_ctx, s_vs, NULL, 0);
+     ID3D11DeviceContext_PSSetShader(s_ctx, s_ps, NULL, 0);
+-    ID3D11DeviceContext_PSSetShaderResources(s_ctx, 0, 1, &s_srv);
++    ID3D11DeviceContext_PSSetShaderResources(s_ctx, 0, 1, &frame);
+     ID3D11DeviceContext_PSSetSamplers(s_ctx, 0, 1, &s_samp);
+     ID3D11DeviceContext_Draw(s_ctx, 3, 0);
+     /* Paced only when Present waited for the vblank: with RECOMP_PRESENT_VSYNC=0
+      * the caller keeps its own 16 ms sleep instead of spinning a core. */
+-    return IDXGISwapChain_Present(s_chain, (UINT)s_vsync, 0) == S_OK && s_vsync;
++    present_hr = IDXGISwapChain_Present(s_chain, (UINT)s_vsync, 0);
++    if (held) {
++        static int logged;
++        if (present_hr == S_OK && !logged++) {
++            fprintf(stderr, "  [D3D] shared GPU frame presented\n");
++        }
++        ID3D11DeviceContext_PSSetShaderResources(s_ctx, 0, 1, &none);
++        ID3D11DeviceContext_Flush(s_ctx);
++        hr = IDXGIKeyedMutex_ReleaseSync(s_shared_mutex, 0);
++        if (FAILED(hr)) {
++            fprintf(stderr, "  [D3D] shared frame release failed 0x%08lX; using CPU frames\n",
++                    (unsigned long)hr);
++            InterlockedExchange(&s_shared_ready, 0);
++        }
++    }
++    return present_hr == S_OK && s_vsync;
+ }
+ 
+ void gpu_present_shutdown(void)
+ {
++    InterlockedExchange(&s_shared_ready, 0);
++    AcquireSRWLockExclusive(&s_shared_lock);
++    s_pending_shared = NULL;
++    ReleaseSRWLockExclusive(&s_shared_lock);
++    release_shared_resources();
+     if (s_ps)    { ID3D11PixelShader_Release(s_ps);           s_ps = NULL; }
+     if (s_vs)    { ID3D11VertexShader_Release(s_vs);          s_vs = NULL; }
+     if (s_samp)  { ID3D11SamplerState_Release(s_samp);        s_samp = NULL; }
+diff --git a/src/video/gpu_present.h b/src/video/gpu_present.h
+index 4e14e91..2cf8893 100644
+--- a/src/video/gpu_present.h
++++ b/src/video/gpu_present.h
+@@ -7,9 +7,16 @@
+ 
+ int  gpu_present_enabled(void);                 /* RECOMP_D3D_PRESENT=1 */
+ int  gpu_present_init(HWND hwnd, uint32_t width, uint32_t height);
+-/* width*height B8G8R8A8; returns 1 only when the present waited for vsync
+- * (so the caller need not sleep), 0 when unpaced or nothing was shown. */
+-int  gpu_present_frame(const uint32_t *pixels);
++/* width*height B8G8R8A8; allow_shared must be 0 for a CPU-composited overlay
++ * or a pinned framebuffer. Returns 1 only when the present waited for vsync. */
++int  gpu_present_frame(const uint32_t *pixels, int allow_shared, uint64_t frame_id);
++/* One keyed-mutex texture may be submitted at a time. The producer owns key
++ * 0, copies the finished frame and releases key 1 before submitting. The
++ * presenter acquires key 1 and releases key 0 after using or discarding it. */
++int  gpu_present_shared_ready(uint32_t width, uint32_t height);
++uint64_t xbox_FramebufferWindowNextFrameId(void);
++int  gpu_present_submit_shared(HANDLE handle, uint32_t width, uint32_t height,
++                               uint64_t frame_id);
+ int  gpu_present_active(void);
+ void gpu_present_shutdown(void);
+ #endif

@@ -17,6 +17,14 @@ def entry(name):
     return SimpleNamespace(name=name)
 
 
+def test_build_command_batches_extra_targets():
+    command = build.cmake_build_command("Release", 4, ("bruteforce_d3d11_test", "bruteforce_present_test"))
+    assert command[command.index("--target"):] == [
+        "--target", "bruteforce", "bruteforce_d3d11_test", "bruteforce_present_test",
+    ]
+    assert "--target" not in build.cmake_build_command("Release", 4)
+
+
 def test_disc_paths_accept_safe_names():
     paths = build.validate_disc_paths([("", entry("default.xbe")), ("Data", entry("asset.bin"))])
     assert [parts for parts, _ in paths] == [["default.xbe"], ["Data", "asset.bin"]]

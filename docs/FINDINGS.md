@@ -635,6 +635,87 @@ resource and view approach is informed by Blood Wake; the comparison behavior
 follows xemu's published shader translation. These are emulator prior art,
 not proof of original-hardware equivalence.
 
+### Packed depth/stencil aliases and shared presentation
+
+The public [brute-force-2003-reloaded](https://github.com/kduong-dev/brute-force-2003-reloaded)
+project is a native Rust/Bevy recreation, not an xboxrecomp GPU backend. Its
+glare research describes a 320x240 bright pass, stencil thresholds, a
+160x120 blur and an additive composite, with approximations that are not
+proof of original-hardware behavior. A local captured bright pass samples
+`0x803DC000` as stage-1 format `0x41` after that allocation was used as a
+depth surface; a later census recorded 635 active-stage observations of
+`0x41`. This makes a packed depth/stencil alias worth testing but does not
+prove it causes the reported sun-facing bloom.
+
+The optional D3D11 path reconstructs the Xbox depth bytes and stencil alpha
+from GPU-owned D24S8 resources using a compute shader, caches the result
+until the depth surface changes, and snapshots a currently bound target.
+Exact address, dimensions, pitch, linear layout, format and initialized
+depth and stencil planes are required. Unsupported overlapping aliases
+are rejected, while non-alias `0x41` textures keep their original path.
+Guest writes, partially overlapping aliases and CPU stencil emulation
+remain unsupported.
+
+Patch 0024 and the optional renderer path hand one completed 32-bit frame
+to the window device through a keyed-mutex shared texture. Snapshot IDs
+avoid showing a pending old GPU frame over a newer CPU frame; PVIDEO and
+pinned framebuffers fall back to CPU-composited frames. Per-flip guest
+readback, screenshots, statistics and guest synchronization are retained.
+The one-slot bound applies to presentation snapshots, not all GPU work in
+flight, and copying and flushing the shared texture may add cost.
+
+During the alternating comparison, the user reported that the bloom had
+returned despite looking improved in most recent runs. A baseline capture
+with both new options disabled also shows very bright vegetation and sky,
+while another baseline frame and a candidate frame are darker. The camera
+angles are not frame-locked, so these captures do not identify the cause or
+prove that either new option fixes or causes the effect. The character is
+visible in the inspected gameplay captures, but not every frame was checked.
+
+The [six-run comparison](../analysis/bench/20261030-005113/summary.json)
+used generation `20261029-175500-dfadbdd9`, tree
+`a4489cd69600a1489edea98ac19cf20db242b6d2`, 12 raster threads, isolated
+saves, scripted movement, captures and a gated profiler. Each variant ran
+three times in alternating order without retries. Both used D3D11, GPU depth
+aliases, window clipping and async visibility; the candidate also enabled
+packed-stencil aliases and direct presentation.
+
+| Metric | Baseline mean (range) | Both options mean (range) |
+| --- | --- | --- |
+| Stationary rendered fps | 44.94 (44.19–46.18) | 40.18 (23.56–57.69) |
+| Movement flip fps | 68.87 (61.92–77.44) | 66.05 (40.53–87.77) |
+| Movement whole-frame pixel-change fps | 67.16 (60.22–76.16) | 64.00 (39.35–84.72) |
+| Estimated game-thread GPU-wait samples | 19.43% (17.42–23.34%) | 31.18% (19.72–51.55%) |
+
+These are not distinct world-frame measurements: the hashes include HUD
+changes, and captures and profiling perturb timing. The large variation,
+especially the slow final candidate run, gives no established performance
+gain and may indicate a regression. None of the 16,194 movement flips
+matched either known solid-black hash; other dark images and intentional
+fades are not classified. Periodic candidate logs recorded 8,929 packed
+alias conversions, 13,628 shared snapshots queued and 35,208 busy-slot
+events, excluding final partial intervals. Each candidate logged at least
+one shared GPU frame actually presented. These counters do not mean every
+flipped frame used direct presentation.
+
+The first stationary capture from each baseline/candidate pair differed in
+145,364–145,382 of 307,200 RGB pixels (47.32%) beyond 8/255, with markedly
+darker candidate backgrounds. Repeated baseline captures differed by only
+22 pixels, and repeated candidate captures by 44, at the same tolerance.
+The images show the same tutorial panel but are not proven frame-locked.
+Against the earlier CPU capture from a different framework tree, the first
+baseline differed in 22,666 pixels (7.38%) and the first candidate in
+147,760 (48.10%). The CPU renderer ignores stencil, so it is not an oracle
+for this glare path; neither that comparison nor the combined A/B isolates
+which new option caused the difference or establishes hardware fidelity.
+This material rendering difference remains unexplained and G4 is not met.
+
+One combined Release build and targeted pytest batch passed 132 tests,
+including WARP and hardware packed-alias, exact shared-pixel transfer,
+queue ordering, fallback, existing depth and clear, frame-statistics and
+build-tool fixtures. Synthetic success does not establish title-wide
+rendering fidelity, bloom correctness or playable world FPS.
+
 ### Rectangular clears and software-depth ownership
 
 A traced 640×480 world frame first clears the surface to `FF2674A1` and far
@@ -724,11 +805,13 @@ are sampled at level 0 only on both paths.
 ## Current validation boundary
 
 Generation `20261029-175500-dfadbdd9` built in Release against verified
-framework tree `8d57b4ceb02054f4921a88a7233e6722625c14ff`. Patch 0023
+framework tree `a4489cd69600a1489edea98ac19cf20db242b6d2`. Patch 0024
+applies independently to tree `8d57b4ceb02054f4921a88a7233e6722625c14ff`
+and reconstructs the current tree. Patch 0023
 applies independently to tree `f2e260a5a6845c2edc0b634e82265210e47fe759`
-and reconstructs the verified tree. Patch 0022 independently reconstructs
+and reconstructs the preceding tree. Patch 0022 independently reconstructs
 that preceding tree from `3472bac8e33c1758c801fb1ca65a346a170ad8e5`.
-The combined renderer, frame-statistics, window-clip and benchmark suites,
+An earlier combined batch of the renderer, frame-statistics, window-clip and benchmark suites,
 plus three targeted build-metadata tests, passed 94 tests with WARP and
 hardware devices. These include 16-frame partial-clear fixtures, CPU,
 draw-only, clear-only and complete backend ownership cases, and default

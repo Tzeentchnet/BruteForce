@@ -484,7 +484,14 @@ def latest_generation():
     return run_dir, gen_dir
 
 
-def build(config="Release", parallel=4):
+def cmake_build_command(config, parallel, extra_targets=()):
+    command = ["cmake", "--build", BUILD_DIR, "--config", config, "--parallel", str(parallel)]
+    if extra_targets:
+        command.extend(["--target", "bruteforce", *extra_targets])
+    return command
+
+
+def build(config="Release", parallel=4, extra_targets=()):
     toolkit = verify_toolkit()
     run_dir, gen_dir = latest_generation()
     if parallel < 1:
@@ -499,7 +506,7 @@ def build(config="Release", parallel=4):
     run_logged("configure", configure, ROOT, run_dir / "configure.log")
     run_logged(
         "build",
-        ["cmake", "--build", BUILD_DIR, "--config", config, "--parallel", str(parallel)],
+        cmake_build_command(config, parallel, extra_targets),
         ROOT,
         run_dir / f"build-{config}.log",
     )
@@ -595,6 +602,8 @@ def main(argv=None):
         command = commands.add_parser(name, help="build the native executable")
         command.add_argument("--config", choices=("Release", "Debug", "RelWithDebInfo"), default="Release")
         command.add_argument("--parallel", type=int, default=4)
+        command.add_argument("--extra-target", action="append", default=[],
+                             help="also build a named CMake target in the same build; repeatable")
         if name == "all":
             command.add_argument("--disc", required=True, help="path to the local XISO")
     run = commands.add_parser("run", help="run a previously built executable")
@@ -624,7 +633,7 @@ def main(argv=None):
         elif args.command == "generate":
             generate()
         elif args.command == "build":
-            build(args.config, args.parallel)
+            build(args.config, args.parallel, args.extra_target)
         elif args.command == "run":
             return run_game(
                 args.config, args.graphics, args.experimental_tutorial, args.experimental_audio,
@@ -634,7 +643,7 @@ def main(argv=None):
             setup_toolkit()
             extract_disc(args.disc)
             generate()
-            build(args.config, args.parallel)
+            build(args.config, args.parallel, args.extra_target)
     except (BuildError, ToolkitError, OSError, subprocess.CalledProcessError, json.JSONDecodeError) as exc:
         print(f"Error: {exc}", file=sys.stderr)
         return 1

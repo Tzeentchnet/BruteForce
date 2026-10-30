@@ -65,6 +65,12 @@ target_compile_definitions(bruteforce_present_test PRIVATE WIN32_LEAN_AND_MEAN N
 target_include_directories(bruteforce_present_test PRIVATE "${XBOXRECOMP_DIR}/src")
 target_link_libraries(bruteforce_present_test PRIVATE xboxrecomp)
 
+add_executable(bruteforce_gpu_shared_present_test EXCLUDE_FROM_ALL tests/gpu_shared_present_test.c)
+target_compile_definitions(bruteforce_gpu_shared_present_test PRIVATE
+    WIN32_LEAN_AND_MEAN NOMINMAX _CRT_SECURE_NO_WARNINGS)
+target_include_directories(bruteforce_gpu_shared_present_test PRIVATE "${XBOXRECOMP_DIR}/src")
+target_link_libraries(bruteforce_gpu_shared_present_test PRIVATE d3d11 dxgi dxguid d3dcompiler)
+
 add_executable(bruteforce_usb_test EXCLUDE_FROM_ALL tests/usb_test.c)
 target_compile_definitions(bruteforce_usb_test PRIVATE WIN32_LEAN_AND_MEAN NOMINMAX _CRT_SECURE_NO_WARNINGS)
 target_include_directories(bruteforce_usb_test PRIVATE "${XBOXRECOMP_DIR}/src")

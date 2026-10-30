@@ -42,7 +42,10 @@ def render(mode, output):
     ("cpu-vsh", "gpu-vsh"),          # vertex program on the GPU (draw_vsh)
     ("cpu", "gpu-software-texture"),
     ("cpu", "gpu-async"),
+    ("cpu", "gpu-direct-warp"),
     pytest.param("cpu", "gpu-hardware", marks=pytest.mark.skipif(
+        not HARDWARE, reason="set BRUTEFORCE_TEST_D3D11_HARDWARE=1 for a hardware device")),
+    pytest.param("cpu", "gpu-direct-hardware", marks=pytest.mark.skipif(
         not HARDWARE, reason="set BRUTEFORCE_TEST_D3D11_HARDWARE=1 for a hardware device")),
     pytest.param("cpu", "gpu-async-hardware", marks=pytest.mark.skipif(
         not HARDWARE, reason="set BRUTEFORCE_TEST_D3D11_HARDWARE=1 for a hardware device")),
@@ -294,6 +297,70 @@ def test_invalid_depth_texture_option_is_rejected(tmp_path):
     )
     assert result.returncode != 0
     assert "RECOMP_GPU_DEPTH_TEXTURE must be 0 or 1" in result.stderr
+
+
+@pytest.mark.parametrize("mode", [
+    "gpu-stencil-warp",
+    "gpu-stencil-vsh-warp",
+    pytest.param("gpu-stencil-hardware", marks=pytest.mark.skipif(
+        not HARDWARE, reason="set BRUTEFORCE_TEST_D3D11_HARDWARE=1 for a hardware device")),
+    pytest.param("gpu-stencil-vsh-hardware", marks=pytest.mark.skipif(
+        not HARDWARE, reason="set BRUTEFORCE_TEST_D3D11_HARDWARE=1 for a hardware device")),
+])
+def test_packed_depth_alias_tracks_gpu_stencil_and_all_color_channels(mode, tmp_path):
+    frames, result = render_frames(mode, tmp_path / "stencil.raw", 13)
+    assert "packed depth frames 13" in result.stdout
+    assert "depth texture alias rejected" in result.stderr
+    assert "has not been initialized from guest memory or a GPU depth clear" in result.stderr
+    if "vsh" in mode:
+        checks = re.findall(r"\[VSH-VERIFY\] (\d+) batches checked, (\d+) differ", result.stderr)
+        assert checks and int(checks[-1][0]) > 0
+        assert all(int(differ) == 0 for _, differ in checks), result.stderr
+    for y in range(2, SIZE - 2):
+        for x in range(2, SIZE - 2):
+            left = x < SIZE // 2
+            expected = [
+                (0x12, 0x34, 0x56, 0x00) if left else (0x89, 0xAB, 0xCD, 0x5F),
+                (0xC0, 0x40, 0x80, 0x7B),
+                (0xC0, 0x40, 0x80, 0x5F if left else 0x7B),
+                (0xC0, 0x40, 0x80, 0x5F if left else 0x7B),
+                (0xC0, 0x40, 0x80, 0x5F if left else 0x7B),
+                (0xC0, 0x40, 0x80, 0x33 if left else 0x7B),
+                (0xC0, 0x40, 0x80, 0x57),
+                (0x11, 0x22, 0x33, 0x44),
+                (0, 0, 0, 255),
+                (0, 0, 0, 255),
+                (0, 0, 0, 255),
+                (0x44, 0x55, 0x66, 0xFF),
+                (0x44, 0x55, 0x66, 0xFF),
+            ]
+            for frame, color in enumerate(expected):
+                actual = rgba_at(frames[frame], x, y)
+                assert max(abs(a - b) for a, b in zip(actual, color)) <= 1, (
+                    mode, frame, x, y, actual, color
+                )
+                if frame != 6:
+                    assert actual[3] == color[3], (mode, frame, x, y, actual, color)
+
+
+def test_invalid_stencil_alias_option_is_rejected(tmp_path):
+    env = {key: value for key, value in os.environ.items() if not key.startswith("RECOMP_")}
+    result = subprocess.run(
+        [D3D11_EXE, str(XBE), "gpu-stencil-invalid", str(tmp_path / "unused.raw")],
+        capture_output=True, text=True, check=False, timeout=30, env=env,
+    )
+    assert result.returncode != 0
+    assert "RECOMP_GPU_STENCIL_ALIAS must be 0 or 1" in result.stderr
+
+
+def test_invalid_direct_presentation_option_is_rejected(tmp_path):
+    env = {key: value for key, value in os.environ.items() if not key.startswith("RECOMP_")}
+    result = subprocess.run(
+        [D3D11_EXE, str(XBE), "gpu-direct-invalid", str(tmp_path / "unused.raw")],
+        capture_output=True, text=True, check=False, timeout=30, env=env,
+    )
+    assert result.returncode != 0
+    assert "RECOMP_GPU_DIRECT_PRESENT must be 0 or 1" in result.stderr
 
 
 @pytest.mark.parametrize("mode", ["guard", "guard-invalid"])

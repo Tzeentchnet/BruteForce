@@ -49,10 +49,12 @@ systems have not yet been established.
 At a high level, the current host validates and maps `default.xbe`, initializes
 the framework's kernel and guest paths, and enters the statically recompiled
 guest. The guest opens disc bundles and cached resources; with graphics
-enabled, its commands are handled by the experimental CPU pushbuffer executor
-and presented with D3D11. USB support is optional. This describes the present
-recompilation environment, not the original Xbox's complete engine design. See
-[FINDINGS.md](./FINDINGS.md) for observed guest entry points and limitations.
+enabled, the pushbuffer executor uses the CPU rasterizer by default or an
+opt-in D3D11 GPU backend. The window can use D3D11 presentation, including
+an experimental shared-GPU path that retains guest readback. USB support is
+optional. This describes the present recompilation environment, not the
+original Xbox's complete engine design. See [FINDINGS.md](./FINDINGS.md)
+for observed guest entry points and limitations.
 
 ## Packaging and runtime paths
 

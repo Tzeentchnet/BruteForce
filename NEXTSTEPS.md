@@ -2,8 +2,8 @@
 
 The performance plan is in [docs/PERFPLAN.md](docs/PERFPLAN.md), measured
 results are in [docs/FINDINGS.md](docs/FINDINGS.md), and framework work is
-tracked in [docs/UPSTREAM.md](docs/UPSTREAM.md). State as of 2026-10-29:
-framework tree `8d57b4ceb02054f4921a88a7233e6722625c14ff`, generation
+tracked in [docs/UPSTREAM.md](docs/UPSTREAM.md). State as of 2026-10-30:
+framework tree `a4489cd69600a1489edea98ac19cf20db242b6d2`, generation
 `20261029-175500-dfadbdd9`.
 
 ## Current boundary
@@ -68,7 +68,30 @@ framework tree `8d57b4ceb02054f4921a88a7233e6722625c14ff`, generation
   or general character-visibility guarantee.
 - User captures show very bright, bloomed vegetation and sky when facing
   toward the sun, and a darker view after turning. The cause remains open;
-  no global brightness or gamma adjustment was applied.
+  no global brightness or gamma adjustment was applied. The user reported
+  that bloom returned during the latest comparison; captured baseline
+  frames also show heavily bloomed vegetation and sky.
+- A traced bright pass samples the prior GPU depth allocation as texture
+  format `0x41`. The opt-in `RECOMP_GPU_STENCIL_ALIAS=1` path reconstructs
+  its packed depth and stencil on the GPU; its relevance to bloom is a
+  hypothesis, not a confirmed diagnosis. The CPU rasterizer ignores stencil.
+- The opt-in `RECOMP_GPU_DIRECT_PRESENT=1` path presents a finished GPU
+  snapshot through a one-slot keyed-mutex handoff, with CPU fallback for
+  pinned frames and PVIDEO. It still performs per-flip guest readback and
+  does not limit all GPU work in flight. WARP and hardware synthetic tests
+  cover the alias, pixel transfer, queue ordering and fallback.
+- In the latest alternating comparison, three baseline runs averaged 44.94
+  stationary rendered fps and three runs with both new options averaged
+  40.18, with the latter ranging from 23.56 to 57.69. Movement whole-frame
+  pixel-change rates averaged 67.16 and 64.00 fps, respectively, but
+  include HUD changes and do not establish distinct world FPS. Both paths
+  had zero matches to the two known black hashes. These results do not
+  establish a speedup.
+- The new combined path made the stationary background markedly darker.
+  Baseline/candidate captures differed in about 47.32% of pixels by more
+  than 8/255 in all three pairs. The panel state is content-matched but not
+  frame-locked, the options were enabled together, and no trusted reference
+  established which brightness is correct. G4 remains unmet.
 - A null-backend surface-guard run aborted on the GPU semaphore after a
   guarded range covered its page. A new explicitly reported page exclusion
   permitted a completed movement diagnostic, but leaves that page unobserved.
@@ -93,8 +116,9 @@ semaphore, report, and flip ordering.
   `BRUTEFORCE_SURFACE_GUARD`, covering stationary and movement in one scripted
   run. Account for excluded pages and the diagnostic's other blind spots;
   a partial run cannot prove that no guest readers exist. Keep output local.
-- Implement direct D3D11 presentation, bounded frames in flight, and
-  on-demand readback as one coherent milestone. Retain readback for guest
+- Extend the opt-in shared GPU presenter into a fully GPU-authoritative
+  pipeline: establish guest surface readers, implement safe on-demand
+  readback and bound all GPU work in flight. Retain readback for guest
   readers, screenshots, frame statistics, and other consumers until they
   have equivalent GPU-aware paths. Do not release fences before their inputs
   are consumed or skip a flush or flip hold.
@@ -105,6 +129,11 @@ semaphore, report, and flip ordering.
   dark region is expected. Compare the bright sun-facing view, the turned
   view and the glow composite against a trusted reference; investigate any
   recurring black intervals or missing character without a global gamma hack.
+- Isolate packed-stencil aliasing from shared presentation and explain the
+  much darker stationary image. Inspect the slow candidate's high sampled
+  GPU-wait share, the frequent busy shared slot, and repeated packed-depth
+  conversions; only avoid conversion when depth and stencil writes are
+  correctly tracked.
 - Make the movement gate measure visible world changes rather than HUD or
   black-frame transitions. The harness now reports two known solid-black
   hashes, but other dark or black images and intentional fades still need
@@ -122,9 +151,10 @@ semaphore, report, and flip ordering.
   segment-at-a-time walking where their ordering can be preserved. Keep
   timing changes behind separate switches, and compare the combined result
   once; isolate switches only to diagnose regressions.
-- Check texture-cache invalidation and palette lengths other than 256 entries,
-  cube mip layouts, device-loss handling, and more drivers before proposing
-  the generic backend changes upstream.
+- Check texture-cache invalidation, palette lengths other than 256 entries,
+  device-loss handling, and more drivers before proposing the generic
+  backend changes upstream. Mipmap and LOD-transition enhancements are
+  deferred by user direction unless needed to preserve existing behavior.
 
 ## 3. Remaining renderer and compatibility work
 

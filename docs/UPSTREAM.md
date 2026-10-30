@@ -38,7 +38,7 @@ PR.
 These are existing upstream pull requests, not new proposals. Their pinned
 commits are applied on top of xboxrecomp base
 `f0f8a461496a4f23d9b0aeaa284b8d70ba7ab82b`; the resulting selected-commit and
-local-patch tree is verified as `8d57b4ceb02054f4921a88a7233e6722625c14ff`.
+local-patch tree is verified as `a4489cd69600a1489edea98ac19cf20db242b6d2`.
 The exact commit list and application order are in
 [toolkit.py](../tools/toolkit.py).
 
@@ -352,14 +352,25 @@ own GPU back end, an extended interface for it, and its own pacing fixes.
     the CPU, and a GPU back end must read its surface back into guest memory
     every flip to feed it. Blood Wake measured about 4 ms per flip for that
     wait.
-    *Change:* let a registered back end take over the framebuffer window's
-    swap chain (`fb_present.c` hands over the window and stops painting),
-    and make per-flip readback opt-in for dumps, diagnostics, or titles
-    whose CPU reads rendered surfaces. Bound the number of GPU frames in
-    flight.
+    *Change:* the opt-in project back end publishes a 32-bit D3D11 shared
+    texture to the existing window device through
+    [0024-gpu-shared-presentation.patch](../patches/xboxrecomp/0024-gpu-shared-presentation.patch).
+    A keyed mutex and one pending slot bound snapshots; frame IDs prevent a
+    stale GPU image from replacing a newer CPU snapshot. Pinned framebuffers
+    and PVIDEO overlays drain the slot and use the CPU frame. The producer
+    retains guest readback on every flip; no general frame-in-flight bound
+    or on-demand readback is implemented.
+    *Tests:* WARP and hardware fixtures check exact shared pixels, busy,
+    future and stale slots, pinned and overlay fallback, and snapshot
+    consistency. Existing guest readback fixtures still pass.
     *Overlap:* #285 covers ordering the readback against snapshots;
     [#215](https://github.com/sp00nznet/xboxrecomp/pull/215) (merged) added
-    the D3D11 presenter.
+    the D3D11 presenter and #220 covers PVIDEO work (checked 2026-10-30).
+    *Before filing:* investigate the variable combined title performance
+    and frequent busy slots; test device loss, other drivers and window
+    lifecycles; establish guest readers before eliminating readback; and
+    reconcile the presentation interface with #184 and #285.
+    *Status:* experimental local framework patch and project back end.
 
 16. **Let the NV2A thread sleep when idle.**
     *Problem:* the ack thread in `xbox_memory_layout.c` ends each pass with
@@ -522,14 +533,19 @@ own GPU back end, an extended interface for it, and its own pacing fixes.
     as shader resources.
     *Evidence:* both variants of the 2026-10-29 movement campaign repeatedly
     logged failed `0x2E` decodes. Whether those reads explain a visible
-    rendering difference has not been determined.
+    rendering difference has not been determined. A bright pass also binds
+    a tracked GPU depth allocation as a `0x41` texture; its effect on glare
+    is not yet established.
     *Change:* the opt-in project renderer can sample an exact matching
     GPU-created linear D24S8 surface through an R24 view. New eligible surfaces
     are initialized from guest memory, converting the Z24S8 field order;
     full-surface GPU depth clears also initialize them. Recreated surfaces
     cannot be reseeded from stale guest data and require a full-surface depth
     clear. When bound for depth writes, a separate snapshot avoids simultaneous
-    DSV/SRV binding.
+    DSV/SRV binding. An independent opt-in reconstructs the three packed
+    depth bytes and stencil alpha through a GPU compute shader for exact
+    `0x41` overlaps, requiring both planes to be initialized. Ordinary
+    `0x41` textures are unchanged.
     PROJECT2D and PROJECT3D shadow comparisons follow
     [xemu's shader translation](https://github.com/xemu-project/xemu/blob/dc10b4cea96e403d30c17ed53551fdaf023bc17f/hw/xbox/nv2a/pgraph/glsl/psh.c).
     Guest writes, partial aliases, other formats and CPU reference decoding
@@ -538,13 +554,20 @@ own GPU back end, an extended interface for it, and its own pacing fixes.
     and at the reference depth, a bound depth target that is written between
     draws, an unbound target, base draws, and rejected pitch, size, offset,
     mip, cube, format, swizzled layout, recreated depth and stage-mode cases,
-    plus guest depth and stencil initialization without a GPU clear.
+    plus guest depth and stencil initialization without a GPU clear. Packed
+    alias fixtures cover exact stencil keys, filtering, GPU stencil writes,
+    initialization, invalid overlaps and base/vertex-program paths.
     *Overlap:* Blood Wake's optional ambient-occlusion path in
     `bw_d3d11.c` creates an `R24G8_TYPELESS` resource with D24S8 and R24
-    views. It is not a guest-depth-alias implementation. Recheck #184 and
-    emulator implementations before preparing a generic contribution.
-    *Before filing:* preserve GPU contents across surface recreation, track
-    guest writes and validate matched gameplay against a trusted reference.
+    views. It is not a guest-depth-alias implementation. The
+    [brute-force-2003-reloaded recreation](https://github.com/kduong-dev/brute-force-2003-reloaded)
+    describes a stencil-aware glare pipeline but is not an xboxrecomp
+    renderer or an original-hardware oracle. Recheck #184 and emulator
+    implementations before preparing a generic contribution.
+    *Before filing:* isolate the alias from presentation, explain the much
+    darker stationary image and repeated conversions, preserve GPU contents
+    across surface recreation, track guest writes and validate matched
+    gameplay against a trusted reference.
     *Status:* experimental project-only implementation.
 
 26. **Pass window clips to capable GPU back ends.**

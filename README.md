@@ -28,6 +28,9 @@ comparison reported movement pixel-change rates of 25.2 and 35.2 fps, but
 58.9–60.2% of its movement flips matched a solid-black frame. Those rates do
 not measure playable world fps. A later clear fix preserved the character in
 two captured views in one diagnostic; sun-facing bloom remains unexplained.
+An experimental packed-stencil and shared-presentation comparison produced
+much darker stationary backgrounds but did not establish a performance gain
+or original-hardware correctness.
 One earlier boot stalled and needed a retry. The newest GPU-vertex tutorial
 capture is close to the CPU reference but still has unexplained differences;
 an older CPU-vertex GPU capture differs substantially. Rendering correctness
@@ -81,6 +84,10 @@ python tools\build.py generate
 python tools\build.py build --config Release --parallel 4
 python tools\build.py run --config Release --experimental-tutorial
 ```
+
+To build the game and selected native fixtures in one build, repeat
+`--extra-target`, for example `--extra-target bruteforce_d3d11_test
+--extra-target bruteforce_gpu_shared_present_test`.
 
 `setup` installs the pinned framework and fixes in `.deps\xboxrecomp`. It
 refuses to overwrite a different or modified checkout. `extract` verifies the
@@ -201,6 +208,22 @@ other depth formats, and CPU reference decoding are not supported. Draws
 using rejected depth aliases or stage modes are skipped with a diagnostic.
 The option is off by default and has not established original-hardware
 equivalence. Per-flip guest readback and synchronization are unchanged.
+
+`RECOMP_GPU_STENCIL_ALIAS=1` separately enables experimental packed D24S8
+sampling when a `0x41` texture exactly aliases a tracked GPU depth surface.
+The GPU reconstructs the depth bytes and stencil alpha into a filterable
+texture. Depth and stencil must each be initialized; unsupported overlaps
+are rejected rather than read from stale guest memory. Ordinary `0x41`
+textures are unchanged. Guest writes and partially overlapping aliases
+remain unsupported, and the effect on sun-facing bloom is not established.
+
+`RECOMP_GPU_DIRECT_PRESENT=1` lets the D3D11 renderer hand a finished
+32-bit GPU surface to the D3D11 window presenter through a bounded shared
+texture. Pinned framebuffers and PVIDEO overlays use the CPU-composited
+frame instead. Guest readback still happens on every flip for guest-visible
+memory, frame statistics and captures, so this does not remove that stall
+or bound all GPU work in flight. Both options are off by default.
+
 The D3D11 renderer respects partial color, depth and stencil clear rectangles
 instead of clearing the whole target for each strip. When a registered backend
 owns both drawing and clearing, the executor no longer redundantly clears its
@@ -405,7 +428,7 @@ cmake --build build\smoke --config Release --parallel 4 --target `
   bruteforce_crash_test bruteforce_memory_stats_test `
   bruteforce_pushbuffer_test bruteforce_pgraph_test bruteforce_window_clip_test `
   bruteforce_color_unpack_test bruteforce_texture_math_test `
-  bruteforce_frame_stats_test bruteforce_d3d11_test
+  bruteforce_frame_stats_test bruteforce_d3d11_test bruteforce_gpu_shared_present_test
 $env:BRUTEFORCE_TEST_HOST = "$PWD\build\smoke\Release\bruteforce.exe"
 $env:BRUTEFORCE_TEST_FENCE = "$PWD\build\smoke\Release\bruteforce_fence_test.exe"
 $env:BRUTEFORCE_TEST_READ_TRACE = "$PWD\build\smoke\Release\bruteforce_read_trace_test.exe"
@@ -421,6 +444,7 @@ $env:BRUTEFORCE_TEST_COLOR_UNPACK = "$PWD\build\smoke\Release\bruteforce_color_u
 $env:BRUTEFORCE_TEST_TEXTURE_MATH = "$PWD\build\smoke\Release\bruteforce_texture_math_test.exe"
 $env:BRUTEFORCE_TEST_FRAME_STATS = "$PWD\build\smoke\Release\bruteforce_frame_stats_test.exe"
 $env:BRUTEFORCE_TEST_D3D11 = "$PWD\build\smoke\Release\bruteforce_d3d11_test.exe"
+$env:BRUTEFORCE_TEST_GPU_SHARED_PRESENT = "$PWD\build\smoke\Release\bruteforce_gpu_shared_present_test.exe"
 python -m pytest -q tests
 ```
 

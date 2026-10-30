@@ -507,6 +507,130 @@ static void texture_depth(uint32_t va, unsigned width, unsigned height, unsigned
     method(0x1B14, 1u << 24 | 1u << 16);
 }
 
+static void texture_packed_depth(uint32_t va, unsigned width, unsigned height, unsigned pitch)
+{
+    texture_depth(va, width, height, pitch);
+    method(0x1B04, 2u << 4 | 0x41u << 8 | 1u << 16);
+}
+
+static int scene_stencil_texture(const char *out_path, int program)
+{
+    static const Pos full[4] = {{0, 0, 0, 1}, {64, 0, 0, 1},
+                                 {64, 64, 0, 1}, {0, 64, 0, 1}};
+    static const Pos left[4] = {{0, 0, 0, 1}, {32, 0, 0, 1},
+                                 {32, 64, 0, 1}, {0, 64, 0, 1}};
+    static const uint32_t white[4] = {0xFFFFFFFFu, 0xFFFFFFFFu, 0xFFFFFFFFu, 0xFFFFFFFFu};
+    static const float uv[4][2] = {{0, 0}, {64, 0}, {64, 64}, {0, 64}};
+    static const float middle[4][2] = {{32, 32}, {32, 32}, {32, 32}, {32, 32}};
+    uint32_t b = xbox_ContiguousAlloc(B_SIZE * B_SIZE * 4, 4096);
+    uint32_t z = xbox_ContiguousAlloc(B_SIZE * B_SIZE * 4, 4096);
+    uint32_t other_z = xbox_ContiguousAlloc(B_SIZE * B_SIZE * 4, 4096);
+    uint32_t growth_z = xbox_ContiguousAlloc(B_SIZE * B_SIZE * 4, 4096);
+    uint32_t small_b = xbox_ContiguousAlloc(A_SIZE * A_SIZE * 4, 4096);
+    uint32_t ordinary = xbox_ContiguousAlloc(B_SIZE * B_SIZE * 4, 4096);
+    uint32_t vb = xbox_ContiguousAlloc(0x1000, 4096);
+    FILE *f = fopen(out_path, "wb");
+    unsigned x, y;
+
+    REQUIRE(b && z && other_z && growth_z && small_b && ordinary && vb && f,
+            "initialize packed depth fixture");
+    for (y = 0; y < B_SIZE; ++y)
+        for (x = 0; x < B_SIZE; ++x) {
+            ((uint32_t *)guest(z))[y * B_SIZE + x] =
+                x < B_SIZE / 2 ? 0x12345600u : 0x89ABCD5Fu;
+            ((uint32_t *)guest(ordinary))[y * B_SIZE + x] = 0x11223344u;
+        }
+    identity_matrix();
+    if (program)
+        load_program();
+    method(0x030C, 0);
+    method(0x035C, 0);
+    surface(b, B_SIZE, z);
+    texture_packed_depth(z, B_SIZE, B_SIZE, B_SIZE * 4);
+    combiners(1);
+    clear(0xF0, 0xFF000000u, 0);
+    draw(8, full, white, uv, 4, vb);
+    REQUIRE(save_frame(f, b), "save guest-seeded packed depth frame");
+
+    clear(3, 0, 0xC040807Bu);
+    clear(0xF0, 0xFF000000u, 0);
+    draw(8, full, white, uv, 4, vb);
+    REQUIRE(save_frame(f, b), "save GPU-cleared packed depth frame");
+
+    clear_rect(0, 0, 31, 63);
+    clear(2, 0, 0x0000005Fu);
+    clear_rect(0, 0, 63, 63);
+    clear(0xF0, 0xFF000000u, 0);
+    draw(8, full, white, uv, 4, vb);
+    REQUIRE(save_frame(f, b), "save partial stencil clear frame");
+
+    surface(b, B_SIZE, other_z);
+    clear(0xF3, 0xFF000000u, 0x444444FFu);
+    draw(8, full, white, uv, 4, vb);
+    REQUIRE(save_frame(f, b), "save unbound packed depth frame");
+    clear(0xF0, 0xFF000000u, 0);
+    draw(8, full, white, uv, 4, vb);
+    REQUIRE(save_frame(f, b), "save reused packed depth frame");
+
+    surface(b, B_SIZE, z);
+    combiners(0);
+    method(0x032C, 1);
+    method(0x0360, 0xFF);
+    method(0x0364, 0x207);
+    method(0x0368, 0x33);
+    method(0x036C, 0xFF);
+    method(0x0370, 0x1E00);
+    method(0x0374, 0x1E00);
+    method(0x0378, 0x1E01);
+    draw(8, left, white, uv, 4, vb);
+    method(0x032C, 0);
+    surface(b, B_SIZE, other_z);
+    combiners(1);
+    clear(0xF0, 0xFF000000u, 0);
+    draw(8, full, white, uv, 4, vb);
+    REQUIRE(save_frame(f, b), "save GPU-written stencil frame");
+
+    method(0x1B14, 2u << 24 | 2u << 16);
+    clear(0xF0, 0xFF000000u, 0);
+    draw(8, full, white, middle, 4, vb);
+    REQUIRE(save_frame(f, b), "save filtered packed depth frame");
+
+    texture_packed_depth(ordinary, B_SIZE, B_SIZE, B_SIZE * 4);
+    clear(0xF0, 0xFF000000u, 0);
+    draw(8, full, white, uv, 4, vb);
+    REQUIRE(save_frame(f, b), "save ordinary 0x41 texture frame");
+
+    texture_packed_depth(z + 4, B_SIZE, B_SIZE, B_SIZE * 4);
+    clear(0xF0, 0xFF000000u, 0);
+    draw(8, full, white, uv, 4, vb);
+    REQUIRE(save_frame(f, b), "save overlapping packed depth rejection frame");
+    texture_packed_depth(z, B_SIZE, B_SIZE, B_SIZE * 4 + 4);
+    clear(0xF0, 0xFF000000u, 0);
+    draw(8, full, white, uv, 4, vb);
+    REQUIRE(save_frame(f, b), "save packed depth pitch rejection frame");
+
+    surface(small_b, A_SIZE, growth_z);
+    clear(0xF3, 0xFF000000u, 0xAABBCCDDu);
+    surface(b, B_SIZE, growth_z);
+    clear(1, 0, 0x44556600u);
+    texture_packed_depth(growth_z, B_SIZE, B_SIZE, B_SIZE * 4);
+    clear(0xF0, 0xFF000000u, 0);
+    draw(8, full, white, uv, 4, vb);
+    REQUIRE(save_frame(f, b), "save uninitialized stencil rejection frame");
+    clear(2, 0, 0x000000FFu);
+    draw(8, full, white, uv, 4, vb);
+    REQUIRE(save_frame(f, b), "save separately initialized depth and stencil frame");
+
+    if (program)
+        method(0x1E94, 0);
+    clear(0xF0, 0xFF000000u, 0);
+    screen_quad(0xFFFFFFFFu);
+    REQUIRE(save_frame(f, b), "save base packed depth frame");
+    REQUIRE(fclose(f) == 0, "close packed depth frames");
+    puts("packed depth frames 13");
+    return 1;
+}
+
 static int scene_depth_texture(const char *out_path, int program)
 {
     static const uint32_t depths[3] = {0xC0000000u, 0x40000000u, 0x80000000u};
@@ -1044,6 +1168,10 @@ int main(int argc, char **argv)
             _putenv_s("RECOMP_GPU_TEX_DECODE", strstr(argv[2], "software-texture") ? "0" : "1") != 0 ||
             (strstr(argv[2], "depth") &&
              _putenv_s("RECOMP_GPU_DEPTH_TEXTURE", strstr(argv[2], "invalid") ? "invalid" : "1") != 0) ||
+            (strstr(argv[2], "stencil") &&
+             _putenv_s("RECOMP_GPU_STENCIL_ALIAS", strstr(argv[2], "invalid") ? "invalid" : "1") != 0) ||
+            (strstr(argv[2], "direct") &&
+             _putenv_s("RECOMP_GPU_DIRECT_PRESENT", strstr(argv[2], "invalid") ? "invalid" : "1") != 0) ||
             (strstr(argv[2], "bc") && _putenv_s("RECOMP_GPU_TEXLOG", "1") != 0) ||
             _putenv_s("RECOMP_GPU_VSH_SYNC", "1") != 0 ||
             _putenv_s("RECOMP_GPU_VSH_VERIFY", "1") != 0 || !bruteforce_d3d11_install())
@@ -1054,6 +1182,7 @@ int main(int argc, char **argv)
     if (strstr(argv[2], "clear") ? !scene_clear_rect(argv[3], strstr(argv[2], "vsh") != NULL,
                                                      strstr(argv[2], "vertical") != NULL) :
         strstr(argv[2], "clip") ? !scene_window_clip(argv[3], strstr(argv[2], "vsh") != NULL) :
+        strstr(argv[2], "stencil") ? !scene_stencil_texture(argv[3], strstr(argv[2], "vsh") != NULL) :
         strstr(argv[2], "depth") ? !scene_depth_texture(argv[3], strstr(argv[2], "vsh") != NULL) :
         strstr(argv[2], "bc") ? !scene_bc(argv[3]) :
         !scene(argv[3], strstr(argv[2], "vsh") != NULL, strncmp(argv[2], "gpu", 3) == 0))

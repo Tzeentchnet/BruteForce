@@ -1,7 +1,9 @@
 # In-game performance plan
 
-The tutorial currently presents roughly 3.5–4 flips per second on the
-reference machine. Getting the title to its native frame rate is the gate for
+The CPU reference path previously presented roughly 3.5–4 tutorial flips
+per second on the reference machine. Experimental GPU runs are much faster
+but do not yet establish distinct world FPS or rendering correctness.
+Getting the title to its native frame rate is the gate for
 most other work: input, audio, HUD, and rendering investigations all slow
 down when each experiment runs at a tenth of real time. This plan replaces
 the CPU rendering path rather than tuning it further. Brute Force-specific
@@ -17,7 +19,7 @@ licensed, so they can be adapted here with attribution in
 `THIRD_PARTY_NOTICES.md`. Its title-specific hooks, addresses, and Remastered
 features do not apply and must not be copied.
 
-## Status (2026-10-29)
+## Status (2026-10-30)
 
 Measurements are in [FINDINGS.md](./FINDINGS.md#performance-plan-phase-0-and-the-first-gpu-path-results);
 next steps are in [NEXTSTEPS.md](../NEXTSTEPS.md).
@@ -27,9 +29,9 @@ next steps are in [NEXTSTEPS.md](../NEXTSTEPS.md).
 | 0 | Mostly done. Harness (`tools/bench.py`), frame statistics (patch 0014), census and ceiling probes (0015), profiler (`src/profile.c`), null back end and surface guard (`src/gpu/null_backend.c`) exist and were run. A guard diagnostic aborted on a protected semaphore page, so the surface-read answer remains open. Missing: the native-rate measurement and upstream PR measurements (#231, #272, #273). |
 | 1 | Implemented, G4 not met. D3D11 back end (`src/gpu/`, `RECOMP_GPU=d3d11`) with the extended interface (0016). Synthetic WARP and hardware fixtures match apart from listed edge pixels. The new GPU-vertex tutorial capture differs from the CPU reference in 0.52% of pixels beyond 8/255; an older CPU-vertex capture differs substantially. |
 | 2 | Implemented (0017, on by default with the D3D11 back end). Stationary hold 3.20 → 30.41 rendered fps (3 runs each, alternating). Verification mode exists; not yet run on the title. |
-| 3 | Partial. Async visibility reports (0018) pass WARP and hardware fixtures and were exercised in the title, but remain opt-in. Direct presentation and on-demand readback are not implemented; per-flip readback previously measured 0.2–0.7 ms. |
+| 3 | Partial. Async visibility reports (0018) and shared GPU presentation (0024) are opt-in. Shared presentation bounds one pending snapshot and retains synchronous per-flip guest readback; on-demand readback and a limit on all GPU frames in flight are not implemented. The combined alias/presentation campaign did not establish a speedup. |
 | 4 | Not started. Preserve flush, semaphore, and flip ordering. |
-| 5 | In progress. GPU compute decodes common textures; stale pitches no longer force compressed textures through the CPU decoder. Exact D24 surface aliases and GPU window clipping are experimental opt-ins. D3D11 now honors partial clear rectangles, and patch 0022 removes redundant software depth clears when a backend owns drawing and clearing. Patch 0019 cached hot `getenv` calls. |
+| 5 | In progress. GPU compute decodes common textures; exact D24 and packed D24S8/stencil surface aliases and GPU window clipping are experimental opt-ins. The packed-alias/presentation candidate substantially darkened matched stationary backgrounds; G4 remains unmet. D3D11 honors partial clear rectangles, and patch 0022 removes redundant software depth clears when a backend owns drawing and clearing. Patch 0019 cached hot `getenv` calls. |
 
 Scenes are defined by frames and content, not wall-clock windows, because the
 tutorial's stationary hold appears to be a frame count. The stationary
@@ -102,19 +104,22 @@ several phases without waiting for a separate benchmark between them.
   KickOff acknowledgements are all paced by CPU rendering time.
 - The NV2A thread loop ends each pass with `Sleep(0)`, so it holds a core even
   when idle.
-- Each flip converts guest memory to a presentation frame on the CPU before
-  `gpu_present.c` uploads it.
+- The default presenter converts guest memory to a CPU frame before
+  `gpu_present.c` uploads it. The optional shared path can avoid that upload,
+  but still maintains the CPU snapshot and synchronous guest readback.
 
 **Hypothesis:** the frame time is roughly the sum of CPU vertex work and CPU
 rasterization for the frame, and the game thread mostly idles behind it. A
 null-backend probe (Phase 0) tests this directly.
 
-**Latest GPU milestone:** the combined texture and visibility changes reduced
+**Earlier GPU milestone:** the combined texture and visibility changes reduced
 estimated game-thread GPU wait from 33.5% to 24.7% of movement samples.
 `NtQueryVirtualMemory` remains prominent on the game thread, and texture
 hashing remains visible on the NV2A thread. Those profiles include the
 black-frame intervals and do not establish the cost during valid world
-rendering. See the run ranges and limitations in FINDINGS.
+rendering. The later packed-stencil/shared-presentation comparison was highly
+variable and did not establish a speedup. See FINDINGS for the run ranges and
+limitations.
 
 **Supporting evidence from Blood Wake:** its D3D11 backend replaced the same
 CPU rasterizer. Its source notes that the vertex-program interpreter alone
@@ -300,11 +305,12 @@ gameplay, apart from constant-writing programs. G4 still holds.
 
 ## Phase 3: remove synchronous round trips
 
-1. **Present directly from the GPU.** Create a flip-model swap chain on the
-   framebuffer window and draw the flipped render target into it, letterboxed
-   and filtered on the GPU. Disable the GDI and CPU conversion path when this
-   is active. This needs a small carried change to `fb_present.c` to hand
-   over the window, as Blood Wake does.
+1. **Present directly from the GPU.** The opt-in shared-texture path copies
+   the finished 32-bit target to the existing D3D11 window device, with one
+   pending snapshot and CPU fallback for pinned frames or video overlays.
+   The frame ID prevents older GPU snapshots replacing newer CPU snapshots.
+   Guest readback and CPU snapshot creation remain; this is not yet a
+   fully GPU-authoritative presentation pipeline.
 2. **Readback only on demand.** Skip copying each flipped frame back into
    guest memory unless Phase 0 found a guest reader, or a dump or diagnostic
    requests it. Blood Wake measured about 4 ms per flip for this copy. If the
@@ -379,6 +385,9 @@ phases when it is on the critical path:
   submitted fences complete before their inputs are consumed. FINDINGS
   explains why these are invalid.
 - Direct3D 12, which is deferred.
+- New mipmap and LOD-transition work is generally deferred by user direction;
+  preserve existing behavior and address a specific correctness need if one
+  is established.
 - Higher internal resolution, MSAA, widescreen, and frame interpolation.
   The Phase 1–3 architecture is what makes these possible later, and G5
   checks the headroom, but none of them are performance work.

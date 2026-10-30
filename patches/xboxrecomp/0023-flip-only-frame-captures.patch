@@ -1,0 +1,39 @@
+diff --git a/src/kernel/nv2a_pb_exec.c b/src/kernel/nv2a_pb_exec.c
+index 1eeb495..f4888f0 100644
+--- a/src/kernel/nv2a_pb_exec.c
++++ b/src/kernel/nv2a_pb_exec.c
+@@ -720,6 +720,16 @@ static uint32_t surface_bpp(void)
+  * the sequence. */
+ static int s_flip_dumping;
+ 
++static int flip_dump_only(void)
++{
++    static int enabled = -1;
++    if (enabled < 0) {
++        const char *value = getenv("RECOMP_FB_DUMP_FLIPS_ONLY");
++        enabled = value && *value && strcmp(value, "0") != 0;
++    }
++    return enabled;
++}
++
+ static void dump_surface_bmp(void)
+ {
+     const char *prefix = getenv("RECOMP_FB_DUMP");
+@@ -3942,7 +3952,7 @@ static void raster_batch(void)
+      * triangles went down correctly just before it. A few frames that actually
+      * contain geometry are worth more than any number of clears. */
+     if (s_gpu.tris_drawn != before && s_drawn_dumps < FB_DUMP_AFTER_DRAW
+-        && !s_flip_dumping) {
++        && !s_flip_dumping && !flip_dump_only()) {
+         s_drawn_dumps++;
+         dump_surface_bmp();
+     }
+@@ -5478,7 +5488,7 @@ void nv2a_pb_exec_report(void)
+             s_gpu.min_x, s_gpu.max_x, s_gpu.min_y, s_gpu.max_y);
+     /* One picture per report rather than per clear: a title clears hundreds of
+      * times a second and nobody wants that many files. */
+-    if (!s_flip_dumping)
++    if (!s_flip_dumping && !flip_dump_only())
+         dump_surface_bmp();
+ 
+     /* Drawn and skipped separately: "nothing appeared" and "every batch needed

@@ -23,6 +23,7 @@
 #include "nv2a_vsh_interp.h"
 #include "xbox_memory_layout.h"
 #include "gpu/d3d11_backend.h"
+#include "gpu/null_backend.h"
 
 typedef void (*recomp_func_t)(void);
 recomp_func_t recomp_lookup(uint32_t va) { (void)va; return NULL; }
@@ -199,6 +200,527 @@ static void load_program(void)
     method(0x1E94, 2);                               /* TRANSFORM_EXECUTION_MODE: program */
 }
 
+static void screen_quad(uint32_t color)
+{
+    static const float points[4][2] = {{0, 0}, {64, 0}, {64, 64}, {0, 64}};
+    unsigned i;
+    method(0x17FC, 8);
+    method(0x194C, color);
+    for (i = 0; i < 4; ++i) {
+        method_float(0x1500, points[i][0]);
+        method_float(0x1504, points[i][1]);
+        method_float(0x1508, 1);
+    }
+    method(0x17FC, 0);
+}
+
+static void identity_matrix(void)
+{
+    unsigned i;
+    for (i = 0; i < 16; ++i)
+        method_float(0x0680 + i * 4, i % 5 == 0 ? 1.0f : 0.0f);
+    method(0x0314, 0);
+}
+
+static int save_frame(FILE *f, uint32_t color)
+{
+    flip();
+    return fwrite(guest(color), 4, B_SIZE * B_SIZE, f) == B_SIZE * B_SIZE;
+}
+
+static uint32_t bounds(unsigned first, unsigned last)
+{
+    return first | last << 16;
+}
+
+static void clear_rect(unsigned x0, unsigned y0, unsigned x1, unsigned y1)
+{
+    method(0x1D98, bounds(x0, x1));
+    method(0x1D9C, bounds(y0, y1));
+}
+
+static int scene_clear_rect(const char *out_path, int program, int vertical_first)
+{
+    static const Pos near_quad[4] = {{0, 0, 1000, 1}, {64, 0, 1000, 1},
+                                     {64, 64, 1000, 1}, {0, 64, 1000, 1}};
+    static const Pos mid_quad[4] = {{0, 0, 8388608.0f, 1}, {64, 0, 8388608.0f, 1},
+                                    {64, 64, 8388608.0f, 1}, {0, 64, 8388608.0f, 1}};
+    static const Pos z16_quad[4] = {{0, 0, 32768, 1}, {64, 0, 32768, 1},
+                                    {64, 64, 32768, 1}, {0, 64, 32768, 1}};
+    static const uint32_t green[4] = {0xFF00FF00u, 0xFF00FF00u, 0xFF00FF00u, 0xFF00FF00u};
+    static const float uv[4][2] = {{0, 0}, {0, 0}, {0, 0}, {0, 0}};
+    uint32_t b = xbox_ContiguousAlloc(B_SIZE * B_SIZE * 4, 4096);
+    uint32_t z = xbox_ContiguousAlloc(B_SIZE * B_SIZE * 4, 4096);
+    uint32_t vb = xbox_ContiguousAlloc(0x1000, 4096);
+    FILE *f = fopen(out_path, "wb");
+
+    REQUIRE(b && z && vb && f, "initialize rectangular clear fixture");
+    identity_matrix();
+    if (program)
+        load_program();
+    surface(b, B_SIZE, z);
+    combiners(0);
+
+    method(vertical_first ? 0x1D9C : 0x1D98, bounds(10, 19));
+    clear(0xF3, 0xAA112233u, 0xFFFFFF00u);
+    REQUIRE(save_frame(f, b), "save incomplete-clear-rectangle frame");
+
+    clear_rect(0, 0, 63, 63);
+    clear(0xF3, 0xFF2674A1u, 0xFFFFFF00u);
+    clear_rect(0, 0, 63, 7);
+    clear(0xF3, 0xFF000000u, 0);
+    clear_rect(0, 56, 63, 63);
+    clear(0xF3, 0xFF000000u, 0);
+    method(0x030C, 1);
+    method(0x0354, 0x201);
+    method(0x035C, 0);
+    draw(8, near_quad, green, uv, 4, vb);
+    REQUIRE(save_frame(f, b), "save depth-tested letterbox frame");
+
+    clear_rect(0, 0, 63, 63);
+    clear(0xF3, 0x7F102030u, 0xFFFFFF00u);
+    clear_rect(10, 20, 19, 29);
+    clear(0x10, 0xFFCCBBAAu, 0);
+    clear(0x40, 0xFFFFEE77u, 0);
+    clear(0x80, 0x66123456u, 0);
+    clear_rect(20, 20, 29, 29);
+    clear(0x20, 0xFF004400u, 0);
+    REQUIRE(save_frame(f, b), "save per-channel clear frame");
+
+    clear_rect(0, 0, 63, 63);
+    clear(0x10, 0xFF551122u, 0);
+    REQUIRE(save_frame(f, b), "save full-surface masked clear frame");
+
+    clear(0xF3, 0xFF101010u, 0xFFFFFF7Bu);
+    clear_rect(60, 60, 80, 80);
+    clear(0xF0, 0xFFF0A000u, 0);
+    clear_rect(20, 0, 18, 63);
+    clear(0xF3, 0, 0);
+    clear_rect(0, 30, 63, 28);
+    clear(0xF3, 0, 0);
+    clear_rect(65535, 0, 65535, 63);
+    clear(0xF3, 0, 0);
+    REQUIRE(save_frame(f, b), "save clipped and empty clear frame");
+
+    method(0x032C, 1);
+    method(0x0364, 0x202);
+    method(0x0368, 0x7B);
+    method(0x036C, 0xFF);
+    method(0x0360, 0);
+    draw(8, near_quad, green, uv, 4, vb);
+    REQUIRE(save_frame(f, b), "save empty-clear depth and stencil frame");
+
+    clear_rect(0, 0, 63, 63);
+    clear(0xF3, 0xFF000000u, 0xFFFFFF55u);
+    clear_rect(16, 16, 31, 31);
+    clear(1, 0xFFFFFFFFu, 0x40000099u);
+    method(0x0368, 0x55);
+    draw(8, mid_quad, green, uv, 4, vb);
+    REQUIRE(save_frame(f, b), "save partial-depth frame");
+
+    clear_rect(0, 0, 63, 63);
+    clear(0xF0, 0xFF000000u, 0);
+    method(0x030C, 0);
+    draw(8, near_quad, green, uv, 4, vb);
+    REQUIRE(save_frame(f, b), "save depth-clear-preserved-stencil frame");
+
+    clear(0xF3, 0xFF000000u, 0xFFFFFF44u);
+    clear_rect(16, 16, 31, 31);
+    clear(2, 0xFFFFFFFFu, 0x00000033u);
+    method(0x030C, 1);
+    method(0x0368, 0x33);
+    draw(8, mid_quad, green, uv, 4, vb);
+    REQUIRE(save_frame(f, b), "save partial-stencil frame");
+
+    clear_rect(0, 0, 63, 63);
+    clear(0xF0, 0xFF000000u, 0);
+    method(0x0368, 0x44);
+    draw(8, mid_quad, green, uv, 4, vb);
+    REQUIRE(save_frame(f, b), "save stencil outside clear frame");
+    method(0x032C, 0);
+    method(0x030C, 0);
+
+    clear(0xF0, 0xFF223344u, 0);
+    method(0x0200, 32u << 16);
+    method(0x0204, 32u << 16);
+    method(0x0208, 0x2128);
+    clear_rect(3, 5, 6, 7);
+    clear(0xF0, 0xFFEEEEEEu, 0);
+    surface(b, B_SIZE, z);
+    REQUIRE(save_frame(f, b), "save two-axis AA clear frame");
+
+    clear_rect(0, 0, 63, 63);
+    clear(0xF0, 0xFF223344u, 0);
+    method(0x0200, 32u << 16);
+    method(0x0204, 64u << 16);
+    method(0x0208, 0x1128);
+    clear_rect(3, 5, 6, 7);
+    clear(0xF0, 0xFFEEEEEEu, 0);
+    surface(b, B_SIZE, z);
+    REQUIRE(save_frame(f, b), "save horizontal AA clear frame");
+
+    clear_rect(0, 0, 63, 63);
+    clear(0xF0, 0xFF334455u, 0);
+    method(0x0200, 32u << 16);
+    method(0x0204, 32u << 16);
+    clear_rect(40, 40, 47, 47);
+    clear(0xF0, 0xFF0000FFu, 0);
+    surface(b, B_SIZE, z);
+    REQUIRE(save_frame(f, b), "save clear beyond draw clip frame");
+
+    method(0x0208, 0x118);
+    clear_rect(0, 0, 63, 63);
+    clear(0xF1, 0xFF000000u, 0xFFFFu);
+    clear_rect(16, 16, 31, 31);
+    clear(1, 0, 0x4000u);
+    method(0x030C, 1);
+    draw(8, z16_quad, green, uv, 4, vb);
+    surface(b, B_SIZE, z);
+    REQUIRE(save_frame(f, b), "save partial Z16 clear frame");
+    method(0x030C, 0);
+
+    method(0x02B4, 0);
+    method(0x02C0, bounds(0, 3));
+    method(0x02E0, bounds(0, 3));
+    clear_rect(0, 0, 63, 63);
+    clear(0xF0, 0xFF000000u, 0);
+    clear_rect(10, 10, 19, 19);
+    clear(0xF0, 0xFFFF0000u, 0);
+    draw(8, near_quad, green, uv, 4, vb);
+    REQUIRE(save_frame(f, b), "save clear and extended window clip frame");
+
+    clear_rect(0, 0, 63, 63);
+    clear(0xF0, 0xFF000000u, 0);
+    clear_rect(40, 40, 47, 47);
+    clear(0xF0, 0xFF0000FFu, 0);
+    screen_quad(0xFF0000FFu);
+    REQUIRE(save_frame(f, b), "save clear and base window clip frame");
+
+    REQUIRE(fclose(f) == 0, "close rectangular clear frames");
+    puts("rectangular clear frames 16");
+    return 1;
+}
+
+static int scene_window_clip(const char *out_path, int program)
+{
+    static const Pos p[4] = {{0, 0, 1, 1}, {64, 0, 1, 1},
+                             {64, 64, 1, 1}, {0, 64, 1, 1}};
+    static const uint32_t white[4] = {0xFFFFFFFFu, 0xFFFFFFFFu, 0xFFFFFFFFu, 0xFFFFFFFFu};
+    static const uint32_t green[4] = {0xFF00FF00u, 0xFF00FF00u, 0xFF00FF00u, 0xFF00FF00u};
+    static const float uv[4][2] = {{0, 0}, {0, 0}, {0, 0}, {0, 0}};
+    uint32_t b = xbox_ContiguousAlloc(B_SIZE * B_SIZE * 4, 4096);
+    uint32_t vb = xbox_ContiguousAlloc(0x1000, 4096);
+    FILE *f = fopen(out_path, "wb");
+    unsigned i;
+
+    REQUIRE(b && vb && f, "initialize clipping fixture");
+    identity_matrix();
+    if (program)
+        load_program();
+    surface(b, B_SIZE, 0);
+    combiners(0);
+
+    method(0x02C0, bounds(4, 11));                   /* one axis is not enough */
+    clear(0xF0, 0xFF000000u, 0);
+    screen_quad(0xFFFFFFFFu);
+    REQUIRE(save_frame(f, b), "save incomplete-axis frame");
+
+    method(0x02E0, bounds(4, 11));
+    clear(0xF0, 0xFF112233u, 0);                   /* clears ignore window clipping */
+    REQUIRE(save_frame(f, b), "save clear frame");
+
+    clear(0xF0, 0xFF000000u, 0);
+    screen_quad(0xFFFFFFFFu);
+    REQUIRE(save_frame(f, b), "save base inclusive frame");
+
+    method(0x02C4, bounds(20, 27));
+    method(0x02E4, bounds(4, 11));
+    clear(0xF0, 0xFF000000u, 0);
+    draw(8, p, white, uv, 4, vb);
+    REQUIRE(save_frame(f, b), "save extended union frame");
+
+    method(0x02B4, 1);
+    clear(0xF0, 0xFF000000u, 0);
+    screen_quad(0xFFFFFFFFu);
+    REQUIRE(save_frame(f, b), "save base exclusive frame");
+
+    method(0x02B4, 0);
+    method(0x02C0, bounds(4, 11));
+    method(0x02E0, bounds(4, 11));
+    clear(0xF0, 0xFF000000u, 0);
+    screen_quad(0xFF0000FFu);                       /* immediate colour is ABGR */
+    method(0x02C0, bounds(20, 27));
+    draw(8, p, green, uv, 4, vb);
+    REQUIRE(save_frame(f, b), "save changed-state frame");
+
+    method(0x0200, 32u << 16);
+    method(0x0204, 64u << 16);
+    method(0x0208, 0x1128);                         /* horizontal 2x AA */
+    method(0x020C, B_SIZE * 4);
+    method(0x02C0, bounds(4, 7));
+    method(0x02E0, bounds(5, 7));
+    clear(0xF0, 0xFF000000u, 0);
+    screen_quad(0xFFFFFFFFu);
+    REQUIRE(save_frame(f, b), "save horizontal AA frame");
+
+    method(0x0204, 32u << 16);
+    method(0x0208, 0x2128);                         /* horizontal and vertical 2x AA */
+    clear(0xF0, 0xFF000000u, 0);
+    draw(8, p, white, uv, 4, vb);
+    REQUIRE(save_frame(f, b), "save two-axis AA frame");
+
+    surface(b, B_SIZE, 0);
+    for (i = 0; i < 8; ++i) {
+        method(0x02C0 + i * 4, bounds(2 + 7 * i, 4 + 7 * i));
+        method(0x02E0 + i * 4, bounds(20, 22));
+    }
+    clear(0xF0, 0xFF000000u, 0);
+    draw(8, p, white, uv, 4, vb);
+    REQUIRE(save_frame(f, b), "save eight-rectangle frame");
+    method(0x02B4, 1);
+    clear(0xF0, 0xFF000000u, 0);
+    screen_quad(0xFFFFFFFFu);
+    REQUIRE(save_frame(f, b), "save eight-rectangle exclusive frame");
+
+    method(0x02B4, 0);
+    method(0x02C0, bounds(30, 29));
+    method(0x02E0, bounds(0, 63));
+    clear(0xF0, 0xFF000000u, 0);
+    screen_quad(0xFFFFFFFFu);
+    REQUIRE(save_frame(f, b), "save empty inclusive frame");
+    method(0x02B4, 1);
+    clear(0xF0, 0xFF000000u, 0);
+    draw(8, p, white, uv, 4, vb);
+    REQUIRE(save_frame(f, b), "save empty exclusive frame");
+    REQUIRE(fclose(f) == 0, "close clipping frames");
+    puts("window clip frames 12");
+    return 1;
+}
+
+static void texture_depth(uint32_t va, unsigned width, unsigned height, unsigned pitch)
+{
+    method(0x1B00, va - XBOX_CONTIG_BASE);
+    method(0x1B04, 2u << 4 | 0x2Eu << 8 | 1u << 16);
+    method(0x1B10, pitch << 16);
+    method(0x1B1C, width << 16 | height);
+    method(0x1B08, 3u | 3u << 8);
+    method(0x1B14, 1u << 24 | 1u << 16);
+}
+
+static int scene_depth_texture(const char *out_path, int program)
+{
+    static const uint32_t depths[3] = {0xC0000000u, 0x40000000u, 0x80000000u};
+    static const Pos p[4] = {{0, 0, 0, 1}, {64, 0, 0, 1},
+                             {64, 64, 0, 1}, {0, 64, 0, 1}};
+    static const uint32_t white[4] = {0xFFFFFFFFu, 0xFFFFFFFFu, 0xFFFFFFFFu, 0xFFFFFFFFu};
+    static const float uv[4][4] = {{0, 0, 8388608.0f, 1}, {64, 0, 8388608.0f, 1},
+                                   {64, 64, 8388608.0f, 1}, {0, 64, 8388608.0f, 1}};
+    uint32_t b = xbox_ContiguousAlloc(B_SIZE * B_SIZE * 4, 4096);
+    uint32_t z = xbox_ContiguousAlloc(B_SIZE * B_SIZE * 4, 4096);
+    uint32_t other_z = xbox_ContiguousAlloc(B_SIZE * B_SIZE * 4, 4096);
+    uint32_t cold_z = xbox_ContiguousAlloc(B_SIZE * B_SIZE * 4, 4096);
+    uint32_t growth_z = xbox_ContiguousAlloc(B_SIZE * B_SIZE * 4, 4096);
+    uint32_t small_b = xbox_ContiguousAlloc(A_SIZE * A_SIZE * 4, 4096);
+    uint32_t vb = xbox_ContiguousAlloc(0x1000, 4096);
+    FILE *f = fopen(out_path, "wb");
+    unsigned func, depth, x, y;
+
+    REQUIRE(b && z && other_z && cold_z && growth_z && small_b && vb && f,
+            "initialize depth texture fixture");
+    identity_matrix();
+    if (program)
+        load_program();
+    surface(b, B_SIZE, z);
+    texture_depth(z, B_SIZE, B_SIZE, B_SIZE * 4);
+    combiners(1);
+    method(0x1E70, 2);                               /* PROJECT3D */
+    method(0x1E6C, 4);                               /* GREATER */
+    method(0x030C, 1);
+    method(0x0354, 0x207);                           /* ALWAYS: draw writes depth 0 */
+    method(0x035C, 1);
+    clear(0xF3, 0xFF000000u, 0xC0000000u);         /* depth 0.75 */
+    draw_with_texcoords(8, p, white, &uv[0][0], 4, 4, vb);
+    REQUIRE(save_frame(f, b), "save active-depth frame");
+
+    method(0x030C, 0);
+    method(0x035C, 0);
+    clear(0xF0, 0xFF000000u, 0);
+    draw_with_texcoords(8, p, white, &uv[0][0], 4, 4, vb);
+    REQUIRE(save_frame(f, b), "save updated-depth frame");
+
+    for (depth = 0; depth < 3; ++depth) {
+        for (func = 0; func < 8; ++func) {
+            clear(0xF3, 0xFF000000u, depths[depth]);
+            method(0x1E6C, func);
+            draw_with_texcoords(8, p, white, &uv[0][0], 4, 4, vb);
+            REQUIRE(save_frame(f, b), "save shadow comparison frame");
+        }
+    }
+
+    method(0x1E70, 1);                               /* PROJECT2D compares against zero */
+    method(0x1E6C, 4);
+    clear(0xF0, 0xFF000000u, 0);
+    screen_quad(0xFFFFFFFFu);
+    REQUIRE(save_frame(f, b), "save base depth frame");
+
+    method(0x1E6C, 1);                               /* LESS than zero is false */
+    clear(0xF0, 0xFF000000u, 0);
+    screen_quad(0xFFFFFFFFu);
+    REQUIRE(save_frame(f, b), "save base depth false frame");
+    method(0x1E6C, 2);                               /* zero equals zero */
+    clear(0xF3, 0xFF000000u, 0);
+    screen_quad(0xFFFFFFFFu);
+    REQUIRE(save_frame(f, b), "save base depth equal frame");
+
+    clear(0xF3, 0xFF000000u, 0xC0000000u);
+    surface(b, B_SIZE, other_z);                      /* sample a non-bound depth surface */
+    clear(0xF3, 0xFF000000u, 0xC0000000u);
+    method(0x1E70, 2);
+    method(0x1E6C, 4);
+    draw_with_texcoords(8, p, white, &uv[0][0], 4, 4, vb);
+    REQUIRE(save_frame(f, b), "save unbound-depth frame");
+
+    texture_depth(z, B_SIZE, B_SIZE, B_SIZE * 4 + 4);
+    clear(0xF0, 0xFF000000u, 0);
+    draw_with_texcoords(8, p, white, &uv[0][0], 4, 4, vb);
+    REQUIRE(save_frame(f, b), "save incompatible-pitch frame");
+
+    texture_depth(z, B_SIZE, B_SIZE - 1, B_SIZE * 4);
+    clear(0xF0, 0xFF000000u, 0);
+    draw_with_texcoords(8, p, white, &uv[0][0], 4, 4, vb);
+    REQUIRE(save_frame(f, b), "save incompatible-size frame");
+
+    texture_depth(z, B_SIZE, B_SIZE, B_SIZE * 4 + 4);
+    method(0x1E70, 1);
+    clear(0xF0, 0xFF000000u, 0);
+    screen_quad(0xFFFFFFFFu);
+    REQUIRE(save_frame(f, b), "save base incompatible-pitch frame");
+
+    texture_depth(z, B_SIZE, B_SIZE, B_SIZE * 4);
+    method(0x1E70, 3);                               /* unsupported CUBEMAP stage */
+    clear(0xF0, 0xFF000000u, 0);
+    draw_with_texcoords(8, p, white, &uv[0][0], 4, 4, vb);
+    REQUIRE(save_frame(f, b), "save unsupported-depth-mode frame");
+
+    texture_depth(z + 4, B_SIZE, B_SIZE, B_SIZE * 4);
+    method(0x1E70, 2);
+    clear(0xF0, 0xFF000000u, 0);
+    draw_with_texcoords(8, p, white, &uv[0][0], 4, 4, vb);
+    REQUIRE(save_frame(f, b), "save overlapping-depth-alias frame");
+
+    texture_depth(z, B_SIZE, B_SIZE, B_SIZE * 4);
+    method(0x1B04, 2u << 4 | 0x2Eu << 8 | 2u << 16);
+    clear(0xF0, 0xFF000000u, 0);
+    draw_with_texcoords(8, p, white, &uv[0][0], 4, 4, vb);
+    REQUIRE(save_frame(f, b), "save depth-mipmap frame");
+
+    method(0x1B04, 2u << 4 | 0x2Eu << 8 | 1u << 16 | 1u << 2);
+    method(0x1E70, 1);
+    clear(0xF0, 0xFF000000u, 0);
+    draw_with_texcoords(8, p, white, &uv[0][0], 4, 4, vb);
+    REQUIRE(save_frame(f, b), "save extended-depth-cube frame");
+    if (program)
+        method(0x1E94, 0);                           /* force the screen-space base path */
+    clear(0xF0, 0xFF000000u, 0);
+    screen_quad(0xFFFFFFFFu);
+    REQUIRE(save_frame(f, b), "save base-depth-cube frame");
+
+    texture_depth(z, B_SIZE, B_SIZE, B_SIZE * 4);
+    method(0x1E70, 2);
+    clear(0xF0, 0xFF000000u, 0);
+    screen_quad(0xFFFFFFFFu);
+    REQUIRE(save_frame(f, b), "save unsupported-base-project3d frame");
+    if (program)
+        method(0x1E94, 2);
+
+    surface(b, B_SIZE, z);
+    method(0x0208, 0x118);                           /* Z16 cannot alias D24 texture */
+    texture_depth(z, B_SIZE, B_SIZE, B_SIZE * 4);
+    method(0x1E70, 2);
+    clear(0xF3, 0xFF000000u, 0xC0000000u);
+    draw_with_texcoords(8, p, white, &uv[0][0], 4, 4, vb);
+    REQUIRE(save_frame(f, b), "save incompatible-format frame");
+
+    for (y = 0; y < B_SIZE; ++y)
+        for (x = 0; x < B_SIZE; ++x)
+            ((uint32_t *)guest(cold_z))[y * B_SIZE + x] =
+                x < B_SIZE / 2 ? 0x4000005Au : 0xC00000A5u;
+    surface(b, B_SIZE, cold_z);
+    texture_depth(cold_z, B_SIZE, B_SIZE, B_SIZE * 4);
+    method(0x1E6C, 4);
+    clear(0xF0, 0xFF000000u, 0);                   /* seed from guest; no depth clear */
+    draw_with_texcoords(8, p, white, &uv[0][0], 4, 4, vb);
+    REQUIRE(save_frame(f, b), "save guest-seeded depth frame");
+
+    combiners(0);
+    method(0x032C, 1);                               /* stencil EQUAL 0x5A */
+    method(0x0364, 0x202);
+    method(0x0368, 0x5A);
+    method(0x036C, 0xFF);
+    clear(0xF0, 0xFF000000u, 0);
+    draw_with_texcoords(8, p, white, &uv[0][0], 4, 4, vb);
+    REQUIRE(save_frame(f, b), "save guest-seeded stencil frame");
+    method(0x032C, 0);
+
+    surface(small_b, A_SIZE, growth_z);
+    clear(0xF3, 0xFF000000u, 0xC0000000u);
+    surface(b, B_SIZE, growth_z);
+    texture_depth(growth_z, B_SIZE, B_SIZE, B_SIZE * 4);
+    combiners(1);
+    method(0x1E70, 2);
+    method(0x1E6C, 4);
+    clear_rect(0, 0, 31, 31);
+    clear(1, 0, 0xC0000000u);
+    clear_rect(0, 0, 63, 63);
+    clear(0xF0, 0xFF000000u, 0);
+    draw_with_texcoords(8, p, white, &uv[0][0], 4, 4, vb);
+    REQUIRE(save_frame(f, b), "save partially-cleared resized-depth rejection frame");
+
+    clear(0xF3, 0xFF000000u, 0xC0000000u);
+    draw_with_texcoords(8, p, white, &uv[0][0], 4, 4, vb);
+    REQUIRE(save_frame(f, b), "save fully-cleared resized-depth frame");
+
+    surface(b, B_SIZE, growth_z);
+    method(0x0208, 0x228);                           /* swizzled surface is not a linear alias */
+    clear(0xF3, 0xFF000000u, 0xC0000000u);
+    draw_with_texcoords(8, p, white, &uv[0][0], 4, 4, vb);
+    REQUIRE(save_frame(f, b), "save swizzled-depth rejection frame");
+    REQUIRE(fclose(f) == 0, "close depth texture frames");
+    puts("depth texture frames 45");
+    return 1;
+}
+
+static int test_surface_guard(const char *report, int invalid)
+{
+    uint32_t b = xbox_ContiguousAlloc(B_SIZE * B_SIZE * 4, 4096);
+    MEMORY_BASIC_INFORMATION first, excluded, last;
+    char page[32];
+
+    REQUIRE(b != 0, "allocate guarded surface");
+    snprintf(page, sizeof page, "0x%08X", b + 4096);
+    REQUIRE(_putenv_s("BRUTEFORCE_SURFACE_GUARD", report) == 0 &&
+            _putenv_s("BRUTEFORCE_SURFACE_GUARD_EXCLUDE_PAGE", invalid ? "not-a-page" : page) == 0,
+            "configure surface guard");
+    if (invalid)
+        return bruteforce_null_backend_install() == 0;
+    REQUIRE(bruteforce_null_backend_install(), "install surface guard");
+    surface(b, B_SIZE, 0);
+    clear(0xF0, 0, 0);
+    flip();
+    REQUIRE(VirtualQuery(guest(b), &first, sizeof first) == sizeof first &&
+            VirtualQuery(guest(b + 4096), &excluded, sizeof excluded) == sizeof excluded &&
+            VirtualQuery(guest(b + 8192), &last, sizeof last) == sizeof last,
+            "query guarded surface pages");
+    REQUIRE((first.Protect & PAGE_NOACCESS) && !(excluded.Protect & PAGE_NOACCESS) &&
+            (last.Protect & PAGE_NOACCESS), "exclude only the requested page");
+    *(volatile uint32_t *)guest(b) = 0x12345678u;
+    *(volatile uint32_t *)guest(b + 4096) = 0xABCDEF01u;
+    Sleep(2100);
+    flip();
+    puts("surface guard exclusion passed");
+    return 1;
+}
+
 static int scene(const char *out_path, int program, int gpu)
 {
     uint32_t b = xbox_ContiguousAlloc(B_SIZE * B_SIZE * 4, 4096);
@@ -282,10 +804,21 @@ static int scene(const char *out_path, int program, int gpu)
         method(0x17C8, 0);
         method(0x17CC, 1);
         draw(8, p, c, uv, 4, vb);
+        if (gpu) {
+            clear_rect(8, 8, 15, 15);
+            clear(2, 0, 0x5A);
+            clear_rect(0, 0, 63, 63);
+            clear(2, 0, 0x11);
+        }
         report_at(report, 1);
         draw(8, p, c, uv, 4, vb);
         report_at(report, 2);
         method(0x17C8, 0);
+        if (gpu) {
+            clear_rect(8, 8, 15, 15);
+            clear(2, 0, 0xA5);
+            clear_rect(0, 0, 63, 63);
+        }
         draw(8, p, c, uv, 4, vb);
         method(0x17CC, 0);
         report_at(report, 3);
@@ -296,6 +829,11 @@ static int scene(const char *out_path, int program, int gpu)
         for (j = 0; j < 70; ++j) {
             method(0x17CC, 1);
             draw(8, p, c, uv, 4, vb);
+            if (gpu && j == 63) {
+                clear_rect(8, 8, 15, 15);
+                clear(2, 0, 0x33);
+                clear_rect(0, 0, 63, 63);
+            }
             method(0x17CC, 0);
         }
         report_at(report, 6);
@@ -493,12 +1031,19 @@ int main(int argc, char **argv)
         return 1;
     if (strncmp(argv[2], "textures-", 9) == 0)
         return bruteforce_test_textures(strstr(argv[2], "hardware") != NULL) ? 0 : 1;
+    if (strncmp(argv[2], "guard", 5) == 0)
+        return test_surface_guard(argv[3], strstr(argv[2], "invalid") != NULL) ? 0 : 1;
+    if ((strstr(argv[2], "clip") || strstr(argv[2], "clear")) &&
+        _putenv_s("RECOMP_WINDOW_CLIP", "1") != 0)
+        return 1;
     if (strncmp(argv[2], "gpu", 3) == 0) {
         /* gpu-cpuvsh: programs transformed on the CPU, drawn on the GPU. */
         if (_putenv_s("RECOMP_D3D11_WARP", strstr(argv[2], "hardware") ? "0" : "1") != 0 ||
             _putenv_s("RECOMP_GPU_VSH", strstr(argv[2], "cpuvsh") ? "0" : "1") != 0 ||
             _putenv_s("RECOMP_GPU_ZPASS", strstr(argv[2], "async") ? "async" : "sync") != 0 ||
             _putenv_s("RECOMP_GPU_TEX_DECODE", strstr(argv[2], "software-texture") ? "0" : "1") != 0 ||
+            (strstr(argv[2], "depth") &&
+             _putenv_s("RECOMP_GPU_DEPTH_TEXTURE", strstr(argv[2], "invalid") ? "invalid" : "1") != 0) ||
             (strstr(argv[2], "bc") && _putenv_s("RECOMP_GPU_TEXLOG", "1") != 0) ||
             _putenv_s("RECOMP_GPU_VSH_SYNC", "1") != 0 ||
             _putenv_s("RECOMP_GPU_VSH_VERIFY", "1") != 0 || !bruteforce_d3d11_install())
@@ -506,7 +1051,11 @@ int main(int argc, char **argv)
     } else if (strncmp(argv[2], "cpu", 3) != 0) {
         return 2;
     }
-    if (strstr(argv[2], "bc") ? !scene_bc(argv[3]) :
+    if (strstr(argv[2], "clear") ? !scene_clear_rect(argv[3], strstr(argv[2], "vsh") != NULL,
+                                                     strstr(argv[2], "vertical") != NULL) :
+        strstr(argv[2], "clip") ? !scene_window_clip(argv[3], strstr(argv[2], "vsh") != NULL) :
+        strstr(argv[2], "depth") ? !scene_depth_texture(argv[3], strstr(argv[2], "vsh") != NULL) :
+        strstr(argv[2], "bc") ? !scene_bc(argv[3]) :
         !scene(argv[3], strstr(argv[2], "vsh") != NULL, strncmp(argv[2], "gpu", 3) == 0))
         return 1;
     puts("scene drawn");

@@ -24,17 +24,18 @@ next steps are in [NEXTSTEPS.md](../NEXTSTEPS.md).
 
 | Phase | Status |
 | --- | --- |
-| 0 | Mostly done. Harness (`tools/bench.py`), frame statistics (patch 0014), census and ceiling probes (0015), profiler (`src/profile.c`), null back end and surface guard (`src/gpu/null_backend.c`) exist and were run. Baseline, census, profiles and both ceilings are recorded. Missing: the surface-read answer (guard built, not run), the native-rate measurement, and the upstream PR measurements (#231, #272, #273). |
+| 0 | Mostly done. Harness (`tools/bench.py`), frame statistics (patch 0014), census and ceiling probes (0015), profiler (`src/profile.c`), null back end and surface guard (`src/gpu/null_backend.c`) exist and were run. A guard diagnostic aborted on a protected semaphore page, so the surface-read answer remains open. Missing: the native-rate measurement and upstream PR measurements (#231, #272, #273). |
 | 1 | Implemented, G4 not met. D3D11 back end (`src/gpu/`, `RECOMP_GPU=d3d11`) with the extended interface (0016). Synthetic WARP and hardware fixtures match apart from listed edge pixels. The new GPU-vertex tutorial capture differs from the CPU reference in 0.52% of pixels beyond 8/255; an older CPU-vertex capture differs substantially. |
 | 2 | Implemented (0017, on by default with the D3D11 back end). Stationary hold 3.20 → 30.41 rendered fps (3 runs each, alternating). Verification mode exists; not yet run on the title. |
 | 3 | Partial. Async visibility reports (0018) pass WARP and hardware fixtures and were exercised in the title, but remain opt-in. Direct presentation and on-demand readback are not implemented; per-flip readback previously measured 0.2–0.7 ms. |
 | 4 | Not started. Preserve flush, semaphore, and flip ordering. |
-| 5 | In progress. GPU compute decodes common textures; stale pitches no longer force compressed textures through the CPU decoder. Patch 0019 cached hot `getenv` calls. |
+| 5 | In progress. GPU compute decodes common textures; stale pitches no longer force compressed textures through the CPU decoder. Exact D24 surface aliases and GPU window clipping are experimental opt-ins. D3D11 now honors partial clear rectangles, and patch 0022 removes redundant software depth clears when a backend owns drawing and clearing. Patch 0019 cached hot `getenv` calls. |
 
 Scenes are defined by frames and content, not wall-clock windows, because the
 tutorial's stationary hold appears to be a frame count. The stationary
-scene's picture does not change, so it is measured in rendered frames; the
-movement scene supplies distinct frames.
+scene's picture does not change, so it is measured in rendered frames. The
+movement scene currently supplies whole-frame pixel changes, not a validated
+count of distinct visible world frames.
 
 ## Targets
 
@@ -55,7 +56,10 @@ previous one, or a guest frame counter once one is identified. Flip counts
 from the periodic report are not used as a target because a flip can repeat a
 frame. The current whole-frame pixel hash also sees HUD changes, so measured
 distinct movement fps is not yet proof that every counted change is a new
-world frame.
+world frame. In the previous six-run GPU campaign, 58.9–60.2% of movement
+flips in each run matched a solid-black image; those throughput figures do
+not establish G2 or playability. The harness reports known-black matches but
+cannot classify all dark frames or distinguish an intentional fade.
 
 ## Execution cadence
 
@@ -64,8 +68,9 @@ edit. Build the relevant fixtures together and run one targeted validation
 batch after the milestone. Use one alternating A/B/A campaign, at least three
 runs per variant on the same generation and scene, to evaluate the combined
 change; movement runs can also collect the stationary hold, profiles, and
-matched flip captures. Isolated diagnostic runs are for investigating failures,
-not repeated acceptance campaigns. Keep separate switches for timing changes
+matched flip captures. Census reports can run alongside flip-only captures
+without inserting report-time frames into the numbered sequence. Isolated
+diagnostic runs are for investigating failures, not repeated acceptance campaigns. Keep separate switches for timing changes
 so interactions can be isolated if the combined result regresses. The CPU
 reference, image-difference accounting, and synchronization requirements are
 not optional. The phases below group work by mechanism; a milestone may span
@@ -107,8 +112,9 @@ null-backend probe (Phase 0) tests this directly.
 **Latest GPU milestone:** the combined texture and visibility changes reduced
 estimated game-thread GPU wait from 33.5% to 24.7% of movement samples.
 `NtQueryVirtualMemory` remains prominent on the game thread, and texture
-hashing remains visible on the NV2A thread. See the run ranges and limitations
-in FINDINGS.
+hashing remains visible on the NV2A thread. Those profiles include the
+black-frame intervals and do not establish the cost during valid world
+rendering. See the run ranges and limitations in FINDINGS.
 
 **Supporting evidence from Blood Wake:** its D3D11 backend replaced the same
 CPU rasterizer. Its source notes that the vertex-program interpreter alone
@@ -249,8 +255,8 @@ expected tree updated.
    the CPU path does.
 4. **Port the experiments.** The software-only options must work on the GPU
    path, otherwise their guards reject the backend:
-   - window clipping (0009): scissor for a single inclusive rectangle,
-     otherwise a stencil or pixel-shader mask;
+   - window clipping (0009, 0021): pixel-shader rectangle-union and
+     inclusive/exclusive masks on the D3D11 path, still opt-in;
    - face culling (0010): rasterizer state, keeping the strip-winding fix
      upstream of the backend;
    - the programmable near plane (0011): a clip distance in the generated

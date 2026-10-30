@@ -24,14 +24,16 @@ Direct3D 11 framebuffer presentation. An experimental Direct3D 11 renderer
 (`RECOMP_GPU=d3d11`) renders and runs vertex programs on the GPU. In the
 tutorial's stationary view an earlier comparison measured about 30 rendered
 frames per second against about 3 on the CPU path. A later three-run GPU
-comparison increased scripted-movement distinct frames from 25.2 to 35.2 fps
-with GPU texture decoding and opt-in asynchronous visibility reports. One
-boot stalled and needed a retry. The newest GPU-vertex tutorial capture is
-close to the CPU reference but still has unexplained differences; an older
-CPU-vertex GPU capture differs substantially. Rendering correctness and the
-title's native frame rate remain unverified, so the GPU renderer is not the
-default. Native 4K rendering, true widescreen, and unlocked frame rates are
-not implemented.
+comparison reported movement pixel-change rates of 25.2 and 35.2 fps, but
+58.9–60.2% of its movement flips matched a solid-black frame. Those rates do
+not measure playable world fps. A later clear fix preserved the character in
+two captured views in one diagnostic; sun-facing bloom remains unexplained.
+One earlier boot stalled and needed a retry. The newest GPU-vertex tutorial
+capture is close to the CPU reference but still has unexplained differences;
+an older CPU-vertex GPU capture differs substantially. Rendering correctness
+and the title's native frame rate remain unverified, so the GPU renderer is
+not the default. Native 4K rendering, true widescreen, and unlocked frame
+rates are not implemented.
 
 The pipeline recognizes one North American retail `default.xbe` (title ID
 `0x4D53001E`, SHA-256 recorded in `fingerprints/retail.json`). That fingerprint
@@ -183,7 +185,26 @@ stale.
 `RECOMP_GPU_ZPASS=async` enables experimental asynchronous GPU visibility
 reports; synchronous reports remain the default. The asynchronous path
 passes synthetic WARP and hardware fixtures but remains experimental in the
-title. Window clipping is not supported by the D3D11 renderer.
+title.
+
+`RECOMP_GPU_DEPTH_TEXTURE=1` enables experimental `LIN_D24S8` depth-texture
+aliases on D3D11. It only accepts exact matches to GPU-created D24S8 surfaces
+with matching linear layout, dimensions and pitch. New eligible surfaces
+are seeded from guest memory; a full-surface GPU depth clear also initializes
+them.
+Recreated surfaces are not reseeded from potentially stale guest memory and
+must receive a full-surface depth clear before sampling. Sampling a currently
+bound depth target uses a GPU snapshot; PROJECT2D and PROJECT3D apply the shadow comparison
+function on extended draws; base draws only support PROJECT2D. Guest writes,
+partially overlapping aliases, depth cube textures, multiple mip levels,
+other depth formats, and CPU reference decoding are not supported. Draws
+using rejected depth aliases or stage modes are skipped with a diagnostic.
+The option is off by default and has not established original-hardware
+equivalence. Per-flip guest readback and synchronization are unchanged.
+The D3D11 renderer respects partial color, depth and stencil clear rectangles
+instead of clearing the whole target for each strip. When a registered backend
+owns both drawing and clearing, the executor no longer redundantly clears its
+software depth buffer; CPU and incomplete-backend paths retain that clear.
 
 `python tools\bench.py` boots the tutorial with isolated saves and a fixed
 input script and measures the stationary and movement scenes; see
@@ -191,13 +212,25 @@ input script and measures the stationary and movement scenes; see
 `analysis\bench`. `RECOMP_FRAME_STATS`, `RECOMP_GPU_CENSUS` and
 `BRUTEFORCE_PROFILE` are the per-flip statistics, feature census and sampling
 profiler it uses. `--scene movement --capture` collects both stationary and
-movement measurements and flip-time captures in the same run. Summaries
+movement measurements and stationary flip-time captures in the same run. Summaries
 report failed attempts separately from failed runs, including retries.
+`--scene movement --capture-movement` also captures presented frames at two
+scripted movement points; this diagnostic can perturb the measured frame rate.
+`--trace-frame --trace-after 5` traces a frame five seconds into movement.
+When captures and `--census` are combined, periodic reports remain enabled
+to write the census. The harness sets `RECOMP_FB_DUMP_FLIPS_ONLY=1` to
+suppress report-time and after-draw dumps in the numbered capture sequence;
+the unnumbered `hold` dump may still be mid-frame. Use numbered flip captures
+for image comparisons.
+Results also count pixel hashes matching a solid-black 640×480 four-byte image
+with alpha 0 or 255. This is a diagnostic, not a detector for every black or
+dark frame; intentional fades can match too. Pixel-distinct fps, including HUD
+changes, is not necessarily distinct world fps.
 
 ### Experimental window clipping
 
-The software rasterizer can optionally apply the title's NV2A window-clip
-rectangles:
+The software rasterizer and D3D11 renderer can optionally apply the title's
+NV2A window-clip rectangles:
 
 ```powershell
 $env:RECOMP_WINDOW_CLIP = "1"
@@ -208,9 +241,16 @@ Remove-Item Env:\RECOMP_WINDOW_CLIP
 This is disabled by default and has not been validated against original
 hardware during gameplay. Before both clip axes have been programmed, this
 implementation leaves clipping inactive; the hardware's initial state still
-needs investigation. It applies only to the software rasterizer, and enabling
-it with a registered hardware draw backend stops with an error. This option is
-not a 4K or hardware-rendering mode.
+needs investigation. Other registered draw backends must advertise support
+for window clips or the executor stops with an error. This option is not a
+4K mode.
+
+For local surface-read diagnostics, `BRUTEFORCE_SURFACE_GUARD_EXCLUDE_PAGE`
+may specify one page-aligned guest address to leave unprotected when
+`BRUTEFORCE_SURFACE_GUARD` is enabled with the null backend. The report
+records the exclusion; reads and writes on that page are not observed.
+Neither a clean report with an excluded page nor this diagnostic's other
+coverage limitations justify skipping guest readback.
 
 ### Experimental face culling
 
@@ -329,8 +369,10 @@ game's table. Further local patches add per-flip frame statistics, a GPU
 feature census and ceiling probe, an extended render back-end interface
 (full pixel pipeline, readback before presentation, visibility counts), GPU
 vertex-program hand-off, asynchronous visibility reports (experimental), and
-cached environment lookups in per-draw code. The memory fence models ordering without executing the privileged
-instruction on the host; guest CPU caches themselves are not modeled. The
+cached environment lookups in per-draw code, texture metadata, GPU window-clip
+state, GPU-owned depth-clear offload, and opt-in flip-only captures. The memory
+fence models ordering without executing the privileged instruction on the
+host; guest CPU caches themselves are not modeled. The
 graphics-only manual hook discovers and validates the game's semaphore before
 registering it with the executor. A changed target aborts rather than risking
 completion of a pending release at the wrong address. Synthetic regression

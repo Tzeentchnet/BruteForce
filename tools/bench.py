@@ -20,6 +20,8 @@ a fixed pad script, and follows the per-flip statistics the executor writes
 A frame "changed" when the presented picture's hash differs from the
 previous flip's. Runs without pictures (a registered back end) fall back to
 the vertex-constant signature, a renderer-independent hint, and say so.
+The benchmark also reports matches to the known 640x480 solid-black hashes;
+these do not identify every black frame or distinguish intentional fades.
 
 The profiler (BRUTEFORCE_PROFILE) and the GPU census (RECOMP_GPU_CENSUS) are
 gated to the measured window of the chosen scene with flag files.
@@ -31,6 +33,7 @@ summary. Nothing here is uploaded anywhere.
 import argparse
 import csv
 import json
+import math
 import os
 from pathlib import Path
 import re
@@ -63,6 +66,7 @@ PANEL_FRAMES = 8
 TRACE_AFTER = 10.0
 CAPTURE_FLIPS = 2
 CAPTURE_SETTLE_FLIPS = 2
+MOVEMENT_CAPTURE_OFFSETS = (2.0, 5.0)
 PANEL_SECONDS = 3.0
 # Guest functions that poll for GPU progress (FINDINGS: the PFB flush poll and
 # the fence wait). A game thread in them is waiting for the NV2A thread.
@@ -71,6 +75,9 @@ DEFAULT_WATCHDOG = 900
 # The boot can hang intermittently before the menus (FINDINGS); such a run
 # is recorded and retried rather than measured.
 STALL_SECONDS = 60
+
+# nv2a_frame_hash of a 640x480 four-byte black surface, with alpha 0 or 255.
+KNOWN_BLACK_FRAME_HASHES = frozenset(("f22163d4abcd6aa4", "c1b9dd37072f3e56"))
 
 
 class BenchError(Exception):
@@ -169,6 +176,20 @@ def frame_metrics(rows):
         "frame_ms_p90": round(percentile(intervals, 0.9), 2),
         "frame_ms_p99": round(p99, 2),
         "low_1pct_fps": round(1000 / p99, 3) if p99 else None,
+    }
+
+
+def known_black_metrics(rows):
+    """Count matches to the known black signatures among frames with pixel hashes."""
+    hashed = [row for row in rows if row["distinct"] >= 0]
+    if not hashed:
+        return None
+    matched = sum(row["hash"] in KNOWN_BLACK_FRAME_HASHES for row in hashed)
+    return {
+        "scope": "640x480 four-byte solid black, alpha 0 or 255",
+        "pixel_frames": len(hashed),
+        "matched_frames": matched,
+        "percent": round(100 * matched / len(hashed), 3),
     }
 
 
@@ -300,8 +321,10 @@ class FlipCapture:
     def __init__(self, flag, prefix):
         self.flag = Path(flag)
         self.prefix = Path(prefix)
+        self.start_count = 0
 
     def open(self):
+        self.start_count = len(self.files())
         self.flag.write_text("capture\n", encoding="ascii")
 
     def files(self):
@@ -311,7 +334,7 @@ class FlipCapture:
         )
 
     def poll(self):
-        if self.flag.exists() and len(self.files()) >= CAPTURE_FLIPS:
+        if self.flag.exists() and len(self.files()) - self.start_count >= CAPTURE_FLIPS:
             self.close()
             return True
         return False
@@ -320,8 +343,23 @@ class FlipCapture:
         self.flag.unlink(missing_ok=True)
 
 
+def configure_flip_capture(env, out_dir, census):
+    capture_dir = out_dir / "capture"
+    capture_dir.mkdir()
+    prefix = capture_dir / "hold"
+    flag = out_dir / "capture.flag"
+    env["RECOMP_FB_DUMP"] = str(prefix)
+    env["RECOMP_FB_DUMP_FLIPS"] = str(flag)
+    env["RECOMP_FB_DUMP_FLIPS_ONLY"] = "1"
+    if not census:
+        # Census snapshots are written by the periodic report.
+        env["RECOMP_PB_REPORT_MS"] = "600000"
+    return FlipCapture(flag, prefix)
+
+
 def run_once(out_dir, label, scene, env_overrides, threads, watchdog, profile, census,
-             config, dump=False, trace_frame=False, capture=False):
+             config, dump=False, trace_frame=False, capture=False, capture_movement=False,
+             trace_after=TRACE_AFTER):
     out_dir = Path(out_dir).resolve()
     out_dir.mkdir(parents=True, exist_ok=False)
     save = out_dir / "save"
@@ -349,22 +387,16 @@ def run_once(out_dir, label, scene, env_overrides, threads, watchdog, profile, c
     if census:
         env["RECOMP_GPU_CENSUS"] = str(out_dir / "census.csv")
         env["RECOMP_GPU_CENSUS_GATE"] = str(census_gate.path)
-    if dump and not capture:
+    if dump and not (capture or capture_movement):
         (out_dir / "dumps").mkdir()
         env["RECOMP_FB_DUMP"] = str(out_dir / "dumps" / "f")
     trace_flag = out_dir / "trace.flag"
-    capture_flag = out_dir / "capture.flag"
     capture_control = None
-    if capture:
+    if capture or capture_movement:
         # RECOMP_FB_DUMP_FLIPS dumps every flip while the flag exists; it is
         # created for CAPTURE_FLIPS flips once the hold is being measured, so
         # renderers can be compared on the same static picture (G4).
-        (out_dir / "capture").mkdir()
-        env["RECOMP_FB_DUMP"] = str(out_dir / "capture" / "hold")
-        env["RECOMP_FB_DUMP_FLIPS"] = str(capture_flag)
-        capture_control = FlipCapture(capture_flag, out_dir / "capture" / "hold")
-        # No report-time dumps in the same sequence (they can be mid-frame).
-        env["RECOMP_PB_REPORT_MS"] = "600000"
+        capture_control = configure_flip_capture(env, out_dir, census)
     if trace_frame:
         # RECOMP_FRAME_TRACE logs every batch of one frame once the flag
         # exists; it is created TRACE_AFTER seconds into the movement window.
@@ -388,6 +420,8 @@ def run_once(out_dir, label, scene, env_overrides, threads, watchdog, profile, c
     last_panel_press = -1e9
     panel_presses = 0
     sent = 0
+    movement_captures = []
+    movement_capture_start = None
     result = {
         "label": label, "scene": scene, "env": env_overrides, "threads": threads,
         "generation": cwd.parents[1].name, "toolkit_tree": build.TOOLKIT_TREE,
@@ -412,7 +446,7 @@ def run_once(out_dir, label, scene, env_overrides, threads, watchdog, profile, c
                     if hold_run >= HOLD_DETECT:
                         marks["hold"] = i - HOLD_DETECT + 1
                         result["change_source"] = source
-                        if capture_control:
+                        if capture:
                             capture_control.open()
                             marks["capture_start"] = len(rows) - 1
                             state = "capture"
@@ -459,7 +493,21 @@ def run_once(out_dir, label, scene, env_overrides, threads, watchdog, profile, c
                         marks["movement_start"] = i
                         profile_gate.open(now)
                         census_gate.open(now)
-                    if (trace_frame and elapsed >= MOVEMENT_START + TRACE_AFTER
+                    if capture_movement and len(movement_captures) < len(MOVEMENT_CAPTURE_OFFSETS):
+                        if (movement_capture_start is None and
+                                elapsed >= MOVEMENT_START + MOVEMENT_CAPTURE_OFFSETS[len(movement_captures)]):
+                            movement_capture_start = len(capture_control.files())
+                            capture_control.open()
+                            marks[f"movement_capture_{len(movement_captures)}_start"] = i
+                        if movement_capture_start is not None and capture_control.poll():
+                            movement_captures.append({
+                                "offset_seconds": MOVEMENT_CAPTURE_OFFSETS[len(movement_captures)],
+                                "files": [path.name for path in
+                                          capture_control.files()[movement_capture_start:]],
+                            })
+                            marks[f"movement_capture_{len(movement_captures) - 1}_end"] = i
+                            movement_capture_start = None
+                    if (trace_frame and elapsed >= MOVEMENT_START + trace_after
                             and not trace_flag.exists()):
                         trace_flag.write_text("trace\n", encoding="ascii")
                     if elapsed >= MOVEMENT_START + MOVEMENT_SECONDS:
@@ -484,6 +532,9 @@ def run_once(out_dir, label, scene, env_overrides, threads, watchdog, profile, c
                     last_panel_press = rows[-1]["t"]
                     panel_presses += 1
             if state == "finishing":
+                if capture_movement and len(movement_captures) != len(MOVEMENT_CAPTURE_OFFSETS):
+                    result["error"] = "movement flip captures did not produce two images per window"
+                    break
                 if wait_for_outputs(out_dir, stderr_path, profile, census, process):
                     break
                 result["error"] = "profile or census output was not written"
@@ -519,6 +570,12 @@ def run_once(out_dir, label, scene, env_overrides, threads, watchdog, profile, c
     result["flips"] = len(rows)
     if capture_control:
         result["captures"] = [path.name for path in capture_control.files()]
+    if capture_movement:
+        result["movement_captures"] = movement_captures
+    if trace_frame:
+        trace_log = stderr_path.read_text(encoding="utf-8", errors="replace")
+        if "[FTRACE] frame begins" not in trace_log or "[FTRACE] end of frame" not in trace_log:
+            result["error"] = result.get("error") or "requested frame trace did not complete"
     if "world" in marks:
         result["world_t"] = round(rows[marks["world"]]["t"] - rows[0]["t"], 2)
     if "stationary_start" in marks and "stationary_end" in marks:
@@ -531,12 +588,14 @@ def run_once(out_dir, label, scene, env_overrides, threads, watchdog, profile, c
             result["stationary"]["vertices_per_frame"] = round(
                 statistics.mean(r["vertices"] for r in rows[a:b]), 1)
         result["stationary_distinct"] = distinct_metrics(rows, a, b)
+        result["stationary_known_black"] = known_black_metrics(rows[a:b])
         result["stationary_agreement"] = pixel_constant_agreement(rows, a, b)
         result["hold_frames_before_measure"] = a - marks["hold"]
     if "movement_start" in marks and "movement_end" in marks:
         a, b = marks["movement_start"], marks["movement_end"] + 1
         result["movement"] = frame_metrics(rows[a:b])
         result["movement_distinct"] = distinct_metrics(rows, a, b)
+        result["movement_known_black"] = known_black_metrics(rows[a:b])
         result["movement_agreement"] = pixel_constant_agreement(rows, a, b)
     if profile:
         result["profile"] = parse_profile(out_dir / "profile.txt")
@@ -604,6 +663,8 @@ def summarize(results):
                                             for r in runs]),
             "movement_distinct_low_1pct_fps": stats([
                 get(r, "movement_distinct", "distinct_low_1pct_fps") for r in runs]),
+            "movement_known_black_pct": stats([
+                get(r, "movement_known_black", "percent") for r in runs]),
             "game_gpu_wait_pct": stats([get(r, "profile", "game_thread", "gpu_wait_pct")
                                         for r in runs]),
             "nv2a_busy_pct": stats([get(r, "profile", "nv2a_thread", "busy_pct") for r in runs]),
@@ -642,13 +703,23 @@ def main(argv=None):
     parser.add_argument("--capture", action="store_true",
                         help="dump flips at the start of the stationary hold, for comparing "
                              "renderers (tools/compare_frames.py)")
+    parser.add_argument("--capture-movement", action="store_true",
+                        help="dump flips at two scripted movement points (diagnostic; may affect fps)")
     parser.add_argument("--trace-frame", action="store_true",
                         help="log every batch of one frame during movement (RECOMP_FRAME_TRACE)")
+    parser.add_argument("--trace-after", type=float, default=TRACE_AFTER,
+                        help="seconds into movement before tracing a frame (default: 10)")
     parser.add_argument("--config", default="Release")
     parser.add_argument("--out", type=Path, help="results directory (default analysis/bench/<time>)")
     args = parser.parse_args(argv)
     try:
         variants = [parse_env(spec) for spec in (args.variant or ["cpu:"])]
+        if args.capture_movement and args.scene != "movement":
+            raise BenchError("--capture-movement requires --scene movement")
+        if args.trace_frame and args.scene != "movement":
+            raise BenchError("--trace-frame requires --scene movement")
+        if not math.isfinite(args.trace_after) or not 0 <= args.trace_after < MOVEMENT_SECONDS:
+            raise BenchError("--trace-after must be within the movement window")
         if len({name for name, _ in variants}) != len(variants):
             raise BenchError("Variant names must be distinct")
         out = args.out or build.ANALYSIS_DIR / "bench" / time.strftime("%Y%m%d-%H%M%S")
@@ -664,7 +735,8 @@ def main(argv=None):
                     f"{run_dir.name}-retry{attempt}")
                 result = run_once(attempt_dir, name, args.scene, env, args.threads,
                                   args.watchdog, not args.no_profile, args.census, args.config,
-                                  args.dump, args.trace_frame, args.capture)
+                                  args.dump, args.trace_frame, args.capture, args.capture_movement,
+                                  args.trace_after)
                 if not result.get("error"):
                     break
                 attempt_errors.append({"attempt": attempt + 1, "error": result["error"],
@@ -679,6 +751,11 @@ def main(argv=None):
             print(f"[bench]   state {result['state']}, world at {result.get('world_t')} s, "
                   f"stationary {stationary.get('fps')} fps, "
                   f"movement distinct {movement.get('distinct_fps')} fps", flush=True)
+            black = result.get("movement_known_black")
+            if black and black["matched_frames"]:
+                print(f"[bench]   warning: {black['percent']}% of hashed movement frames match "
+                      "known black signatures; distinct fps does not establish world fps",
+                      file=sys.stderr, flush=True)
             table = summarize(results)
             build.write_json(out / "summary.json", {
                 "scene": args.scene, "runs_per_variant": args.runs, "threads": args.threads,

@@ -16,6 +16,7 @@ recomp_func_t recomp_lookup(uint32_t va) { (void)va; return NULL; }
 recomp_func_t recomp_lookup_manual(uint32_t va) { (void)va; return NULL; }
 
 extern void nv2a_pb_exec_method(uint32_t subch, uint32_t method, uint32_t param);
+extern void nv2a_pb_exec_report(void);
 
 #define REQUIRE(condition, message) do { \
     if (!(condition)) { fprintf(stderr, "FAIL: %s\n", message); return 0; } \
@@ -132,6 +133,53 @@ static void fake_draw(const Nv2aSurface *surface, const Nv2aBatch *batch)
 
 static const Nv2aBackend fake_backend = {NULL, fake_draw, NULL};
 
+static unsigned s_fake_clears, s_fake_clear_bad;
+
+static void fake_clear(const Nv2aSurface *surface, const Nv2aRenderState *state,
+                       uint32_t flags, uint32_t color, uint32_t zstencil)
+{
+    (void)color;
+    s_fake_clears++;
+    if (!surface || !state || (flags != 1 && flags != 3) || zstencil != 0xFFFFFF5Au)
+        s_fake_clear_bad++;
+}
+
+static const Nv2aBackend fake_complete_backend = {fake_clear, fake_draw, NULL};
+static const Nv2aBackend fake_clear_only_backend = {fake_clear, NULL, NULL};
+
+static int test_depth_clear_owner(const char *xbe, const char *mode)
+{
+    uint32_t surface = XBOX_CONTIG_BASE + 0x00200000u;
+    unsigned expected_callbacks = 0;
+
+    REQUIRE(initialize(xbe), "initialize depth clear owner fixture");
+    method(0x0200, 16u << 16);
+    method(0x0204, 16u << 16);
+    method(0x0208, 0x128);
+    method(0x020C, 64u | 64u << 16);
+    method(0x0210, surface - XBOX_CONTIG_BASE);
+    method(0x0214, surface + 0x1000 - XBOX_CONTIG_BASE);
+    if (strcmp(mode, "depth-owner-backend") == 0) {
+        nv2a_backend_register(&fake_complete_backend);
+        expected_callbacks = 2;
+    } else if (strcmp(mode, "depth-owner-draw-only") == 0) {
+        nv2a_backend_register(&fake_backend);
+    } else if (strcmp(mode, "depth-owner-clear-only") == 0) {
+        nv2a_backend_register(&fake_clear_only_backend);
+        expected_callbacks = 2;
+    } else {
+        REQUIRE(strcmp(mode, "depth-owner-cpu") == 0, "valid depth clear owner mode");
+    }
+    method(0x1D8C, 0xFFFFFF5Au);
+    method(0x1D94, 1);
+    method(0x1D94, 3);
+    nv2a_census_write();
+    REQUIRE(s_fake_clears == expected_callbacks && !s_fake_clear_bad,
+            "depth clear callback receives the original arguments");
+    printf("depth clear callbacks %u\n", s_fake_clears);
+    return 1;
+}
+
 /* Clear, flip, flip again unchanged, clear another colour, flip; then the
  * same with a back end registered, which owns the pixels. */
 static int test_executor(const char *xbe)
@@ -177,6 +225,32 @@ static void screen_triangle(void)
         method_float(0x1508, 1);
     }
     method(0x17FC, 0);
+}
+
+static int test_flip_dumps(const char *xbe, const char *gate)
+{
+    uint32_t surface = XBOX_CONTIG_BASE + 0x00200000u;
+    FILE *f;
+
+    REQUIRE(initialize(xbe), "initialize flip capture fixture");
+    method(0x0200, 16u << 16);
+    method(0x0204, 16u << 16);
+    method(0x0208, 0x108);
+    method(0x020C, 64);
+    method(0x0210, surface - XBOX_CONTIG_BASE);
+    screen_triangle();
+    nv2a_pb_exec_report();
+    flip();
+    nv2a_pb_exec_report();
+    f = fopen(gate, "wb");
+    REQUIRE(f && fclose(f) == 0, "open the flip capture gate");
+    clear_color(0xFF345678u);
+    flip();
+    REQUIRE(remove(gate) == 0, "close the flip capture gate");
+    clear_color(0xFFAABBCCu);
+    flip();
+    nv2a_pb_exec_report();
+    return 1;
 }
 
 /* A draw before the gate opens is not counted; after it opens, a
@@ -387,6 +461,27 @@ int main(int argc, char **argv)
             _putenv_s("RECOMP_SWIZZLED_RT", "1") != 0 || !test_census(argv[1], gate))
             return 1;
         puts("census run finished");
+        return 0;
+    }
+    if (strcmp(argv[2], "dump-default") == 0 || strcmp(argv[2], "dump-flip-only") == 0) {
+        char gate[1024];
+        int flip_only = strcmp(argv[2], "dump-flip-only") == 0;
+        snprintf(gate, sizeof gate, "%s.gate", argv[3]);
+        remove(gate);
+        if (_putenv_s("RECOMP_FB_DUMP", argv[3]) != 0 ||
+            _putenv_s("RECOMP_FB_DUMP_FLIPS", gate) != 0 ||
+            _putenv_s("RECOMP_FB_DUMP_FLIPS_ONLY", flip_only ? "1" : "0") != 0 ||
+            !test_flip_dumps(argv[1], gate))
+            return 1;
+        puts("flip capture tests passed");
+        return 0;
+    }
+    if (strncmp(argv[2], "depth-owner-", 12) == 0) {
+        if (_putenv_s("RECOMP_GPU_CENSUS", argv[3]) != 0 ||
+            _putenv_s("RECOMP_GPU_CENSUS_GATE", "") != 0 ||
+            !test_depth_clear_owner(argv[1], argv[2]))
+            return 1;
+        puts("depth clear owner tests passed");
         return 0;
     }
     return 2;

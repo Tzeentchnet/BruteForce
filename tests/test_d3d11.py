@@ -135,3 +135,183 @@ def test_native_bc_upload_matches_cpu_with_stale_pitch_and_cube_mips(device, tmp
                               for data in images]
                     assert pixels[0] == (*rgb, alpha), (row, column, x, y, pixels)
                     assert pixels[1] == pixels[0], (row, column, x, y, pixels)
+
+
+def render_frames(mode, output, frame_count):
+    env = {key: value for key, value in os.environ.items() if not key.startswith("RECOMP_")}
+    result = subprocess.run(
+        [D3D11_EXE, str(XBE), mode, str(output)],
+        capture_output=True, text=True, check=False, timeout=120, env=env,
+    )
+    assert result.returncode == 0, result.stderr
+    data = output.read_bytes()
+    frame_bytes = SIZE * SIZE * 4
+    assert len(data) == frame_count * frame_bytes
+    return [data[i:i + frame_bytes] for i in range(0, len(data), frame_bytes)], result
+
+
+def rgb_at(frame, x, y):
+    offset = (y * SIZE + x) * 4
+    return frame[offset + 2], frame[offset + 1], frame[offset]
+
+
+def rgba_at(frame, x, y):
+    offset = (y * SIZE + x) * 4
+    return frame[offset + 2], frame[offset + 1], frame[offset], frame[offset + 3]
+
+
+@pytest.mark.parametrize("mode", [
+    "gpu-clear-warp",
+    "gpu-clear-vsh-warp",
+    "gpu-clear-vertical-warp",
+    pytest.param("gpu-clear-hardware", marks=pytest.mark.skipif(
+        not HARDWARE, reason="set BRUTEFORCE_TEST_D3D11_HARDWARE=1 for a hardware device")),
+    pytest.param("gpu-clear-vsh-hardware", marks=pytest.mark.skipif(
+        not HARDWARE, reason="set BRUTEFORCE_TEST_D3D11_HARDWARE=1 for a hardware device")),
+])
+def test_rectangular_clears_preserve_channels_depth_stencil_and_draw_state(mode, tmp_path):
+    frames, result = render_frames(mode, tmp_path / "clear.raw", 16)
+    assert "rectangular clear frames 16" in result.stdout
+    if "vsh" in mode:
+        checks = re.findall(r"\[VSH-VERIFY\] (\d+) batches checked, (\d+) differ", result.stderr)
+        assert checks and all(int(differ) == 0 for _, differ in checks), result.stderr
+
+    black, green = (0, 0, 0, 255), (0, 255, 0, 255)
+    for y in range(SIZE):
+        for x in range(SIZE):
+            in_depth_rect = 16 <= x < 32 and 16 <= y < 32
+            in_channels = 10 <= x < 20 and 20 <= y < 30
+            in_green_channel = 20 <= x < 30 and 20 <= y < 30
+            masked = ((0xCC, 0x20, 0x77, 0x66) if in_channels else
+                      (0x10, 0x44, 0x30, 0x7F) if in_green_channel else
+                      (0x10, 0x20, 0x30, 0x7F))
+            small_window = x < 4 and y < 4
+            red_rect = 10 <= x < 20 and 10 <= y < 20
+            blue_rect = 40 <= x < 48 and 40 <= y < 48
+            expected = [
+                (0x11, 0x22, 0x33, 0xAA),
+                black if y < 8 or y >= 56 else green,
+                masked,
+                (0x55, *masked[1:]),
+                (0xF0, 0xA0, 0, 255) if x >= 60 and y >= 60 else (0x10, 0x10, 0x10, 255),
+                green,
+                black if in_depth_rect else green,
+                green,
+                green if in_depth_rect else black,
+                black if in_depth_rect else green,
+                (0xEE, 0xEE, 0xEE, 255) if 6 <= x < 14 and 10 <= y < 16
+                else (0x22, 0x33, 0x44, 255),
+                (0xEE, 0xEE, 0xEE, 255) if 6 <= x < 14 and 5 <= y < 8
+                else (0x22, 0x33, 0x44, 255),
+                (0, 0, 255, 255) if blue_rect else (0x33, 0x44, 0x55, 255),
+                black if in_depth_rect else green,
+                green if small_window else (255, 0, 0, 255) if red_rect else black,
+                (255, 0, 0, 255) if small_window else (0, 0, 255, 255) if blue_rect else black,
+            ]
+            for frame, color in enumerate(expected):
+                assert rgba_at(frames[frame], x, y) == color, (mode, frame, x, y, color)
+
+
+@pytest.mark.parametrize(("cpu_mode", "gpu_mode"), [
+    ("cpu-clip", "gpu-clip-warp"),
+    ("cpu-clip-vsh", "gpu-clip-vsh-warp"),
+    pytest.param("cpu-clip", "gpu-clip-hardware", marks=pytest.mark.skipif(
+        not HARDWARE, reason="set BRUTEFORCE_TEST_D3D11_HARDWARE=1 for a hardware device")),
+    pytest.param("cpu-clip-vsh", "gpu-clip-vsh-hardware", marks=pytest.mark.skipif(
+        not HARDWARE, reason="set BRUTEFORCE_TEST_D3D11_HARDWARE=1 for a hardware device")),
+])
+def test_window_clip_on_base_extended_and_gpu_vertex_paths(tmp_path, cpu_mode, gpu_mode):
+    cpu, _ = render_frames(cpu_mode, tmp_path / "cpu-clip.raw", 12)
+    gpu, result = render_frames(gpu_mode, tmp_path / "gpu-clip.raw", 12)
+    assert "window clip frames 12" in result.stdout
+    if "vsh" in gpu_mode:
+        checks = re.findall(r"\[VSH-VERIFY\] (\d+) batches checked, (\d+) differ", result.stderr)
+        assert checks and all(int(differ) == 0 for _, differ in checks), result.stderr
+
+    black, white = (0, 0, 0), (255, 255, 255)
+    for y in range(SIZE):
+        for x in range(SIZE):
+            first = 4 <= x <= 11 and 4 <= y <= 11
+            second = 20 <= x <= 27 and 4 <= y <= 11
+            eight = 20 <= y <= 22 and any(2 + 7 * i <= x <= 4 + 7 * i for i in range(8))
+            expected = [
+                white,
+                (0x11, 0x22, 0x33),
+                white if first else black,
+                white if first or second else black,
+                black if first or second else white,
+                (255, 0, 0) if first else (0, 255, 0) if second else black,
+                white if 8 <= x <= 15 and 5 <= y <= 7 else black,
+                white if 8 <= x <= 15 and 10 <= y <= 15 else black,
+                white if eight else black,
+                black if eight else white,
+                black,
+                white,
+            ]
+            for frame, color in enumerate(expected):
+                assert rgb_at(cpu[frame], x, y) == color, (cpu_mode, frame, x, y, color)
+                assert rgb_at(gpu[frame], x, y) == color, (gpu_mode, frame, x, y, color)
+
+
+@pytest.mark.parametrize("mode", [
+    "gpu-depth-warp",
+    "gpu-depth-vsh-warp",
+    pytest.param("gpu-depth-hardware", marks=pytest.mark.skipif(
+        not HARDWARE, reason="set BRUTEFORCE_TEST_D3D11_HARDWARE=1 for a hardware device")),
+    pytest.param("gpu-depth-vsh-hardware", marks=pytest.mark.skipif(
+        not HARDWARE, reason="set BRUTEFORCE_TEST_D3D11_HARDWARE=1 for a hardware device")),
+])
+def test_depth_alias_shadow_comparisons_and_layout_guards(mode, tmp_path):
+    frames, result = render_frames(mode, tmp_path / "depth.raw", 45)
+    assert "depth texture frames 45" in result.stdout
+    assert "depth texture alias rejected" in result.stderr
+    assert "has not been initialized from guest memory or a GPU depth clear" in result.stderr
+    assert "depth texture stage mode 3 is unsupported" in result.stderr
+    assert "depth texture stage mode 2 is unsupported on base draws" in result.stderr
+    assert "depth cube textures are unsupported" in result.stderr
+    if "vsh" in mode:
+        checks = re.findall(r"\[VSH-VERIFY\] (\d+) batches checked, (\d+) differ", result.stderr)
+        assert checks and all(int(differ) == 0 for _, differ in checks), result.stderr
+    white_frames = {0, 6, 7, 8, 9, 11, 13, 15, 17, 20, 21, 24, 25, 26, 28, 29, 43}
+    for frame, image in enumerate(frames):
+        expected = (255, 255, 255) if frame in white_frames else (0, 0, 0)
+        expected_alpha = 255 if frame in white_frames or frame >= 30 else 0
+        for y in range(2, SIZE - 2):
+            for x in range(2, SIZE - 2):
+                color = ((255, 255, 255) if (x >= SIZE // 2 if frame == 40
+                                             else x < SIZE // 2) else (0, 0, 0)
+                         ) if frame in (40, 41) else expected
+                alpha = (255 if x >= SIZE // 2 else 0) if frame == 40 else expected_alpha
+                assert rgb_at(image, x, y) == color, (mode, frame, x, y, color)
+                assert image[(y * SIZE + x) * 4 + 3] == alpha, (mode, frame, x, y)
+
+
+def test_invalid_depth_texture_option_is_rejected(tmp_path):
+    env = {key: value for key, value in os.environ.items() if not key.startswith("RECOMP_")}
+    result = subprocess.run(
+        [D3D11_EXE, str(XBE), "gpu-depth-invalid", str(tmp_path / "unused.raw")],
+        capture_output=True, text=True, check=False, timeout=30, env=env,
+    )
+    assert result.returncode != 0
+    assert "RECOMP_GPU_DEPTH_TEXTURE must be 0 or 1" in result.stderr
+
+
+@pytest.mark.parametrize("mode", ["guard", "guard-invalid"])
+def test_surface_guard_page_exclusion(mode, tmp_path):
+    env = {key: value for key, value in os.environ.items()
+           if not key.startswith("RECOMP_") and not key.startswith("BRUTEFORCE_SURFACE_GUARD")}
+    report = tmp_path / "guard.csv"
+    result = subprocess.run(
+        [D3D11_EXE, str(XBE), mode, str(report)],
+        capture_output=True, text=True, check=False, timeout=30, env=env,
+    )
+    assert result.returncode == 0, result.stderr
+    if mode == "guard-invalid":
+        assert "BRUTEFORCE_SURFACE_GUARD_EXCLUDE_PAGE requires" in result.stderr
+    else:
+        assert "surface guard exclusion passed" in result.stdout
+        contents = report.read_text()
+        assert re.search(r"# EXCLUDED_PAGE,[0-9A-F]{8},4096: accesses on this page are not observed",
+                         contents)
+        assert re.search(r", [1-9]\d* faults,", contents), contents
+        assert re.search(r",[^,\n]+\+0x[0-9a-f]+$", contents, re.MULTILINE), contents

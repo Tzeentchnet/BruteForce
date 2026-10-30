@@ -13,7 +13,8 @@
  * with the full pixel-pipeline state (nv2a_backend_ext.h). Rendering is
  * GPU-authoritative:
  *   - one render target per guest colour surface and one D24S8 buffer per
- *     zeta surface, seeded once from guest memory;
+ *     zeta surface; colour and eligible experimental depth buffers are
+ *     seeded once from guest memory;
  *   - a texture whose address is a colour surface drawn here samples that
  *     render target directly (render to texture without readback);
  *   - other textures are decoded into a hashed cache: the full contents are
@@ -50,6 +51,7 @@
 #include <string.h>
 
 #include "d3d/d3d8_swizzle.h"
+#include "kernel.h"
 #include "nv2a_backend.h"
 #include "nv2a_backend_ext.h"
 #include "d3d11_backend.h"
@@ -65,6 +67,7 @@ static ID3D11Device *s_dev;
 static ID3D11DeviceContext *s_ctx;
 static int s_failed;
 static int s_warp;
+static int s_depth_texture;
 static volatile LONG s_device_thread;
 
 /* ---- statistics ---------------------------------------------------------- */
@@ -74,6 +77,7 @@ static struct {
     unsigned overlap_rtt;       /* a texture inside a surface but not at its start */
     unsigned vdraws, vraw, vfall, kup, kskip;  /* draw_vsh: drawn, raw streams, CPU, constants */
     unsigned tex_gpu, tex_cpu, tex_bc, tex_direct, tex_pitch;
+    unsigned depth_seeds, depth_samples, depth_snapshots, depth_rejected;
     uint64_t tex_hashed_bytes;
     double readback_ms;
 } s_st;
@@ -107,6 +111,7 @@ static void stats_flip(void)
                         " %u visibility reads waiting %.1f ms, %u reports written"
                         " asynchronously (%u polls found one pending),"
                         " textures GPU %u CPU %u BC %u direct %u, %u stale pitches,"
+                        " depth seeds %u samples %u snapshots %u rejected %u,"
                         " %llu bytes fully hashed\n",
                 s_st.flips, s_st.draws, s_st.xdraws, s_st.vdraws, s_st.vraw, s_st.vfall,
                 s_st.tris, s_st.uploads, s_st.rtt, s_st.overlap_rtt, s_st.clears,
@@ -114,6 +119,7 @@ static void stats_flip(void)
                 s_st.readbacks ? s_st.readback_ms / s_st.readbacks : 0.0,
                 s_q_reads, s_q_wait_ms, s_rep_written, s_rep_flushes,
                 s_st.tex_gpu, s_st.tex_cpu, s_st.tex_bc, s_st.tex_direct, s_st.tex_pitch,
+                s_st.depth_seeds, s_st.depth_samples, s_st.depth_snapshots, s_st.depth_rejected,
                 (unsigned long long)s_st.tex_hashed_bytes);
         s_q_reads = 0;
         s_q_wait_ms = 0.0;
@@ -146,6 +152,8 @@ static int compile(const char *src, size_t len, const char *name, const char *en
 /* Screen-space batches (base interface): stage 0 times the diffuse colour,
  * as the CPU path's raster_indexed. */
 static const char s_base_hlsl[] =
+GPU_WINDOW_CLIP_HLSL
+GPU_SHADOW_HLSL
 "cbuffer B : register(b0) { float4 surf; float4 texinfo; float4 alpha; float4 depth; };\n"
 "struct VSIn { float4 p : POSITION; float4 c : COLOR; float2 uv : TEXCOORD; };\n"
 "struct PSIn { float4 p : SV_Position; float4 c : COLOR; float2 uv : TEXCOORD; };\n"
@@ -163,8 +171,13 @@ static const char s_base_hlsl[] =
 "Texture2D t0 : register(t0);\n"
 "SamplerState s0 : register(s0);\n"
 "float4 ps_main(PSIn i) : SV_Target {\n"
+"  if (!window_allows(i.p.xy)) discard;\n"
 "  float4 c = i.c;\n"
-"  if (texinfo.z > 0.5) c *= t0.Sample(s0, i.uv);\n"
+"  if (texinfo.z > 0.5) {\n"
+"    float4 t = t0.Sample(s0, i.uv);\n"
+"    if (texinfo.w > 0.5) t = shadow_compare(t.r * 16777215.0, 0.0, (uint)texinfo.w - 1).xxxx;\n"
+"    c *= t;\n"
+"  }\n"
 "  if (alpha.z > 0.5) { int v = (int)(c.a * 255.0 + 0.5), r = (int)alpha.y; int f = (int)alpha.x;\n"
 "    bool ok = (f == 7) || (f == 1 && v < r) || (f == 2 && v == r) || (f == 3 && v <= r)\n"
 "      || (f == 4 && v > r) || (f == 5 && v != r) || (f == 6 && v >= r);\n"
@@ -204,7 +217,7 @@ GPU_RC_CBUFFER
 static ID3D11VertexShader *s_base_vs, *s_xvs;
 static ID3D11PixelShader *s_base_ps;
 static ID3D11InputLayout *s_base_layout, *s_xlayout;
-static ID3D11Buffer *s_base_cb, *s_xcb;
+static ID3D11Buffer *s_base_cb, *s_xcb, *s_window_cb;
 static ID3D11RasterizerState *s_rs;
 static ID3D11RasterizerState *s_rs_cull[2][2];  /* [cull back][front counter-clockwise] */
 
@@ -309,6 +322,8 @@ static int ensure_device(void)
     ID3D11Device_CreateBuffer(s_dev, &bd, NULL, &s_base_cb);
     bd.ByteWidth = (sizeof(GpuRcConsts) + 15) & ~15u;
     ID3D11Device_CreateBuffer(s_dev, &bd, NULL, &s_xcb);
+    bd.ByteWidth = 9 * 16;
+    ID3D11Device_CreateBuffer(s_dev, &bd, NULL, &s_window_cb);
 
     memset(&rd, 0, sizeof rd);
     rd.FillMode = D3D11_FILL_SOLID;
@@ -330,7 +345,7 @@ static int ensure_device(void)
 
     s_ps = (PsEntry *)calloc(MAX_PS, sizeof *s_ps);
     if (!s_base_vs || !s_base_ps || !s_base_layout || !s_xvs || !s_xlayout || !s_base_cb
-        || !s_xcb || !s_rs || !s_ps)
+        || !s_xcb || !s_window_cb || !s_rs || !s_ps)
         return 0;
     s_failed = 0;
     fprintf(stderr, "[GPU-D3D11] %s device ready (feature level 0x%x)\n",
@@ -349,9 +364,10 @@ typedef struct {
 } Surf;
 
 typedef struct {
-    uint32_t va, w, h;
-    ID3D11Texture2D *tex;
+    uint32_t va, w, h, pitch, format, surface_type, initialized, recreated;
+    ID3D11Texture2D *tex, *snapshot;
     ID3D11DepthStencilView *dsv;
+    ID3D11ShaderResourceView *srv, *snapshot_srv;
 } Depth;
 
 static Surf s_surf[MAX_SURF];
@@ -454,42 +470,251 @@ static Surf *get_surf(const Nv2aSurface *in)
     return s;
 }
 
+static int readable_guest_range(uint32_t va, uint64_t bytes)
+{
+    const DWORD readable = PAGE_READONLY | PAGE_READWRITE | PAGE_WRITECOPY |
+                           PAGE_EXECUTE_READ | PAGE_EXECUTE_READWRITE | PAGE_EXECUTE_WRITECOPY;
+    uint64_t guest_end = (uint64_t)va + bytes;
+    uintptr_t offset = (uintptr_t)xbox_GetMemoryOffset(), p, end;
+
+    if (!va || !bytes || bytes > XBOX_CONTIG_SIZE ||
+        !(guest_end <= XBOX_CONTIG_SIZE ||
+          (va >= XBOX_CONTIG_BASE && guest_end <= (uint64_t)XBOX_CONTIG_BASE + XBOX_CONTIG_SIZE)) ||
+        offset > UINTPTR_MAX - va)
+        return 0;
+    p = offset + va;
+    if (bytes > UINTPTR_MAX - p)
+        return 0;
+    end = p + (uintptr_t)bytes;
+    while (p < end) {
+        MEMORY_BASIC_INFORMATION info;
+        uintptr_t base, available;
+        if (VirtualQuery((const void *)p, &info, sizeof info) != sizeof info ||
+            info.State != MEM_COMMIT || (info.Protect & (PAGE_GUARD | PAGE_NOACCESS)) ||
+            !(info.Protect & readable))
+            return 0;
+        base = (uintptr_t)info.BaseAddress;
+        if (p < base || p - base >= info.RegionSize)
+            return 0;
+        available = info.RegionSize - (p - base);
+        p += available < end - p ? available : end - p;
+    }
+    return 1;
+}
+
+/* Xbox Z24S8 stores depth in the high 24 bits; D3D11 R24G8 stores it in
+ * the low 24. Seed before any GPU depth writes, not from stale guest bytes
+ * when an existing GPU surface must be recreated. */
+static uint32_t *depth_seed(uint32_t va, uint32_t w, uint32_t h, uint32_t pitch,
+                            uint32_t format, uint32_t surface_type)
+{
+    uint64_t row = (uint64_t)w * 4, span;
+    uint32_t *seed, x, y;
+    if (!w || !h || format != 2 || surface_type != 1 || pitch < row)
+        return NULL;
+    span = (uint64_t)(h - 1) * pitch + row;
+    if (!readable_guest_range(va, span))
+        return NULL;
+    seed = (uint32_t *)malloc((size_t)row * h);
+    if (!seed) {
+        fprintf(stderr, "[GPU-D3D11] cannot allocate depth seed for surface %08X\n", va);
+        return NULL;
+    }
+    for (y = 0; y < h; y++) {
+        const uint8_t *src = GUEST(va) + (size_t)y * pitch;
+        for (x = 0; x < w; x++) {
+            uint32_t value;
+            memcpy(&value, src + (size_t)x * 4, sizeof value);
+            seed[(size_t)y * w + x] = (value >> 8) | (value << 24);
+        }
+    }
+    return seed;
+}
+
 static Depth *get_depth(uint32_t va, uint32_t w, uint32_t h)
 {
     D3D11_TEXTURE2D_DESC td;
+    D3D11_SUBRESOURCE_DATA init;
+    D3D11_DEPTH_STENCIL_VIEW_DESC dv;
+    D3D11_SHADER_RESOURCE_VIEW_DESC sv;
     Depth *d = NULL;
+    uint32_t *seed = NULL;
+    uint32_t pitch = nv2a_backend_reg(0x020C) >> 16;
+    uint32_t surface_format = nv2a_backend_reg(0x0208);
+    uint32_t format = (surface_format >> 4) & 0xF;
+    uint32_t surface_type = (surface_format >> 8) & 0xF;
+    int existing;
+    HRESULT hr;
     int i;
 
     if (!va)
         return NULL;
     for (i = 0; i < s_ndepth; i++)
         if (s_depth[i].va == va) { d = &s_depth[i]; break; }
-    if (d && d->w >= w && d->h >= h)
+    existing = d != NULL;
+    if (d && d->w >= w && d->h >= h &&
+        (!s_depth_texture || (d->pitch == pitch && d->format == format &&
+                              d->surface_type == surface_type)))
         return d;
     if (d) {
         if (s_cur_depth == d)
             s_cur_depth = NULL;
-        ID3D11DepthStencilView_Release(d->dsv);
-        ID3D11Texture2D_Release(d->tex);
-        w = w > d->w ? w : d->w;
-        h = h > d->h ? h : d->h;
+        if (!s_depth_texture || (d->pitch == pitch && d->format == format &&
+                                 d->surface_type == surface_type)) {
+            w = w > d->w ? w : d->w;
+            h = h > d->h ? h : d->h;
+        }
+        if (d->snapshot_srv) ID3D11ShaderResourceView_Release(d->snapshot_srv);
+        if (d->snapshot) ID3D11Texture2D_Release(d->snapshot);
+        if (d->srv) ID3D11ShaderResourceView_Release(d->srv);
+        if (d->dsv) ID3D11DepthStencilView_Release(d->dsv);
+        if (d->tex) ID3D11Texture2D_Release(d->tex);
     } else {
         if (s_ndepth == MAX_SURF)
             return NULL;
         d = &s_depth[s_ndepth++];
     }
     memset(d, 0, sizeof *d);
-    d->va = va; d->w = w; d->h = h;
+    d->va = va; d->w = w; d->h = h; d->pitch = pitch; d->format = format;
+    d->surface_type = surface_type; d->recreated = existing;
     memset(&td, 0, sizeof td);
     td.Width = w; td.Height = h; td.MipLevels = 1; td.ArraySize = 1;
-    td.Format = DXGI_FORMAT_D24_UNORM_S8_UINT;
+    td.Format = s_depth_texture ? DXGI_FORMAT_R24G8_TYPELESS : DXGI_FORMAT_D24_UNORM_S8_UINT;
     td.SampleDesc.Count = 1;
     td.Usage = D3D11_USAGE_DEFAULT;
-    td.BindFlags = D3D11_BIND_DEPTH_STENCIL;
-    if (FAILED(ID3D11Device_CreateTexture2D(s_dev, &td, NULL, &d->tex)))
-        return NULL;
-    ID3D11Device_CreateDepthStencilView(s_dev, (ID3D11Resource *)d->tex, NULL, &d->dsv);
+    td.BindFlags = D3D11_BIND_DEPTH_STENCIL | (s_depth_texture ? D3D11_BIND_SHADER_RESOURCE : 0);
+    if (s_depth_texture && !existing)
+        seed = depth_seed(va, w, h, pitch, format, surface_type);
+    memset(&init, 0, sizeof init);
+    init.pSysMem = seed;
+    init.SysMemPitch = w * 4;
+    hr = ID3D11Device_CreateTexture2D(s_dev, &td, seed ? &init : NULL, &d->tex);
+    if (FAILED(hr) && seed) {
+        fprintf(stderr, "[GPU-D3D11] depth seed upload for %08X failed 0x%08lX;"
+                        " sampling will require a GPU depth clear\n", va, (unsigned long)hr);
+        free(seed);
+        seed = NULL;
+        hr = ID3D11Device_CreateTexture2D(s_dev, &td, NULL, &d->tex);
+    }
+    if (FAILED(hr))
+        goto failed;
+    if (seed) {
+        d->initialized = 1;
+        s_st.depth_seeds++;
+        free(seed);
+        seed = NULL;
+    }
+    memset(&dv, 0, sizeof dv);
+    dv.Format = DXGI_FORMAT_D24_UNORM_S8_UINT;
+    dv.ViewDimension = D3D11_DSV_DIMENSION_TEXTURE2D;
+    hr = ID3D11Device_CreateDepthStencilView(s_dev, (ID3D11Resource *)d->tex, &dv, &d->dsv);
+    if (FAILED(hr))
+        goto failed;
+    if (s_depth_texture) {
+        memset(&sv, 0, sizeof sv);
+        sv.Format = DXGI_FORMAT_R24_UNORM_X8_TYPELESS;
+        sv.ViewDimension = D3D11_SRV_DIMENSION_TEXTURE2D;
+        sv.Texture2D.MipLevels = 1;
+        hr = ID3D11Device_CreateShaderResourceView(s_dev, (ID3D11Resource *)d->tex, &sv, &d->srv);
+        if (FAILED(hr))
+            goto failed;
+    }
     return d;
+
+failed:
+    free(seed);
+    fprintf(stderr, "[GPU-D3D11] depth surface creation failed 0x%08lX\n", (unsigned long)hr);
+    if (d->srv) ID3D11ShaderResourceView_Release(d->srv);
+    if (d->dsv) ID3D11DepthStencilView_Release(d->dsv);
+    if (d->tex) ID3D11Texture2D_Release(d->tex);
+    memset(d, 0, sizeof *d);
+    return NULL;
+}
+
+static ID3D11ShaderResourceView *get_depth_texture(const Nv2aTexture *t, int cube,
+                                                    unsigned levels)
+{
+    static int warned;
+    D3D11_TEXTURE2D_DESC td;
+    D3D11_SHADER_RESOURCE_VIEW_DESC sv;
+    Depth *d = NULL;
+    HRESULT hr;
+    int i;
+
+    for (i = 0; i < s_ndepth; i++)
+        if (s_depth[i].va == t->offset) { d = &s_depth[i]; break; }
+    if (!d || !d->srv || cube || levels > 1 || d->format != 2 || d->surface_type != 1 ||
+        t->width != d->w || t->height != d->h || t->pitch != d->pitch ||
+        t->pitch < t->width * 4) {
+        s_st.depth_rejected++;
+        if (!warned++) {
+            fprintf(stderr, "[GPU-D3D11] depth texture alias rejected: va %08X %ux%u"
+                            " pitch %u levels %u cube %d; surface %s %ux%u pitch %u"
+                            " format %u type %u\n",
+                    t->offset, t->width, t->height, t->pitch, levels, cube,
+                    d ? "tracked" : "missing", d ? d->w : 0, d ? d->h : 0,
+                    d ? d->pitch : 0, d ? d->format : 0, d ? d->surface_type : 0);
+        }
+        return NULL;
+    }
+    if (!d->initialized) {
+        static int warned_uninitialized;
+        s_st.depth_rejected++;
+        if (!warned_uninitialized++)
+            fprintf(stderr, "[GPU-D3D11] depth texture alias rejected: surface %08X"
+                            " has not been initialized from guest memory or a GPU depth clear"
+                            " (%ux%u pitch %u, type %u, recreated %u)\n",
+                    d->va, d->w, d->h, d->pitch, d->surface_type, d->recreated);
+        return NULL;
+    }
+    s_st.depth_samples++;
+    if (d != s_cur_depth)
+        return d->srv;
+    if (!d->snapshot) {
+        ID3D11Texture2D_GetDesc(d->tex, &td);
+        td.BindFlags = D3D11_BIND_SHADER_RESOURCE;
+        hr = ID3D11Device_CreateTexture2D(s_dev, &td, NULL, &d->snapshot);
+        if (FAILED(hr))
+            goto failed;
+        memset(&sv, 0, sizeof sv);
+        sv.Format = DXGI_FORMAT_R24_UNORM_X8_TYPELESS;
+        sv.ViewDimension = D3D11_SRV_DIMENSION_TEXTURE2D;
+        sv.Texture2D.MipLevels = 1;
+        hr = ID3D11Device_CreateShaderResourceView(s_dev, (ID3D11Resource *)d->snapshot,
+                                                   &sv, &d->snapshot_srv);
+        if (FAILED(hr))
+            goto failed;
+    }
+    ID3D11DeviceContext_OMSetRenderTargets(s_ctx, 1, &s_cur->rtv, NULL);
+    ID3D11DeviceContext_CopyResource(s_ctx, (ID3D11Resource *)d->snapshot,
+                                     (ID3D11Resource *)d->tex);
+    ID3D11DeviceContext_OMSetRenderTargets(s_ctx, 1, &s_cur->rtv, d->dsv);
+    s_st.depth_snapshots++;
+    return d->snapshot_srv;
+
+failed:
+    fprintf(stderr, "[GPU-D3D11] depth snapshot creation failed 0x%08lX\n", (unsigned long)hr);
+    if (d->snapshot_srv) ID3D11ShaderResourceView_Release(d->snapshot_srv);
+    if (d->snapshot) ID3D11Texture2D_Release(d->snapshot);
+    d->snapshot = NULL;
+    d->snapshot_srv = NULL;
+    return NULL;
+}
+
+static void reject_depth_mode(uint32_t mode, int cube, int base)
+{
+    static uint32_t warned_base, warned_extended;
+    static int warned_cube;
+    uint32_t *warned = base ? &warned_base : &warned_extended;
+    s_st.depth_rejected++;
+    if (cube) {
+        if (!warned_cube++)
+            fprintf(stderr, "[GPU-D3D11] depth cube textures are unsupported\n");
+    } else if (!(*warned & (1u << mode))) {
+        *warned |= 1u << mode;
+        fprintf(stderr, "[GPU-D3D11] depth texture stage mode %u is unsupported on %s draws\n",
+                mode, base ? "base" : "extended");
+    }
 }
 
 static void bind_targets(Surf *s, Depth *d)
@@ -744,7 +969,7 @@ static int upload(Tex *e, const Nv2aTexture *t, int cube, const char **path)
 
 /* The view a stage samples, and the size its texel-space coordinates are
  * divided by (*tw, *th). */
-static ID3D11ShaderResourceView *get_texture(const Nv2aTexture *t, int cube,
+static ID3D11ShaderResourceView *get_texture(const Nv2aTexture *t, int cube, unsigned stage,
                                              float *tw, float *th)
 {
     Tex *e = NULL;
@@ -766,6 +991,8 @@ static ID3D11ShaderResourceView *get_texture(const Nv2aTexture *t, int cube,
     }
     *tw = (float)t->width;
     *th = (float)t->height;
+    if (s_depth_texture && t->color == 0x2E)
+        return get_depth_texture(t, cube, (nv2a_backend_reg(0x1B04 + stage * 0x40) >> 16) & 0xF);
     if (!cube) {
         /* Render to texture: a surface this back end drew. */
         rt = find_surf(t->offset);
@@ -1109,26 +1336,257 @@ static void unpack_argb(uint32_t c, float o[4])
     o[3] = ((c >> 24) & 0xFF) / 255.0f;
 }
 
+static const char s_clear_hlsl[] =
+"cbuffer C : register(b2) { float4 color; float4 depth; };\n"
+"float4 vs_main(uint id : SV_VertexID) : SV_Position {\n"
+"  float2 p = float2((id << 1) & 2, id & 2);\n"
+"  return float4(p.x * 2.0 - 1.0, 1.0 - p.y * 2.0, depth.x, 1.0);\n"
+"}\n"
+"float4 ps_main() : SV_Target { return color; }\n";
+
+typedef struct {
+    float color[4], depth[4];
+} ClearConsts;
+
+static ID3D11VertexShader *s_clear_vs;
+static ID3D11PixelShader *s_clear_ps;
+static ID3D11Buffer *s_clear_cb;
+static ID3D11BlendState *s_clear_blend[16];
+static ID3D11DepthStencilState *s_clear_ds[4];
+
+static int query_suspend_clear(void);
+static void query_resume_clear(int counting);
+
+static void clear_error(const char *operation, HRESULT hr)
+{
+    fprintf(stderr, "[GPU-D3D11] %s failed 0x%08lX (device removed reason 0x%08lX);"
+                    " cannot safely clear the surface\n",
+            operation, (unsigned long)hr,
+            (unsigned long)ID3D11Device_GetDeviceRemovedReason(s_dev));
+    fflush(stderr);
+    abort();
+}
+
+static void clear_resources(void)
+{
+    D3D11_BUFFER_DESC bd;
+    ID3DBlob *vs = NULL, *ps = NULL;
+    HRESULT hr;
+
+    if (s_clear_vs)
+        return;
+    if (!compile(s_clear_hlsl, sizeof s_clear_hlsl - 1, "clear", "vs_main", "vs_5_0", &vs) ||
+        !compile(s_clear_hlsl, sizeof s_clear_hlsl - 1, "clear", "ps_main", "ps_5_0", &ps))
+        clear_error("compile rectangular clear shaders", E_FAIL);
+    hr = ID3D11Device_CreateVertexShader(s_dev, ID3D10Blob_GetBufferPointer(vs),
+                                         ID3D10Blob_GetBufferSize(vs), NULL, &s_clear_vs);
+    if (FAILED(hr))
+        clear_error("CreateVertexShader(clear)", hr);
+    hr = ID3D11Device_CreatePixelShader(s_dev, ID3D10Blob_GetBufferPointer(ps),
+                                        ID3D10Blob_GetBufferSize(ps), NULL, &s_clear_ps);
+    if (FAILED(hr))
+        clear_error("CreatePixelShader(clear)", hr);
+    ID3D10Blob_Release(vs);
+    ID3D10Blob_Release(ps);
+
+    memset(&bd, 0, sizeof bd);
+    bd.ByteWidth = sizeof(ClearConsts);
+    bd.Usage = D3D11_USAGE_DYNAMIC;
+    bd.BindFlags = D3D11_BIND_CONSTANT_BUFFER;
+    bd.CPUAccessFlags = D3D11_CPU_ACCESS_WRITE;
+    hr = ID3D11Device_CreateBuffer(s_dev, &bd, NULL, &s_clear_cb);
+    if (FAILED(hr))
+        clear_error("CreateBuffer(clear constants)", hr);
+}
+
+static ID3D11BlendState *clear_blend(unsigned mask)
+{
+    D3D11_BLEND_DESC bd;
+    D3D11_RENDER_TARGET_BLEND_DESC *target;
+    HRESULT hr;
+
+    if (s_clear_blend[mask])
+        return s_clear_blend[mask];
+    memset(&bd, 0, sizeof bd);
+    target = &bd.RenderTarget[0];
+    target->SrcBlend = D3D11_BLEND_ONE;
+    target->DestBlend = D3D11_BLEND_ZERO;
+    target->BlendOp = D3D11_BLEND_OP_ADD;
+    target->SrcBlendAlpha = D3D11_BLEND_ONE;
+    target->DestBlendAlpha = D3D11_BLEND_ZERO;
+    target->BlendOpAlpha = D3D11_BLEND_OP_ADD;
+    target->RenderTargetWriteMask = (UINT8)mask;
+    hr = ID3D11Device_CreateBlendState(s_dev, &bd, &s_clear_blend[mask]);
+    if (FAILED(hr))
+        clear_error("CreateBlendState(clear)", hr);
+    return s_clear_blend[mask];
+}
+
+static ID3D11DepthStencilState *clear_depth_stencil(unsigned flags)
+{
+    D3D11_DEPTH_STENCIL_DESC dd;
+    HRESULT hr;
+
+    if (s_clear_ds[flags])
+        return s_clear_ds[flags];
+    memset(&dd, 0, sizeof dd);
+    dd.DepthEnable = (flags & 1) != 0;
+    dd.DepthWriteMask = (flags & 1) ? D3D11_DEPTH_WRITE_MASK_ALL : D3D11_DEPTH_WRITE_MASK_ZERO;
+    dd.DepthFunc = D3D11_COMPARISON_ALWAYS;
+    dd.StencilEnable = (flags & 2) != 0;
+    dd.StencilReadMask = dd.StencilWriteMask = 0xFF;
+    dd.FrontFace.StencilFailOp = D3D11_STENCIL_OP_KEEP;
+    dd.FrontFace.StencilDepthFailOp = D3D11_STENCIL_OP_KEEP;
+    dd.FrontFace.StencilPassOp = D3D11_STENCIL_OP_REPLACE;
+    dd.FrontFace.StencilFunc = D3D11_COMPARISON_ALWAYS;
+    dd.BackFace = dd.FrontFace;
+    hr = ID3D11Device_CreateDepthStencilState(s_dev, &dd, &s_clear_ds[flags]);
+    if (FAILED(hr))
+        clear_error("CreateDepthStencilState(clear)", hr);
+    return s_clear_ds[flags];
+}
+
+static void clear_draw(const D3D11_RECT *rect, uint32_t flags, uint32_t argb,
+                       uint32_t zstencil, float z)
+{
+    D3D11_MAPPED_SUBRESOURCE mapped;
+    ClearConsts c;
+    ID3D11BlendState *blend;
+    ID3D11DepthStencilState *ds;
+    HRESULT hr;
+    int counting;
+
+    clear_resources();
+    blend = clear_blend((flags >> 4) & 0xF);
+    ds = clear_depth_stencil(flags & 3);
+    memset(&c, 0, sizeof c);
+    unpack_argb(argb, c.color);
+    c.depth[0] = z;
+    hr = ID3D11DeviceContext_Map(s_ctx, (ID3D11Resource *)s_clear_cb, 0,
+                                D3D11_MAP_WRITE_DISCARD, 0, &mapped);
+    if (FAILED(hr))
+        clear_error("Map(clear constants)", hr);
+    memcpy(mapped.pData, &c, sizeof c);
+    ID3D11DeviceContext_Unmap(s_ctx, (ID3D11Resource *)s_clear_cb, 0);
+
+    ID3D11DeviceContext_IASetInputLayout(s_ctx, NULL);
+    ID3D11DeviceContext_IASetPrimitiveTopology(s_ctx, D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
+    ID3D11DeviceContext_VSSetShader(s_ctx, s_clear_vs, NULL, 0);
+    ID3D11DeviceContext_VSSetConstantBuffers(s_ctx, 2, 1, &s_clear_cb);
+    ID3D11DeviceContext_GSSetShader(s_ctx, NULL, NULL, 0);
+    ID3D11DeviceContext_PSSetShader(s_ctx, s_clear_ps, NULL, 0);
+    ID3D11DeviceContext_PSSetConstantBuffers(s_ctx, 2, 1, &s_clear_cb);
+    ID3D11DeviceContext_RSSetState(s_ctx, s_rs);
+    ID3D11DeviceContext_RSSetScissorRects(s_ctx, 1, rect);
+    ID3D11DeviceContext_OMSetBlendState(s_ctx, blend, NULL, 0xFFFFFFFFu);
+    ID3D11DeviceContext_OMSetDepthStencilState(s_ctx, ds, (UINT8)zstencil);
+    counting = query_suspend_clear();
+    ID3D11DeviceContext_Draw(s_ctx, 3, 0);
+    query_resume_clear(counting);
+}
+
 /* ---- the back end ---------------------------------------------------------- */
 
 static void d3d_clear(const Nv2aSurface *s, const Nv2aRenderState *rs, uint32_t flags,
                       uint32_t argb, uint32_t zstencil)
 {
+    uint32_t bounds[4];
+    D3D11_RECT rect;
+    float c[4], z;
+    int full_color, full_depth;
+
     if (!begin(s, rs))
         return;
-    if (flags & 0xF0) {
-        float c[4];
-        unpack_argb(argb, c);
-        ID3D11DeviceContext_ClearRenderTargetView(s_ctx, s_cur->rtv, c);
-    }
-    if ((flags & 0x3) && s_cur_depth) {
-        UINT f = ((flags & 1) ? D3D11_CLEAR_DEPTH : 0) | ((flags & 2) ? D3D11_CLEAR_STENCIL : 0);
-        float z = zeta_max() == 65535.0f ? (zstencil & 0xFFFFu) / 65535.0f
-                                         : (zstencil >> 8) / 16777215.0f;
-        ID3D11DeviceContext_ClearDepthStencilView(s_ctx, s_cur_depth->dsv, f, z,
-                                                  (UINT8)(zstencil & 0xFF));
+    if (nv2a_backend_clear_rect(bounds)) {
+        uint32_t sx = s->aa_sx > 1 ? 2 : 1, sy = s->aa_sy > 1 ? 2 : 1;
+        uint32_t x0 = bounds[0] * sx, y0 = bounds[1] * sy;
+        uint32_t x1 = bounds[2] * sx, y1 = bounds[3] * sy;
+        rect.left = (LONG)(x0 < s_cur->w ? x0 : s_cur->w);
+        rect.top = (LONG)(y0 < s_cur->h ? y0 : s_cur->h);
+        rect.right = (LONG)(x1 < s_cur->w ? x1 : s_cur->w);
+        rect.bottom = (LONG)(y1 < s_cur->h ? y1 : s_cur->h);
+    } else {
+        rect.left = rect.top = 0;
+        rect.right = (LONG)s_cur->w;
+        rect.bottom = (LONG)s_cur->h;
     }
     s_st.clears++;
+    if (rect.left >= rect.right || rect.top >= rect.bottom)
+        return;
+    full_color = rect.left == 0 && rect.top == 0 &&
+                 (uint32_t)rect.right == s_cur->w && (uint32_t)rect.bottom == s_cur->h;
+    full_depth = s_cur_depth && rect.left == 0 && rect.top == 0 &&
+                 (uint32_t)rect.right == s_cur_depth->w &&
+                 (uint32_t)rect.bottom == s_cur_depth->h;
+    z = zeta_max() == 65535.0f ? (zstencil & 0xFFFFu) / 65535.0f
+                               : (zstencil >> 8) / 16777215.0f;
+    if ((flags & 0xF0) == 0xF0 && full_color) {
+        unpack_argb(argb, c);
+        ID3D11DeviceContext_ClearRenderTargetView(s_ctx, s_cur->rtv, c);
+        flags &= ~0xF0u;
+    }
+    if ((flags & 3) && full_depth) {
+        UINT f = ((flags & 1) ? D3D11_CLEAR_DEPTH : 0) | ((flags & 2) ? D3D11_CLEAR_STENCIL : 0);
+        ID3D11DeviceContext_ClearDepthStencilView(s_ctx, s_cur_depth->dsv, f, z,
+                                                  (UINT8)(zstencil & 0xFF));
+        if (flags & 1)
+            s_cur_depth->initialized = 1;
+        flags &= ~3u;
+    }
+    if (!s_cur_depth) {
+        if ((flags & 3) && rs && rs->zeta_va)
+            fprintf(stderr, "[GPU-D3D11] cannot clear unavailable depth surface %08X\n",
+                    rs->zeta_va);
+        flags &= ~3u;
+    }
+    if (flags & 0xF3)
+        clear_draw(&rect, flags, argb, zstencil, z);
+}
+
+static int set_window_clip(const Nv2aSurface *s)
+{
+    static struct {
+        uint32_t rect[NV2A_WINDOW_CLIP_COUNT][4];
+        uint32_t info[4];
+    } last;
+    static int have_last;
+    struct {
+        uint32_t rect[NV2A_WINDOW_CLIP_COUNT][4];
+        uint32_t info[4];
+    } c;
+    D3D11_MAPPED_SUBRESOURCE m;
+    unsigned i;
+
+    memset(&c, 0, sizeof c);
+    if (s->window_clip_enabled && s->window_clip.axes == 3) {
+        c.info[0] = s->window_clip.uniform ? 1 : NV2A_WINDOW_CLIP_COUNT;
+        c.info[1] = s->window_clip.exclusive;
+        c.info[2] = s->aa_sx > 1;
+        c.info[3] = s->aa_sy > 1;
+        for (i = 0; i < c.info[0]; i++) {
+            uint32_t h = s->window_clip.horizontal[i];
+            uint32_t v = s->window_clip.vertical[i];
+            c.rect[i][0] = h & 0xFFFu;
+            c.rect[i][1] = (h >> 16) & 0xFFFu;
+            c.rect[i][2] = v & 0xFFFu;
+            c.rect[i][3] = (v >> 16) & 0xFFFu;
+        }
+    }
+    if (!have_last || memcmp(&last, &c, sizeof c)) {
+        HRESULT hr = ID3D11DeviceContext_Map(s_ctx, (ID3D11Resource *)s_window_cb, 0,
+                                              D3D11_MAP_WRITE_DISCARD, 0, &m);
+        if (FAILED(hr)) {
+            fprintf(stderr, "[GPU-D3D11] window clip constants map failed 0x%08lX\n",
+                    (unsigned long)hr);
+            return 0;
+        }
+        memcpy(m.pData, &c, sizeof c);
+        ID3D11DeviceContext_Unmap(s_ctx, (ID3D11Resource *)s_window_cb, 0);
+        memcpy(&last, &c, sizeof c);
+        have_last = 1;
+    }
+    ID3D11DeviceContext_PSSetConstantBuffers(s_ctx, 1, 1, &s_window_cb);
+    return 1;
 }
 
 static void d3d_draw(const Nv2aSurface *s, const Nv2aBatch *b)
@@ -1141,11 +1599,21 @@ static void d3d_draw(const Nv2aSurface *s, const Nv2aBatch *b)
     ID3D11SamplerState *ss = NULL;
     float bf[4], tw = 1.0f, th = 1.0f;
 
-    if (!b || !b->count || !b->state || !begin(s, b->state))
+    if (!b || !b->count || !b->state || !begin(s, b->state) || !set_window_clip(s))
         return;
     rs = b->state;
     if (b->texture) {
-        srv = get_texture(b->texture, 0, &tw, &th);
+        if (s_depth_texture && b->texture->color == 0x2E) {
+            uint32_t mode = nv2a_backend_reg(0x1E70) & 0x1F;
+            int cube = (nv2a_backend_reg(0x1B04) & 4) != 0;
+            if (cube || mode != 1) {
+                reject_depth_mode(mode, cube, 1);
+                return;
+            }
+        }
+        srv = get_texture(b->texture, 0, 0, &tw, &th);
+        if (!srv && s_depth_texture && b->texture->color == 0x2E)
+            return;
         ss = get_sampler(b->texture->addr_u, b->texture->addr_v, b->texture->filter);
     }
     memset(&c, 0, sizeof c);
@@ -1155,6 +1623,8 @@ static void d3d_draw(const Nv2aSurface *s, const Nv2aBatch *b)
         c.tex[0] = 1.0f / tw;
         c.tex[1] = 1.0f / th;
         c.tex[2] = 1.0f;
+        if (b->texture->color == 0x2E && s_depth_texture)
+            c.tex[3] = (float)((nv2a_backend_reg(0x1E6C) & 7) + 1);
     }
     set_alpha_test(rs, c.alpha);
     depth_consts(rs, c.depth);
@@ -1235,7 +1705,7 @@ static int xdraw_prepare(const Nv2aSurface *s, const Nv2aXBatch *b)
     float bf[4];
     int st;
 
-    if (!b || !b->state || !begin(s, b->state))
+    if (!b || !b->state || !begin(s, b->state) || !set_window_clip(s))
         return 0;
     rs = b->state;
     rst = batch_rs(b);
@@ -1262,14 +1732,26 @@ static int xdraw_prepare(const Nv2aSurface *s, const Nv2aXBatch *b)
         uint32_t mode = (rc->stage_program >> (st * 5)) & 0x1F;
         int cube = b->tex_cube[st] && mode == 3;
         float tw = 1.0f, th = 1.0f;
+        if (s_depth_texture && b->tex_valid[st] && b->tex[st].color == 0x2E &&
+            mode != 0 && (b->tex_cube[st] || (mode != 1 && mode != 2))) {
+            reject_depth_mode(mode, b->tex_cube[st], 0);
+            return 0;
+        }
         if (!b->tex_valid[st] || mode < 1 || mode > 3)
             continue;
-        srv[st] = get_texture(&b->tex[st], cube, &tw, &th);
-        if (!srv[st])
+        srv[st] = get_texture(&b->tex[st], cube, st, &tw, &th);
+        if (!srv[st]) {
+            if (s_depth_texture && b->tex[st].color == 0x2E)
+                return 0;
             continue;
+        }
         key.tex_valid[st] = 1;
         key.tex_normalized[st] = b->tex_normalized[st];
         key.tex_cube[st] = (uint8_t)cube;
+        if (s_depth_texture && b->tex[st].color == 0x2E) {
+            key.tex_depth[st] = 1;
+            key.shadow_func = nv2a_backend_reg(0x1E6C) & 7;
+        }
         ss[st] = get_sampler(b->tex[st].addr_u, b->tex[st].addr_v, b->tex[st].filter);
         c.texinfo[st][0] = 1.0f / tw;
         c.texinfo[st][1] = 1.0f / th;
@@ -2028,6 +2510,22 @@ static void query_end(void)
     s_q_active = NULL;
 }
 
+static int query_suspend_clear(void)
+{
+    int counting = s_q_active != NULL;
+    if (counting)
+        query_end();
+    return counting;
+}
+
+static void query_resume_clear(int counting)
+{
+    if (counting) {
+        s_q_active = query_get();
+        ID3D11DeviceContext_Begin(s_ctx, (ID3D11Asynchronous *)s_q_active);
+    }
+}
+
 /* RECOMP_GPU_ZPASS=async: a report is written into guest memory when its
  * queries complete, polled from the NV2A thread's loop, instead of waiting
  * for the GPU at GET_REPORT. The title sees the result later in time, as it
@@ -2260,7 +2758,8 @@ static void d3d_flip(void)
 static const Nv2aBackend s_backend = { d3d_clear, d3d_draw, d3d_flip };
 static const Nv2aBackendExt s_backend_ext = { d3d_xdraw, d3d_xdraw_vsh, d3d_vsh_readback,
                                               d3d_vsh_raw_ok, d3d_readback, d3d_zpass,
-                                              d3d_zpass_count, d3d_zpass_report, d3d_poll };
+                                              d3d_zpass_count, d3d_zpass_report, d3d_poll,
+                                              NV2A_BACKEND_CAP_WINDOW_CLIP };
 
 int bruteforce_d3d11_install(void)
 {
@@ -2268,8 +2767,15 @@ int bruteforce_d3d11_install(void)
     const char *mulzero = getenv("RECOMP_GPU_VSH_MULZERO");
     const char *tex_gpu = getenv("RECOMP_GPU_TEX_DECODE");
     const char *tex_log = getenv("RECOMP_GPU_TEXLOG");
+    const char *depth_texture = getenv("RECOMP_GPU_DEPTH_TEXTURE");
 
+    if (depth_texture && *depth_texture && strcmp(depth_texture, "0") != 0 &&
+        strcmp(depth_texture, "1") != 0) {
+        fprintf(stderr, "[GPU-D3D11] RECOMP_GPU_DEPTH_TEXTURE must be 0 or 1\n");
+        return 0;
+    }
     s_warp = warp && strcmp(warp, "1") == 0;
+    s_depth_texture = depth_texture && strcmp(depth_texture, "1") == 0;
     s_tex_gpu = !tex_gpu || strcmp(tex_gpu, "0") != 0;
     s_tex_log = tex_log && strcmp(tex_log, "1") == 0;
     s_vsh_flags = mulzero && strcmp(mulzero, "1") == 0 ? GPU_VSH_MULZERO : 0;
@@ -2284,5 +2790,7 @@ int bruteforce_d3d11_install(void)
     nv2a_backend_register(&s_backend);
     fprintf(stderr, "[GPU] Direct3D 11 back end registered (RECOMP_GPU=d3d11%s)\n",
             s_warp ? ", WARP" : "");
+    if (s_depth_texture)
+        fprintf(stderr, "[GPU-D3D11] experimental D24 depth texture aliases enabled\n");
     return 1;
 }

@@ -125,7 +125,7 @@ target_include_directories(bruteforce_frame_stats_test PRIVATE
 target_link_libraries(bruteforce_frame_stats_test PRIVATE xboxrecomp)
 
 add_executable(bruteforce_d3d11_test EXCLUDE_FROM_ALL tests/d3d11_test.c
-    tests/d3d11_texture_test.c ${BRUTEFORCE_GPU_SOURCES})
+    tests/d3d11_texture_test.c src/gpu/null_backend.c ${BRUTEFORCE_GPU_SOURCES})
 target_compile_definitions(bruteforce_d3d11_test PRIVATE
     WIN32_LEAN_AND_MEAN NOMINMAX _CRT_SECURE_NO_WARNINGS)
 target_include_directories(bruteforce_d3d11_test PRIVATE
@@ -133,7 +133,7 @@ target_include_directories(bruteforce_d3d11_test PRIVATE
     "${XBOXRECOMP_DIR}/src"
     "${XBOXRECOMP_DIR}/src/kernel"
 )
-target_link_libraries(bruteforce_d3d11_test PRIVATE xboxrecomp d3d11 d3dcompiler)
+target_link_libraries(bruteforce_d3d11_test PRIVATE xboxrecomp d3d11 d3dcompiler dbghelp)
 
 add_executable(bruteforce_color_unpack_test EXCLUDE_FROM_ALL
     tests/color_unpack_test.c "${XBOXRECOMP_DIR}/src/kernel/nv2a_combiner.c")

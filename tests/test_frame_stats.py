@@ -15,8 +15,7 @@ XBE = ROOT / ".deps" / "xboxrecomp" / "tools" / "conformance" / "test.xbe"
 
 
 def run_fixture(mode, output):
-    env = os.environ.copy()
-    env.pop("RECOMP_FRAME_STATS", None)
+    env = {key: value for key, value in os.environ.items() if not key.startswith("RECOMP_")}
     return subprocess.run(
         [FRAME_STATS_EXE, str(XBE), mode, str(output)],
         capture_output=True, text=True, check=False, timeout=30, env=env,
@@ -74,6 +73,39 @@ def test_census_counts_only_while_gated(tmp_path):
     assert counts[("clear_flags", "000000F0")] == 1
     assert counts[("unhandled_method", "00001D7C")] == 1
     assert not (tmp_path / "census.csv.tmp").exists()
+
+
+@pytest.mark.parametrize(("mode", "flip_only"), [
+    ("dump-default", False),
+    ("dump-flip-only", True),
+])
+def test_flip_capture_can_exclude_report_and_after_draw_dumps(mode, flip_only, tmp_path):
+    result = run_fixture(mode, tmp_path / "hold")
+    assert result.returncode == 0, result.stderr
+    assert "flip capture tests passed" in result.stdout
+    images = sorted(tmp_path.glob("hold*.bmp"))
+    if flip_only:
+        assert [path.name for path in images] == ["hold00000.bmp"]
+        assert images[0].read_bytes()[54:57] == bytes((0x78, 0x56, 0x34))
+    else:
+        assert len(images) > 1, "report-time dumps remain enabled by default"
+
+
+@pytest.mark.parametrize(("mode", "backend_owns_depth", "callbacks"), [
+    ("depth-owner-cpu", False, 0),
+    ("depth-owner-draw-only", False, 0),
+    ("depth-owner-clear-only", False, 2),
+    ("depth-owner-backend", True, 2),
+])
+def test_software_depth_clears_only_when_needed(mode, backend_owns_depth, callbacks, tmp_path):
+    output = tmp_path / "depth-owner.csv"
+    result = run_fixture(mode, output)
+    assert result.returncode == 0, result.stderr
+    assert f"depth clear callbacks {callbacks}" in result.stdout
+    _, counts = read_census(output)
+    assert counts[("depth_clear_backend", f"{int(backend_owns_depth):08X}")] == 2
+    assert counts[("clear_flags", "00000001")] == 1
+    assert counts[("clear_flags", "00000003")] == 1
 
 
 @pytest.mark.parametrize("mode", ["probe-on", "probe-off"])

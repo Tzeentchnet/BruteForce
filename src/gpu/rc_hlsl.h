@@ -12,8 +12,30 @@
 typedef struct {
     uint32_t color_icw[8], alpha_icw[8], color_ocw[8], alpha_ocw[8];
     uint32_t final0, final1, control, stage_program, clip_plane_mode;
-    uint8_t tex_valid[4], tex_normalized[4], tex_cube[4], pad;
+    uint32_t shadow_func;
+    uint8_t tex_valid[4], tex_normalized[4], tex_cube[4], tex_depth[4];
 } GpuRcKey;
+
+#define GPU_WINDOW_CLIP_HLSL \
+    "cbuffer WindowClip : register(b1) { uint4 clip_rect[8]; uint4 clip_info; };\n" \
+    "bool window_allows(float2 pos) {\n" \
+    "  if (clip_info.x == 0) return true;\n" \
+    "  uint2 p = (uint2)pos; p.x >>= clip_info.z; p.y >>= clip_info.w;\n" \
+    "  bool inside = false;\n" \
+    "  [loop] for (uint j = 0; j < clip_info.x; ++j) {\n" \
+    "    uint4 r = clip_rect[j];\n" \
+    "    inside = inside || (p.x >= r.x && p.x <= r.y && p.y >= r.z && p.y <= r.w);\n" \
+    "  }\n" \
+    "  return clip_info.y != 0 ? !inside : inside;\n" \
+    "}\n"
+
+#define GPU_SHADOW_HLSL \
+    "float shadow_compare(float depth, float ref, uint f) {\n" \
+    "  bool ok = f == 7 || (f == 1 && depth < ref) || (f == 2 && depth == ref)\n" \
+    "    || (f == 3 && depth <= ref) || (f == 4 && depth > ref)\n" \
+    "    || (f == 5 && depth != ref) || (f == 6 && depth >= ref);\n" \
+    "  return ok ? 1.0 : 0.0;\n" \
+    "}\n"
 
 /* The constant buffer both shaders read (register b0):
  *   surf     surface width, height, 1/width, 1/height (real pixels)

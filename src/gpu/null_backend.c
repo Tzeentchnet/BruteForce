@@ -27,6 +27,7 @@
  */
 #include <windows.h>
 #include <dbghelp.h>
+#include <errno.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -65,6 +66,8 @@ static uint64_t s_faults, s_site_overflow;
 static DWORD s_nv2a_thread;
 static const char *s_report;
 static uint32_t s_flips, s_draws, s_clears;
+static uint32_t s_excluded_page;
+static int s_has_excluded_page;
 static ULONGLONG s_last_report_ms;
 
 static void record_site(uint64_t rip, uint32_t va, char kind, char access, int inside)
@@ -169,13 +172,30 @@ static void note_surfaces(const Nv2aSurface *s, const Nv2aRenderState *rs)
         guard_note(rs->zeta_va, s->width * 4, s->width, s->height, 'Z');
 }
 
+static void guard_protect(uintptr_t lo, uintptr_t hi)
+{
+    DWORD old;
+    if (hi > lo && !VirtualProtect((LPVOID)lo, hi - lo, PAGE_NOACCESS, &old)) {
+        fprintf(stderr, "[GPU] surface guard protection failed at %p (%lu)\n",
+                (void *)lo, (unsigned long)GetLastError());
+        abort();
+    }
+}
+
 static void guard_arm(void)
 {
+    uintptr_t excluded = (uintptr_t)xbox_GetMemoryOffset() + s_excluded_page;
     LONG i, n = s_nranges;
     for (i = 0; i < n; i++) {
-        DWORD old;
-        VirtualProtect((LPVOID)s_ranges[i].host_lo, s_ranges[i].host_hi - s_ranges[i].host_lo,
-                       PAGE_NOACCESS, &old);
+        uintptr_t lo = s_ranges[i].host_lo, hi = s_ranges[i].host_hi;
+        if (!s_has_excluded_page || excluded >= hi || excluded + GUARD_PAGE <= lo) {
+            guard_protect(lo, hi);
+        } else {
+            if (excluded > lo)
+                guard_protect(lo, excluded);
+            if (excluded + GUARD_PAGE < hi)
+                guard_protect(excluded + GUARD_PAGE, hi);
+        }
     }
 }
 
@@ -199,6 +219,9 @@ static void guard_write_report(void)
     fprintf(f, "# surface guard: %u flips, %u draws, %u clears, %llu faults,"
                " %llu sites dropped\n", s_flips, s_draws, s_clears,
             (unsigned long long)s_faults, (unsigned long long)s_site_overflow);
+    if (s_has_excluded_page)
+        fprintf(f, "# EXCLUDED_PAGE,%08X,%u: accesses on this page are not observed\n",
+                s_excluded_page, GUARD_PAGE);
     n = s_nranges;
     for (i = 0; i < n; i++)
         fprintf(f, "SURFACE,%c,%08X,%u,%ux%u\n", s_ranges[i].kind, s_ranges[i].va,
@@ -215,8 +238,22 @@ static void guard_write_report(void)
         si->MaxNameLen = 255;
         if (sym_ready > 0 && SymFromAddr(proc, s->rip, &disp, si))
             snprintf(name, sizeof name, "%s+0x%llx", si->Name, (unsigned long long)disp);
-        else
-            snprintf(name, sizeof name, "?");
+        else {
+            HMODULE module;
+            char path[MAX_PATH];
+            DWORD length;
+            if (GetModuleHandleExA(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS |
+                                   GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
+                                   (LPCSTR)(uintptr_t)s->rip, &module) &&
+                (length = GetModuleFileNameA(module, path, sizeof path)) != 0 &&
+                length < sizeof path) {
+                const char *base = strrchr(path, '\\');
+                snprintf(name, sizeof name, "%s+0x%llx", base ? base + 1 : path,
+                         (unsigned long long)(s->rip - (uintptr_t)module));
+            } else {
+                snprintf(name, sizeof name, "?");
+            }
+        }
         fprintf(f, "%c,%c,%c,%d,%u,%08X,%016llx,%s\n", s->kind, s->access, s->thread,
                 s->inside, s->count, s->first_va, (unsigned long long)s->rip, name);
     }
@@ -276,9 +313,27 @@ static const Nv2aBackendExt s_null_ext = {NULL, NULL, NULL, NULL, NULL, null_zpa
 
 int bruteforce_null_backend_install(void)
 {
+    const char *exclude = getenv("BRUTEFORCE_SURFACE_GUARD_EXCLUDE_PAGE");
+
     s_report = getenv("BRUTEFORCE_SURFACE_GUARD");
     if (s_report && !*s_report)
         s_report = NULL;
+    if (exclude && *exclude) {
+        char *end;
+        unsigned long long value;
+        errno = 0;
+        value = strtoull(exclude, &end, 0);
+        if (!s_report || errno || *end || end == exclude || value > UINT32_MAX ||
+            (value & (GUARD_PAGE - 1))) {
+            fprintf(stderr, "[GPU] BRUTEFORCE_SURFACE_GUARD_EXCLUDE_PAGE requires a"
+                            " page-aligned guest address and an enabled surface guard\n");
+            return 0;
+        }
+        s_excluded_page = (uint32_t)value;
+        s_has_excluded_page = 1;
+        fprintf(stderr, "[GPU] surface guard excludes guest page 0x%08X; accesses on it"
+                        " will not be observed\n", s_excluded_page);
+    }
     if (s_report && !AddVectoredExceptionHandler(1, guard_handler)) {
         fprintf(stderr, "Cannot register the surface guard handler\n");
         return 0;

@@ -527,21 +527,24 @@ eligible formats.
 | Metric | Baseline mean (range) | Candidate mean (range) |
 | --- | --- | --- |
 | Stationary rendered fps | 32.60 (31.72–34.12) | 45.06 (40.91–50.28) |
-| Movement distinct fps | 25.15 (24.83–25.59) | 35.23 (32.84–39.82) |
-| Movement distinct 1% low fps | 21.46 (20.54–22.25) | 32.98 (31.04–36.00) |
+| Movement pixel-change fps (not world fps) | 25.15 (24.83–25.59) | 35.23 (32.84–39.82) |
+| Movement pixel-change 1% low fps (not world fps) | 21.46 (20.54–22.25) | 32.98 (31.04–36.00) |
 | Game-thread GPU wait, sampled | 33.54% (33.30–33.77%) | 24.72% (22.30–29.54%) |
 
-The stationary hold has zero distinct frames. The movement rate uses pixel
-changes, not the higher flip rate, but the whole-frame hash includes HUD
-changes and does not prove each change is a new world frame. Texture decoding
-and asynchronous reports were changed together; the campaign does not
-attribute their individual contributions. One candidate boot stalled after
-12 flips and its retry
+The stationary hold has zero distinct frames. A later audit of each movement
+window found that 58.855–60.197% of its flips matched the exact hash of a
+solid-black 640×480 four-byte image with alpha zero. The percentages count
+flips, not elapsed time. The pixel-change rate therefore does not measure
+visible world throughput; transitions to and from black and HUD changes can
+also count as changes. Texture decoding and asynchronous reports were changed
+together; the campaign does not attribute their individual contributions.
+One candidate boot stalled after 12 flips and its retry
 completed, producing the highest candidate rate. The failed attempt is not
 included in the means. This is not a playability or native-rate claim.
 
-The game thread spent 51.8% of samples in `NtQueryVirtualMemory` in the
-first baseline run and 60.2% in the first candidate run; texture hashing
+Including those black-frame intervals, the game thread spent 51.8% of samples
+in `NtQueryVirtualMemory` in the first baseline run and 60.2% in the first
+candidate run; texture hashing
 accounted for 6.7% and 7.2% of NV2A-thread samples respectively. The
 candidate log records GPU compute and direct BC texture uploads and
 asynchronous report writes. These are sample and event counts, not a
@@ -587,9 +590,125 @@ stationary hold. Comparisons must use those numbered images.
 The movement campaign also logged repeated failed decodes of texture format
 `0x2E` (`LIN_D24S8`) on both the synchronous/CPU-texture and
 asynchronous/GPU-texture variants. The reference CPU sampler lacks that
-format as well. A shader-resource view of an authoritative depth surface may
-be needed, but the access pattern and its effect on the observed image
-differences remain unverified.
+format as well. In a separate null-backend run, the same address
+`0x81754080` was recorded as a 512x512 depth surface. This supports
+investigating an alias, but separate runs and an address match do not prove
+the complete layout, sampling semantics, or effect on the image.
+
+The null surface-guard diagnostic reached the stationary hold and movement,
+then aborted with `Invalid GPU semaphore guest address 0x80001000`. Its
+recorded colour range `0x80000000..0x800FFFFF` covered that page, and the
+semaphore pointer check treats protected pages as inaccessible. The report
+cannot establish whether all guest surface readers have been found. The
+optional `BRUTEFORCE_SURFACE_GUARD_EXCLUDE_PAGE` now leaves one explicitly
+reported page unprotected for a follow-up diagnostic; that page, kernel-mode
+accesses, and later accesses to an already-unprotected page remain blind
+spots. Do not remove per-flip readback on this evidence.
+
+A follow-up run with only page `0x80001000` excluded completed both the
+stationary hold and the 40-second movement window. The last periodic report
+recorded 1,871,291 faults and seven non-NV2A-thread reads at an unsymbolized
+site, with first address `0x817F0740` inside the guard's estimated
+`0x81754080` depth range. Resolving the recorded address using the same
+executable's image base from a separate isolated process and its local PDB
+(`0x7FF742490000`, giving RVA `0x221242C` for the recorded RIP) points to
+`ohci_do_td`'s USB rumble-report read
+(`src/usb/ohci.c:674` in the framework). The original process's image base
+was not saved, so this identification is provisional. The guard estimates
+depth extent from the colour size, and the null backend never writes
+rendered depth; the read is not proof of a guest consumer of GPU depth.
+Future guard reports include a module-relative offset when symbol lookup
+fails. The run's constant-signature rate is a diagnostic only, not a visual
+FPS result.
+
+The experimental D3D11 depth path uses D24S8/R24 views and a separate GPU
+snapshot when sampling a currently bound depth target. It accepts only exact
+address, format, linear layout, dimensions and pitch matches. A newly tracked
+eligible surface is initialized from guest Z24S8 memory, rotating its depth
+and stencil fields to the D3D layout; a full GPU depth clear also initializes
+it. A recreated GPU depth surface is not reseeded from potentially stale
+guest memory and is rejected until cleared. PROJECT2D and PROJECT3D shadow
+comparisons are supported; guest writes, CPU decoding and partial aliases
+remain unsupported. PROJECT3D is limited to extended draws, and a draw with
+an unsupported depth alias or stage mode is skipped with a diagnostic. The
+resource and view approach is informed by Blood Wake; the comparison behavior
+follows xemu's published shader translation. These are emulator prior art,
+not proof of original-hardware equivalence.
+
+### Rectangular clears and software-depth ownership
+
+A traced 640×480 world frame first clears the surface to `FF2674A1` and far
+depth, then clears black/zero-depth letterbox strips at y=0–68 and y=410–479.
+The D3D11 backend previously treated each strip as a full-surface color and
+depth clear, so a strip could zero depth across the scene and reject later
+geometry. The backend now clamps and scales the clear bounds, preserves
+individual color channels, and clears partial depth and stencil regions with
+a scissored draw. Full-surface clears keep their native fast path. Internal
+clear draws are excluded from active visibility queries. A partial depth
+clear does not make an otherwise uninitialized whole depth resource safe to
+sample. If both clear-rectangle axes have not been programmed, the full-clear
+fallback remains; original-hardware reset behavior is not established.
+
+The software executor also cleared its 1280×1024 float depth buffer on
+every Z clear, even with a GPU backend. Patch 0022 skips that roughly 5 MiB
+write only when the registered backend has both draw and clear callbacks.
+CPU rendering and incomplete backends retain it. Per-flip readback and guest
+flush, semaphore, report and flip ordering are unchanged. The census records
+which path owns each depth clear.
+
+One depth/clip diagnostic after the rectangular-clear fix showed the
+character in captured bright and turned views. Its movement window had
+zero matches to the exact alpha-zero or opaque solid-black 640×480 hashes
+among 3,458 flips, compared with 1,932/3,319 in an earlier clipping-only
+diagnostic and 2,325/3,713 in an earlier seeded depth/clip diagnostic. The
+runs differ in timing and tutorial-panel behavior; they are not a controlled
+performance comparison, proof that every frame is correct, or proof that
+all dark/black images are absent. Twelve periodic reports recorded 54,354
+accepted and zero rejected depth samples, excluding the final partial
+interval. The fix is a plausible contributor to the earlier missing geometry,
+not proof that it explains every character-visibility report.
+
+After the software-depth offload and flip-only capture fix, one instrumented
+depth/clip run captured the character in a gameplay view; an earlier capture
+interval still showed a tutorial panel. Its 1,154 movement flips contained no
+matches to the two known 640×480 black signatures. The census counted 1,191
+gated flips and 3,197 backend-owned depth clears, with no software-owned clears
+or dropped census keys. Gate timing and the movement window do not align
+exactly. The run reported 28.83 rendered and 27.08 pixel-change fps, with a
+pixel-change 1% low of 11.82 fps, but includes the HUD, tutorial timing,
+captures and census overhead. It is not a controlled comparison or a
+measurement of distinct world fps and does not establish playability.
+
+An initial combined depth/clip campaign was stopped after one completed run
+per variant when the character was reported invisible. Before guest-memory
+seeding, the depth candidate's 14 periodic reports recorded zero accepted
+depth samples and 29,261 rejected samples, because its `0x81754080` depth
+surface had not received the assumed GPU clear. These are only reported
+interval totals, not a count for the entire run. The baseline had one early
+boot stall and succeeded on retry. One clipping-only diagnostic captured the
+character in a sun-facing view, but did not isolate every scene or prove the
+cause of the reported disappearance. Its route later presented black frames
+with roughly 166 batches and 8,000 program vertices for a prolonged interval;
+its whole-window fps is not a playability measurement.
+
+After guest-depth seeding, a single depth/clip diagnostic completed. Its 12
+periodic reports recorded two depth seeds, 19,029 accepted depth samples, no
+snapshots and no rejected depth samples; the final partial interval is not
+included. A movement capture shows the character, and the traced frame binds
+the 512×512 depth texture in stages 1 and 2. This is evidence that the earlier
+rejection was removed in that run, not proof that the character remains
+visible throughout gameplay or that the sampled shadows are hardware-correct.
+The diagnostic's movement captures and trace perturb timing, and its single
+run is not a performance comparison.
+
+The user also observed strongly bloomed, bright vegetation and sky while
+looking toward the sun, with a darker view after turning. An earlier traced
+world frame includes downsampling and an additive glow composite, but the
+effect's fidelity and the cause of the brightness change remain unverified.
+In the seeded diagnostic, movement captures also show dark and much brighter
+views, but the camera and capture times differ. The new optional movement
+captures and adjustable frame-trace timing are diagnostic tools; compare
+matched views and a trusted reference before changing lighting or gamma.
 
 The P8 compute path and palette cache use a 256-entry palette, matching the
 current CPU decoder. Palette-length bits and shorter palette allocations are
@@ -605,9 +724,24 @@ are sampled at level 0 only on both paths.
 ## Current validation boundary
 
 Generation `20261029-175500-dfadbdd9` built in Release against verified
-framework tree `ec3fa862999fa1f2bd58d5eaffbaee04d7baf68d`. Patch 0020
-applies independently to preceding tree
-`8f679118ffd6173765a505c5ca666a353877bcc1` and reproduces the verified tree.
+framework tree `8d57b4ceb02054f4921a88a7233e6722625c14ff`. Patch 0023
+applies independently to tree `f2e260a5a6845c2edc0b634e82265210e47fe759`
+and reconstructs the verified tree. Patch 0022 independently reconstructs
+that preceding tree from `3472bac8e33c1758c801fb1ca65a346a170ad8e5`.
+The combined renderer, frame-statistics, window-clip and benchmark suites,
+plus three targeted build-metadata tests, passed 94 tests with WARP and
+hardware devices. These include 16-frame partial-clear fixtures, CPU,
+draw-only, clear-only and complete backend ownership cases, and default
+versus gated flip-only frame dumps. The benchmark suite also covers known-black
+reporting and keeps periodic reports active when capture and census are combined.
+Patch 0021 independently reconstructs tree
+`3472bac8e33c1758c801fb1ca65a346a170ad8e5` from
+`ec3fa862999fa1f2bd58d5eaffbaee04d7baf68d`.
+
+The previous framework tree was
+`ec3fa862999fa1f2bd58d5eaffbaee04d7baf68d`. Patch 0020 applies independently
+to its preceding tree
+`8f679118ffd6173765a505c5ca666a353877bcc1` and reproduces that previous tree.
 The project suite passed 194 tests with all native fixtures configured,
 including WARP and hardware texture, native BC1/2/3 cube/mip, palette-rewrite,
 and asynchronous visibility cases. After the retry-reporting change, the

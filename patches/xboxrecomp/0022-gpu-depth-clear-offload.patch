@@ -1,0 +1,30 @@
+diff --git a/src/kernel/nv2a_pb_exec.c b/src/kernel/nv2a_pb_exec.c
+index 521362a..1eeb495 100644
+--- a/src/kernel/nv2a_pb_exec.c
++++ b/src/kernel/nv2a_pb_exec.c
+@@ -4914,7 +4914,8 @@ void nv2a_pb_exec_method(uint32_t subch, uint32_t method, uint32_t param)
+     case NV097_SET_BLEND_FUNC_DFACTOR:
+         s_gpu.blend_dfactor = param;
+         break;
+-    case NV097_CLEAR_SURFACE:
++    case NV097_CLEAR_SURFACE: {
++        int backend_depth_clear = backend_draws() && s_backend->clear;
+         if (s_ftrace == 2)
+             fprintf(stderr, "[FTRACE] clear %X surf %08X %ux%u colour %08X%c",
+                     param, s_gpu.color_offset, s_gpu.clip_w, s_gpu.clip_h,
+@@ -4923,11 +4924,14 @@ void nv2a_pb_exec_method(uint32_t subch, uint32_t method, uint32_t param)
+             census_note_surface();
+             nv2a_census_add("clear_flags", param, 0);
+             nv2a_census_add("clear_surface", s_gpu.clip_w << 16 | s_gpu.clip_h, 0);
++            if (param & 0x01)
++                nv2a_census_add("depth_clear_backend", (uint32_t)backend_depth_clear, 0);
+         }
+         clear_surface(param);
+-        if (param & 0x01)                         /* Z */
++        if ((param & 0x01) && !backend_depth_clear)
+             zbuf_clear();
+         break;
++    }
+ 
+     case NV097_SET_BEGIN_END:
+         if (param) {

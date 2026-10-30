@@ -38,7 +38,7 @@ PR.
 These are existing upstream pull requests, not new proposals. Their pinned
 commits are applied on top of xboxrecomp base
 `f0f8a461496a4f23d9b0aeaa284b8d70ba7ab82b`; the resulting selected-commit and
-local-patch tree is verified as `ec3fa862999fa1f2bd58d5eaffbaee04d7baf68d`.
+local-patch tree is verified as `8d57b4ceb02054f4921a88a7233e6722625c14ff`.
 The exact commit list and application order are in
 [toolkit.py](../tools/toolkit.py).
 
@@ -123,8 +123,9 @@ filed or accepted.
    inclusive/exclusive modes, and anti-aliasing scaling. The
    [native fixture](../tests/window_clip_test.c) exercises rectangle boundaries,
    mode switching, depth writes, and both software draw paths. Initialization
-   before both axes are programmed is an unverified compatibility choice;
-   hardware back ends are explicitly rejected while the option is enabled.
+   before both axes are programmed is an unverified compatibility choice.
+   Patch 0009 alone rejects hardware backends; patch 0021 later permits
+   backends that explicitly advertise clip support.
    Compare with more hardware tests and real game captures before proposing it
    upstream or enabling it by default. **Overlap:**
    [#222](https://github.com/sp00nznet/xboxrecomp/pull/222) (open, checked
@@ -240,16 +241,17 @@ own GPU back end, an extended interface for it, and its own pacing fixes.
     With an extended back end registered, the face-culling and
     programmable near-plane experiments no longer abort, because the executor
     applies both before CPU-transformed triangles reach the back end. Window
-    clipping still requires the software rasterizer. Generic; no title
-    knowledge.
+    clipping was initially software-only; patch 0021 later passes its state
+    to capable GPU backends. Generic; no title knowledge.
     *Tests:* the [frame-stats fixture](../tests/frame_stats_test.c) checks
     that a transformed batch reaches the extended draw with surface position,
     1/w, colours, fog, combiners and near clipping, that the readback hook
     gets the presented surface before the frame is hashed, and that both
     experiments are accepted. The [D3D11 fixture](../tests/d3d11_test.c)
     checks a visibility test's count (1,296 pixels for a 36×36 quad) on the
-    CPU path and on the GPU path. Not covered: occlusion counts while an
-    anti-aliased surface is bound, and clear rectangles on the GPU path.
+    CPU path and on the GPU path. Later D3D11 fixtures also cover GPU clear
+    rectangles and query suspension around internal clear draws. Occlusion
+    counts while an anti-aliased surface is bound remain uncovered.
     *Overlap:* [#184](https://github.com/sp00nznet/xboxrecomp/pull/184)
     indexes a D3D11 and Metal pushbuffer back-end series awaiting maintainer
     direction. [#285](https://github.com/sp00nznet/xboxrecomp/pull/285)
@@ -516,20 +518,71 @@ own GPU back end, an extended interface for it, and its own pacing fixes.
 
 25. **Support depth textures and depth-surface aliases.**
     *Problem:* the CPU reference decoder and this project's D3D11 backend
-    do not sample `LIN_D24S8` (`0x2E`). GPU depth surfaces are not exposed
+    did not sample `LIN_D24S8` (`0x2E`); GPU depth surfaces were not exposed
     as shader resources.
     *Evidence:* both variants of the 2026-10-29 movement campaign repeatedly
     logged failed `0x2E` decodes. Whether those reads explain a visible
     rendering difference has not been determined.
-    *Change:* investigate NV2A depth sampling semantics and aliasing first;
-    then add the appropriate CPU reference behavior and GPU depth views.
-    *Tests:* synthetic format, depth-render-to-texture, and ordering cases,
-    plus matched title captures.
+    *Change:* the opt-in project renderer can sample an exact matching
+    GPU-created linear D24S8 surface through an R24 view. New eligible surfaces
+    are initialized from guest memory, converting the Z24S8 field order;
+    full-surface GPU depth clears also initialize them. Recreated surfaces
+    cannot be reseeded from stale guest data and require a full-surface depth
+    clear. When bound for depth writes, a separate snapshot avoids simultaneous
+    DSV/SRV binding.
+    PROJECT2D and PROJECT3D shadow comparisons follow
+    [xemu's shader translation](https://github.com/xemu-project/xemu/blob/dc10b4cea96e403d30c17ed53551fdaf023bc17f/hw/xbox/nv2a/pgraph/glsl/psh.c).
+    Guest writes, partial aliases, other formats and CPU reference decoding
+    remain unsupported; incompatible aliases are rejected.
+    *Tests:* WARP and hardware fixtures cover every comparison above, below
+    and at the reference depth, a bound depth target that is written between
+    draws, an unbound target, base draws, and rejected pitch, size, offset,
+    mip, cube, format, swizzled layout, recreated depth and stage-mode cases,
+    plus guest depth and stencil initialization without a GPU clear.
     *Overlap:* Blood Wake's optional ambient-occlusion path in
     `bw_d3d11.c` creates an `R24G8_TYPELESS` resource with D24S8 and R24
     views. It is not a guest-depth-alias implementation. Recheck #184 and
     emulator implementations before preparing a generic contribution.
-    *Status:* planned.
+    *Before filing:* preserve GPU contents across surface recreation, track
+    guest writes and validate matched gameplay against a trusted reference.
+    *Status:* experimental project-only implementation.
+
+26. **Pass window clips to capable GPU back ends.**
+    *Change:* [0021-gpu-window-clip.patch](../patches/xboxrecomp/0021-gpu-window-clip.patch)
+    carries the existing rectangle state and an explicit backend capability.
+    Back ends without the capability still reject the opt-in. The D3D11 base,
+    transformed and GPU-vertex draws apply the same inclusive/exclusive union
+    and AA coordinate shifts as the software helper; patch 0021 does not
+    change clears. The project D3D11 renderer separately honors clear
+    rectangles and color masks.
+    *Tests:* CPU, WARP and hardware fixtures check all eight rectangles,
+    empty and incomplete state, inclusive/exclusive masks, state changes,
+    both AA shifts, clear behavior and GPU vertex programs.
+    *Status:* local patch; original-hardware behavior still needs validation.
+
+27. **Honor rectangular GPU clears and avoid redundant software depth clears.**
+    *Problem:* treating a partial clear as a whole-target clear can erase
+    scene color or depth; clearing a large unused software depth buffer also
+    wastes CPU time when a GPU backend owns rendering.
+    *Evidence:* a traced Brute Force frame uses two black/zero-depth
+    letterbox strips; the old D3D11 backend cleared the entire surface for
+    each. Single diagnostics before and after the fix are described in
+    [FINDINGS](./FINDINGS.md#rectangular-clears-and-software-depth-ownership).
+    *Change:* the project D3D11 backend implements bounded color, depth and
+    stencil clears with channel masks and excludes internal clear draws from
+    visibility queries. Full clears use native D3D11 operations.
+    [0022-gpu-depth-clear-offload.patch](../patches/xboxrecomp/0022-gpu-depth-clear-offload.patch)
+    skips the executor's software Z clear only when the registered backend
+    has both draw and clear callbacks; incomplete backends keep it.
+    *Tests:* WARP and hardware fixtures cover partial clears, masks, depth,
+    stencil, AA coordinates and query continuity. The executor fixture checks
+    CPU, draw-only, clear-only and complete backend ownership.
+    *Overlap:* [#222](https://github.com/sp00nznet/xboxrecomp/pull/222)
+    also models clear rectangles (open, checked 2026-10-29).
+    *Before filing:* establish hardware reset semantics for unwritten clear
+    axes, reconcile CPU rectangle behavior and test other backends, formats
+    and titles. Backend registration is assumed to occur before title work.
+    *Status:* local patch and project-only D3D11 implementation.
 
 21. **Make report-time frame dumps show finished frames.**
     *Problem:* `RECOMP_FB_DUMP` writes a picture at each periodic report.
@@ -542,10 +595,14 @@ own GPU back end, an extended interface for it, and its own pacing fixes.
     Report-time dumps alternate between finished frames and dark frames
     without the HUD. The presenter and flip-time hashes read the frame at
     `FLIP_STALL`.
-    *Change:* planned: dump the last presented frame at reports, or label
-    report dumps as possibly mid-frame. `RECOMP_FB_DUMP_FLIPS` already dumps
-    at flips.
-    *Status:* planned.
+    *Change:* [0023-flip-only-frame-captures.patch](../patches/xboxrecomp/0023-flip-only-frame-captures.patch)
+    adds `RECOMP_FB_DUMP_FLIPS_ONLY=1` to suppress report-time and after-draw
+    dumps while retaining gated flip captures. This lets census reports run
+    without polluting a numbered flip sequence. The default is unchanged.
+    Making report-time dumps show the last presented frame remains planned.
+    *Tests:* the native frame-statistics fixture checks default report dumps
+    and gated flip-only output before, during and after capture.
+    *Status:* local mitigation; finished report-time dumps are planned.
 
 ### Open upstream work to evaluate for selection
 

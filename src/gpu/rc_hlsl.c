@@ -68,7 +68,7 @@ size_t gpu_rc_hlsl(const GpuRcKey *k, char *out, size_t cap)
 
     if (n > 8)
         n = 8;
-    put(&b, GPU_RC_CBUFFER);
+    put(&b, GPU_RC_CBUFFER GPU_WINDOW_CLIP_HLSL GPU_SHADOW_HLSL);
     /* A stage bound to a six-face cube map is a TextureCube. */
     for (st = 0; st < 4; st++)
         put(&b, "%s t%d : register(t%d);\n", k->tex_cube[st] ? "TextureCube" : "Texture2D", st, st);
@@ -96,6 +96,7 @@ size_t gpu_rc_hlsl(const GpuRcKey *k, char *out, size_t cap)
         "  if (m == 0x30) return x * 0.5; return x; }\n");
     put(&b,
         "float4 ps_main(PSIn i) : SV_Target {\n"
+        "  if (!window_allows(i.p.xy)) discard;\n"
         "  float4 R[16];\n"
         "  float4 tc[4] = { i.tc0, i.tc1, i.tc2, i.tc3 };\n"
         "  float4 T[4];\n");
@@ -125,7 +126,17 @@ size_t gpu_rc_hlsl(const GpuRcKey *k, char *out, size_t cap)
                         " float2 uv = tc[%d].xy / q;\n", st, st, st);
             if (!k->tex_normalized[st])
                 put(&b, "    uv *= texinfo[%d].xy;\n", st);
-            put(&b, "    T[%d] = t%d.Sample(s%d, uv); }\n", st, st, st);
+            if (k->tex_depth[st]) {
+                put(&b, "    float d = t%d.Sample(s%d, uv).r * 16777215.0;\n", st, st);
+                if (mode == 2)
+                    put(&b, "    float z = clamp(tc[%d].z / q, 0.0, 16777215.0);\n", st);
+                else
+                    put(&b, "    float z = 0.0;\n");
+                put(&b, "    T[%d] = shadow_compare(d, z, %uu).xxxx; }\n",
+                    st, k->shadow_func);
+            } else {
+                put(&b, "    T[%d] = t%d.Sample(s%d, uv); }\n", st, st, st);
+            }
             break;
         case 4:
             put(&b, "  T[%d] = saturate(tc[%d]);\n", st, st);

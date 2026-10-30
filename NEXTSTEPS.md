@@ -3,7 +3,7 @@
 The performance plan is in [docs/PERFPLAN.md](docs/PERFPLAN.md), measured
 results are in [docs/FINDINGS.md](docs/FINDINGS.md), and framework work is
 tracked in [docs/UPSTREAM.md](docs/UPSTREAM.md). State as of 2026-10-29:
-framework tree `ec3fa862999fa1f2bd58d5eaffbaee04d7baf68d`, generation
+framework tree `8d57b4ceb02054f4921a88a7233e6722625c14ff`, generation
 `20261029-175500-dfadbdd9`.
 
 ## Current boundary
@@ -12,12 +12,13 @@ framework tree `ec3fa862999fa1f2bd58d5eaffbaee04d7baf68d`, generation
   second on the CPU and 30.4 on D3D11 with GPU vertex programs, three runs
   each. The hold is visually static, so these are **rendered**, not distinct,
   frames. Native 30 Hz remains a hypothesis.
-- A new alternating three-run GPU comparison increased stationary rendered
-  fps from 32.60 to 45.06 and movement **distinct** fps from 25.15 to 35.23
-  with GPU texture decoding and async visibility together. The candidate's
-  three movement rates ranged from 32.84 to 39.82; one boot stalled after
-  12 flips and succeeded on retry. Distinctness hashes the whole frame,
-  including HUD, so it does not prove every change is a new world frame.
+- An alternating three-run GPU comparison reported stationary rendered fps
+  from 32.60 to 45.06 and movement pixel-change fps from 25.15 to 35.23
+  with GPU texture decoding and async visibility together. A subsequent
+  audit found that 58.9–60.2% of movement flips in every run matched a
+  solid-black 640×480 image, so neither movement figure establishes world
+  fps or a playable improvement. One boot stalled after 12 flips and
+  succeeded on retry. The whole-frame hash also includes HUD changes.
 - The new GPU-vertex tutorial capture differs from the earlier CPU capture
   by more than 8/255 in 1,612 pixels (0.52%); the two GPU variants differ
   in 285 pixels (0.09%). An older D3D11/CPU-vertex capture differs from the
@@ -33,13 +34,47 @@ framework tree `ec3fa862999fa1f2bd58d5eaffbaee04d7baf68d`, generation
 - Ordered asynchronous visibility reports pass synthetic WARP and hardware
   fixtures and the combined title campaign. They remain opt-in with
   `RECOMP_GPU_ZPASS=async` pending broader gameplay and reliability checks.
-- In the new movement profiles, the estimated game-thread GPU wait dropped
-  from 33.5% to 24.7% of samples. `NtQueryVirtualMemory` remains a major
+- In those movement profiles, the estimated game-thread GPU wait dropped
+  from 33.5% to 24.7% of samples, but the black-frame intervals limit their
+  relevance to visible gameplay. `NtQueryVirtualMemory` remains a major
   game-thread hotspot, and texture hashing remains visible on the NV2A
   thread. The two GPU changes were measured together, not individually.
 - Both variants of the new movement campaign logged unsupported texture
   format `0x2E` (`LIN_D24S8`). Its effect on the visible image is not yet
   established; the CPU reference also lacks a decoder for that format.
+- Experimental GPU depth aliases now cover exact matching D24S8 surfaces,
+  with guest-memory initialization and snapshots for a bound depth target;
+  other aliases and guest writes remain unsupported. An initial combined
+  run rejected 29,261 depth samples in periodic reports and was stopped
+  after a missing-character observation. After guest-depth seeding, one
+  diagnostic recorded 19,029 accepted samples and no rejections in periodic
+  reports, and a captured gameplay frame showed the character. This does not
+  establish correctness across all frames. GPU window clipping is available
+  behind the existing opt-in flag. Neither change establishes original-hardware
+  equivalence.
+- A traced frame exposed whole-target D3D11 clears where the title requested
+  narrow black/depth letterbox strips. The GPU backend now honors clear
+  rectangles and channel masks; the executor skips the roughly 5 MiB
+  software depth clear when a registered backend owns drawing and clearing.
+  One later depth/clip diagnostic showed the character in two views and
+  had zero exact-black matches in 3,458 movement flips. Earlier diagnostics
+  matched black in over half their flips. These individual, differently timed
+  runs do not establish original-hardware rendering or a performance gain.
+- A final instrumented run after depth-clear offload captured the character in
+  one gameplay view and had zero known-black matches in 1,154 movement flips.
+  Its census counted 3,197 GPU-owned depth clears and no software-owned
+  clears across 1,191 gated flips. One capture interval still showed a tutorial
+  panel; the census and captures perturb timing, so this is not a world-fps
+  or general character-visibility guarantee.
+- User captures show very bright, bloomed vegetation and sky when facing
+  toward the sun, and a darker view after turning. The cause remains open;
+  no global brightness or gamma adjustment was applied.
+- A null-backend surface-guard run aborted on the GPU semaphore after a
+  guarded range covered its page. A new explicitly reported page exclusion
+  permitted a completed movement diagnostic, but leaves that page unobserved.
+  The report recorded seven non-NV2A reads within an estimated depth range;
+  offline symbolization provisionally points to a USB rumble-report read,
+  but the original module base and actual resource ownership remain unknown.
 
 ## Work cadence
 
@@ -54,9 +89,10 @@ semaphore, report, and flip ordering.
 
 ## 1. Complete the GPU-authoritative pipeline
 
-- Answer the guest surface-read question using the existing null backend and
+- Continue the guest surface-read investigation with the null backend and
   `BRUTEFORCE_SURFACE_GUARD`, covering stationary and movement in one scripted
-  run. Keep diagnostic output local.
+  run. Account for excluded pages and the diagnostic's other blind spots;
+  a partial run cannot prove that no guest readers exist. Keep output local.
 - Implement direct D3D11 presentation, bounded frames in flight, and
   on-demand readback as one coherent milestone. Retain readback for guest
   readers, screenshots, frame statistics, and other consumers until they
@@ -66,12 +102,17 @@ semaphore, report, and flip ordering.
   Compare numbered flip captures from the CPU path, the D3D11 CPU-vertex
   path, and the GPU-vertex path at the same tutorial state. Isolate stencil,
   depth, texture/palette, and sampling differences rather than assuming a
-  dark region is expected. Check the bright statue during movement.
-- Investigate `LIN_D24S8` sampling and depth-surface aliasing using emulator
-  and other recomp implementations as prior art. Blood Wake's optional
-  ambient-occlusion path creates a typeless depth resource with D24S8 and
-  R24 views; it does not by itself establish NV2A alias or sampling semantics.
-  Determine those semantics and ordering before implementing a fallback.
+  dark region is expected. Compare the bright sun-facing view, the turned
+  view and the glow composite against a trusted reference; investigate any
+  recurring black intervals or missing character without a global gamma hack.
+- Make the movement gate measure visible world changes rather than HUD or
+  black-frame transitions. The harness now reports two known solid-black
+  hashes, but other dark or black images and intentional fades still need
+  classification; a zero match count is not proof of valid world frames.
+- Validate the opt-in `LIN_D24S8` path with matched gameplay captures and
+  original hardware or a trusted reference. Extend guest-write tracking,
+  partially overlapping aliases, and CPU reference behavior before making it
+  the default.
 
 ## 2. Remove remaining pipeline stalls
 
@@ -91,7 +132,7 @@ semaphore, report, and flip ordering.
   UBYTE, packed-normal and relative-constant addressing, plus GPU culling.
 - Add the persistent shader-bytecode cache and measure compile stutter.
   Blood Wake's `bw_pscache.c` is prior art.
-- Implement GPU window clipping and investigate the intermittent loading
-  hang, including the stalled candidate boot. Re-check upstream overlap and
-  coordinate with Blood Wake's authors before preparing a contribution; do
-  not file or comment without approval.
+- Validate GPU window clipping in gameplay and investigate the intermittent
+  loading hang, including the stalled candidate boot. Re-check upstream
+  overlap and coordinate with Blood Wake's authors before preparing a
+  contribution; do not file or comment without approval.

@@ -48,6 +48,46 @@ def test_flip_capture_waits_for_new_images_not_buffered_frame_rows(tmp_path):
     assert [path.name for path in gate.files()] == ["hold00000.bmp", "hold00001.bmp"]
 
 
+def test_flip_capture_rearms_without_reusing_previous_images(tmp_path):
+    gate = bench.FlipCapture(tmp_path / "capture.flag", tmp_path / "hold")
+    gate.open()
+    (tmp_path / "hold00000.bmp").write_bytes(b"first")
+    (tmp_path / "hold00001.bmp").write_bytes(b"second")
+    assert gate.poll()
+    gate.open()
+    assert not gate.poll()
+    (tmp_path / "hold00002.bmp").write_bytes(b"third")
+    assert not gate.poll()
+    (tmp_path / "hold00003.bmp").write_bytes(b"fourth")
+    assert gate.poll()
+
+
+@pytest.mark.parametrize(("census", "report_ms"), [(False, "600000"), (True, "5000")])
+def test_capture_keeps_periodic_reports_when_census_needs_them(tmp_path, census, report_ms):
+    env = {"RECOMP_PB_REPORT_MS": "5000"}
+    gate = bench.configure_flip_capture(env, tmp_path, census)
+    assert env["RECOMP_PB_REPORT_MS"] == report_ms
+    assert env["RECOMP_FB_DUMP"] == str(tmp_path / "capture" / "hold")
+    assert env["RECOMP_FB_DUMP_FLIPS"] == str(gate.flag)
+    assert env["RECOMP_FB_DUMP_FLIPS_ONLY"] == "1"
+
+
+def test_movement_capture_requires_movement_scene(tmp_path, capsys):
+    assert bench.main(["--capture-movement", "--out", str(tmp_path / "out")]) == 1
+    assert "--capture-movement requires --scene movement" in capsys.readouterr().err
+
+
+@pytest.mark.parametrize("value", ["-1", "nan", "40"])
+def test_trace_after_must_be_within_movement_window(tmp_path, capsys, value):
+    assert bench.main(["--trace-after", value, "--out", str(tmp_path / "out")]) == 1
+    assert "--trace-after must be within the movement window" in capsys.readouterr().err
+
+
+def test_trace_frame_requires_movement_scene(tmp_path, capsys):
+    assert bench.main(["--trace-frame", "--out", str(tmp_path / "out")]) == 1
+    assert "--trace-frame requires --scene movement" in capsys.readouterr().err
+
+
 def test_missing_profile_is_not_reported_as_success(tmp_path):
     class Exited:
         def poll(self):
@@ -95,6 +135,24 @@ def test_frame_metrics_rate_and_percentiles(tmp_path):
     assert metrics["low_1pct_fps"] == 1.0
 
 
+def test_known_black_metrics_counts_only_frames_with_pixel_hashes():
+    rows = [
+        {"hash": "f22163d4abcd6aa4", "distinct": 1},
+        {"hash": "c1b9dd37072f3e56", "distinct": 0},
+        {"hash": "1234567890abcdef", "distinct": 1},
+        {"hash": "f22163d4abcd6aa4", "distinct": -1},
+    ]
+    assert bench.known_black_metrics(rows) == {
+        "scope": "640x480 four-byte solid black, alpha 0 or 255",
+        "pixel_frames": 3,
+        "matched_frames": 2,
+        "percent": 66.667,
+    }
+    assert bench.known_black_metrics(rows[3:]) is None
+    assert bench.known_black_metrics([]) is None
+    assert bench.known_black_metrics(rows[2:3])["matched_frames"] == 0
+
+
 def test_agreement_requires_pixels(tmp_path):
     rows = rows_from([row(1, 0, 1, "a"), row(2, 1, 0, "a"), row(3, 2, 1, "b"), row(4, 3, 1, "b")],
                      tmp_path)
@@ -131,13 +189,17 @@ def test_parse_profile_threads_and_game_wait(tmp_path):
 
 def test_summary_groups_by_label():
     results = [
-        {"label": "a", "stationary": {"fps": 3.0}}, {"label": "b", "stationary": {"fps": 5.0}},
-        {"label": "a", "stationary": {"fps": 4.0}},
+        {"label": "a", "stationary": {"fps": 3.0}, "movement_known_black": {"percent": 10.0}},
+        {"label": "b", "stationary": {"fps": 5.0}},
+        {"label": "a", "stationary": {"fps": 4.0}, "movement_known_black": {"percent": 30.0}},
     ]
     table = bench.summarize(results)
     assert list(table) == ["a", "b"]
     assert table["a"]["stationary_fps"] == {"mean": 3.5, "min": 3.0, "max": 4.0, "n": 2}
+    assert table["a"]["movement_known_black_pct"] == {
+        "mean": 20.0, "min": 10.0, "max": 30.0, "n": 2}
     assert table["b"]["movement_fps"] is None
+    assert table["b"]["movement_known_black_pct"] is None
 
 
 def test_summary_excludes_failed_runs():
@@ -170,7 +232,12 @@ def test_retry_failure_is_persisted_and_reported(monkeypatch, tmp_path, capsys):
         calls.append(out_dir)
         if len(calls) == 1:
             return {"label": label, "state": "world", "error": "stalled"}
-        return {"label": label, "state": "finishing", "stationary": {"fps": 30}}
+        return {
+            "label": label,
+            "state": "finishing",
+            "stationary": {"fps": 30},
+            "movement_known_black": {"matched_frames": 2, "percent": 50.0},
+        }
 
     monkeypatch.setattr(bench, "run_once", run_once)
     out = tmp_path / "campaign"
@@ -179,10 +246,13 @@ def test_retry_failure_is_persisted_and_reported(monkeypatch, tmp_path, capsys):
     summary = json.loads((out / "summary.json").read_text(encoding="utf-8"))
     result = json.loads((calls[1] / "result.json").read_text(encoding="utf-8"))
     assert summary["table"]["gpu"]["failed_attempts"] == 1
+    assert summary["table"]["gpu"]["movement_known_black_pct"]["mean"] == 50.0
     assert result["attempts"] == 2
     assert result["attempt_errors"] == [{"attempt": 1, "error": "stalled",
                                           "out_dir": str(calls[0])}]
-    assert "1 failed attempts" in capsys.readouterr().out
+    captured = capsys.readouterr()
+    assert "1 failed attempts" in captured.out
+    assert "50.0% of hashed movement frames match known black signatures" in captured.err
 
 
 def test_compare_frames_counts_and_locates_differences(tmp_path):

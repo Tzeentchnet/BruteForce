@@ -1,0 +1,69 @@
+diff --git a/src/kernel/nv2a_backend.h b/src/kernel/nv2a_backend.h
+index 8be176f..04de50a 100644
+--- a/src/kernel/nv2a_backend.h
++++ b/src/kernel/nv2a_backend.h
+@@ -28,6 +28,7 @@
+ #define NV2A_BACKEND_H
+ 
+ #include <stdint.h>
++#include "nv2a_window_clip.h"
+ 
+ /* The colour surface being drawn into, in real (anti-aliased) pixels.
+  * aa_sx/aa_sy give the anti-aliasing factor, so width/aa_sx is the logical
+@@ -38,6 +39,8 @@ typedef struct {
+     uint32_t pitch;             /* bytes per row */
+     uint32_t bytes_per_pixel;   /* 2 or 4 */
+     uint32_t aa_sx, aa_sy;      /* 1 or 2 each */
++    Nv2aWindowClip window_clip;
++    uint32_t window_clip_enabled;
+ } Nv2aSurface;
+ 
+ /* A texture as the title programmed it. uv in Nv2aVertex are in texels. */
+diff --git a/src/kernel/nv2a_backend_ext.h b/src/kernel/nv2a_backend_ext.h
+index 42d4981..f42d37b 100644
+--- a/src/kernel/nv2a_backend_ext.h
++++ b/src/kernel/nv2a_backend_ext.h
+@@ -148,8 +148,11 @@ typedef struct {
+      * so pending reports complete while the title waits for them. */
+     int (*zpass_report)(uint32_t report_va, uint64_t stamp);
+     void (*poll)(void);
++    uint32_t capabilities;
+ } Nv2aBackendExt;
+ 
++enum { NV2A_BACKEND_CAP_WINDOW_CLIP = 1u };
++
+ enum { NV2A_ZPASS_END = 0, NV2A_ZPASS_BEGIN = 1, NV2A_ZPASS_CLEAR = 2 };
+ 
+ /* One vertex-program instruction field, (dword, lowest bit, width), as
+diff --git a/src/kernel/nv2a_pb_exec.c b/src/kernel/nv2a_pb_exec.c
+index 760a29f..521362a 100644
+--- a/src/kernel/nv2a_pb_exec.c
++++ b/src/kernel/nv2a_pb_exec.c
+@@ -835,7 +835,8 @@ static void check_software_backend(const Nv2aBackend *backend)
+ {
+     int extended = s_xbackend != NULL;
+ 
+-    if (s_gpu.window_clip_enabled && backend && backend->draw) {
++    if (s_gpu.window_clip_enabled && backend && backend->draw &&
++        !(extended && (s_xbackend->capabilities & NV2A_BACKEND_CAP_WINDOW_CLIP))) {
+         fprintf(stderr, "[GPU] RECOMP_WINDOW_CLIP requires the software rasterizer;"
+                         " registered render back ends do not receive window clip state\n");
+         abort();
+@@ -916,6 +917,8 @@ static void current_surface(Nv2aSurface *out)
+     out->bytes_per_pixel = surface_bpp();
+     out->aa_sx           = s_gpu.aa_sx > 1.5f ? 2 : 1;
+     out->aa_sy           = s_gpu.aa_sy > 1.5f ? 2 : 1;
++    out->window_clip     = s_gpu.window_clip;
++    out->window_clip_enabled = s_gpu.window_clip_enabled;
+ }
+ 
+ /* Render state in the NV2A's own values, gathered from what the executor
+@@ -4652,7 +4655,7 @@ void nv2a_pb_exec_method(uint32_t subch, uint32_t method, uint32_t param)
+         check_software_backend(s_backend);
+         if (s_gpu.window_clip_enabled)
+             fprintf(stderr, "[GPU] experimental window clipping enabled"
+-                            " (software rasterizer only)\n");
++                            " (software rasterizer or capable back end)\n");
+         if (s_gpu.software_cull_enabled)
+             fprintf(stderr, "[GPU] experimental face culling enabled"
+                             " (software rasterizer only)\n");

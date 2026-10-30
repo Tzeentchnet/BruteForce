@@ -1,0 +1,558 @@
+diff --git a/src/kernel/nv2a_backend_ext.h b/src/kernel/nv2a_backend_ext.h
+index 0e1d63d..280c1fb 100644
+--- a/src/kernel/nv2a_backend_ext.h
++++ b/src/kernel/nv2a_backend_ext.h
+@@ -49,7 +49,9 @@ typedef struct {
+     uint8_t tex_valid[4];
+     uint8_t tex_normalized[4];      /* coordinates are 0..1 (swizzled, DXT); else texels */
+     uint8_t tex_cube[4];
+-    uint8_t pad;
++    uint8_t cull;                   /* draw_vsh: cull by state as the CPU path would
++                                       (RECOMP_CULL_FACE); CPU-transformed batches
++                                       arrive already culled */
+     float fogc[4];                  /* fog colour r, g, b (a unused) */
+     uint32_t clip_plane_mode;       /* SET_SHADER_CLIP_PLANE_MODE */
+     uint32_t alpha_func, alpha_ref; /* NV2A values; also in state */
+diff --git a/src/kernel/nv2a_pb_exec.c b/src/kernel/nv2a_pb_exec.c
+index 8ed6d41..0a0fefc 100644
+--- a/src/kernel/nv2a_pb_exec.c
++++ b/src/kernel/nv2a_pb_exec.c
+@@ -3146,10 +3146,437 @@ static void xf_set_viewport(void)
+     s_xf_o[2] = s_gpu.program_near_zero_enabled && batch_uses_program() ? 0.0f : of[2];
+ }
+ 
++/* Vertex programs on the GPU (nv2a_backend_ext.h, draw_vsh). With a back end
++ * that offers it, a program batch goes over untransformed: the program, the
++ * constants, the vertex streams and a triangle list built as the switch in
++ * raster_batch_program builds it. Each stream's span over the batch's index
++ * range goes as the title's own bytes when fetch_attr's reading has an exact
++ * twin on the GPU; otherwise each distinct vertex's inputs are fetched here,
++ * exactly as transform_vertex fetches them. Programs that write their own
++ * constants stay on the CPU. Adapted from Blood Wake's carried executor
++ * (bloodwake-recomp e631edd, MIT).
++ *
++ * RECOMP_GPU_VSH=0 keeps every program on the CPU. RECOMP_GPU_VSH_RAW=0
++ * always gathers floats. RECOMP_GPU_VSH_VERIFY=<n>: every n-th GPU batch,
++ * read back what the shader produced per vertex and compare it with the
++ * interpreter and the executor's steps after it (slow; a test aid). */
++#define XVS_CACHE 65536u
++static float *s_xvs_in;
++static size_t s_xvs_in_cap;                 /* floats */
++static uint32_t *s_xvs_map, *s_xvs_tri, *s_xvs_uidx;
++static uint32_t s_xvs_stamp[XVS_CACHE], s_xvs_slot[XVS_CACHE], s_xvs_batch;
++static uint64_t s_xvs_raw, s_xvs_gathered, s_xvs_cpu;
++
++static int switch_default_on(const char *name)
++{
++    const char *e = getenv(name);
++    return !(e && e[0] == '0');
++}
++
++static int gpu_vsh_on(void)
++{
++    static int on = -1;
++    if (on < 0)
++        on = switch_default_on("RECOMP_GPU_VSH");
++    return on;
++}
++
++/* The conversion for attribute `at` and the bytes one element spans as the
++ * back end reads it (a 3-component byte or short format reads 4); 0 if
++ * fetch_attr's reading has no exact twin there. */
++static uint8_t xvs_conv(const VertexAttr *at, uint32_t *fbytes)
++{
++    uint32_t s = at->size;
++
++    if (s < 1 || s > 4)
++        return 0;
++    switch (at->type) {
++    case 2: *fbytes = 4u * s;                return (uint8_t)(NV2A_XVS_FLOAT << 4 | s);
++    case 0: *fbytes = 4;                     return (uint8_t)(NV2A_XVS_COLOR << 4 | 4);
++    case 4: *fbytes = s == 3 ? 4u : s;       return (uint8_t)(NV2A_XVS_UBYTE << 4 | s);
++    case 5: *fbytes = s == 3 ? 8u : 2u * s;  return (uint8_t)(NV2A_XVS_SHORT << 4 | s);
++    case 6: if (s != 1) return 0;
++            *fbytes = 4;                     return (uint8_t)(NV2A_XVS_CMP << 4 | 1);
++    default: return 0;                       /* the rest: gathered */
++    }
++}
++
++/* Fill vb's streams for the n indices in s_gpu.idx and the inputs in mask.
++ * Returns 1 with *first (the lowest index) and *count (the span's vertices). */
++static int xvs_streams(Nv2aXVsBatch *vb, uint32_t n, uint32_t mask,
++                       uint32_t *first, uint32_t *count)
++{
++    const uint8_t *mem = (const uint8_t *)xbox_GetMemoryOffset();
++    uint32_t lo = 0xFFFFFFFFu, hi = 0, i, a, s, k = 0, ns = 0;
++    uint32_t sbase[NV2A_XVS_MAX_STREAMS], send[NV2A_XVS_MAX_STREAMS];
++    uint32_t sstride[NV2A_XVS_MAX_STREAMS], aoff[16];
++    uint64_t total = 0;
++    static int raw_on = -1;
++
++    if (raw_on < 0)
++        raw_on = switch_default_on("RECOMP_GPU_VSH_RAW");
++    if (!raw_on || !s_xbackend->vsh_raw_ok || !s_xbackend->vsh_raw_ok() || !n)
++        return 0;
++    for (i = 0; i < n; i++) {
++        uint32_t v = s_gpu.idx[i];
++        if (v < lo) lo = v;
++        if (v > hi) hi = v;
++    }
++    /* A sparse range would copy more than the gather converts. */
++    if (hi - lo >= NV_MAX_INDICES || hi - lo + 1 > 2u * n + 64u)
++        return 0;
++    for (a = 0; a < NV2A_VSH_INPUTS; a++) {
++        const VertexAttr *at = &s_gpu.attr[a];
++        uint32_t fb = 0;
++        uint8_t conv;
++
++        if (!(mask & (1u << a)))
++            continue;
++        if (!at->size) {                     /* no array: the current value */
++            if (ns == NV2A_XVS_MAX_STREAMS)
++                return 0;
++            vb->streams[ns].data = s_gpu.imm_attr[a];
++            vb->streams[ns].bytes = 16;
++            vb->streams[ns].stride = 0;
++            vb->in[k].stream = (uint8_t)ns;
++            vb->in[k].conv = (uint8_t)(NV2A_XVS_CONST << 4 | 4);
++            vb->in[k].offset = 0;
++            aoff[k] = 0;
++            sbase[ns] = send[ns] = 0;
++            sstride[ns] = 0;
++            ns++;
++            k++;
++            continue;
++        }
++        if (!at->stride || (at->stride & 3u) || at->stride > 2048u || (at->offset & 3u))
++            return 0;
++        if (!s_gpu.inline_active && !at->offset)
++            return 0;                        /* fetch_attr reads 0,0,0,1 there */
++        if (!(conv = xvs_conv(at, &fb)))
++            return 0;
++        /* Interleaved attributes share a stream: one span, one copy. */
++        for (s = 0; s < ns; s++) {
++            uint32_t b0, e0;
++            if (sstride[s] != at->stride)
++                continue;
++            b0 = at->offset < sbase[s] ? at->offset : sbase[s];
++            e0 = at->offset + fb > send[s] ? at->offset + fb : send[s];
++            if (e0 - b0 <= at->stride) {
++                sbase[s] = b0;
++                send[s] = e0;
++                break;
++            }
++        }
++        if (s == ns) {
++            if (ns == NV2A_XVS_MAX_STREAMS)
++                return 0;
++            sbase[ns] = at->offset;
++            send[ns] = at->offset + fb;
++            sstride[ns] = at->stride;
++            ns++;
++        }
++        vb->in[k].stream = (uint8_t)s;
++        vb->in[k].conv = conv;
++        aoff[k] = at->offset;
++        k++;
++    }
++    if (!k)
++        return 0;
++    for (i = 0; i < k; i++)
++        if (sstride[vb->in[i].stream])
++            vb->in[i].offset = (uint16_t)(aoff[i] - sbase[vb->in[i].stream]);
++    for (s = 0; s < ns; s++) {
++        uint64_t at, bytes;
++        if (!sstride[s])
++            continue;
++        at = (uint64_t)sbase[s] + (uint64_t)lo * sstride[s];
++        bytes = (uint64_t)(hi - lo) * sstride[s] + (send[s] - sbase[s]);
++        if (s_gpu.inline_active) {
++            if (at + bytes > (uint64_t)s_gpu.inline_count * 4u)
++                return 0;
++            vb->streams[s].data = (const uint8_t *)s_gpu.inline_buf + at;
++        } else {
++            if (!guest_span_ok(at, (uint32_t)bytes))
++                return 0;
++            vb->streams[s].data = mem + at;
++        }
++        vb->streams[s].bytes = (uint32_t)bytes;
++        vb->streams[s].stride = sstride[s];
++        total += bytes;
++    }
++    if (total > (8u << 20))
++        return 0;
++    vb->nstreams = ns;
++    *first = lo;
++    *count = hi - lo + 1;
++    return 1;
++}
++
++static uint32_t popcount32(uint32_t v)
++{
++    uint32_t c = 0;
++    for (; v; v &= v - 1)
++        c++;
++    return c;
++}
++
++static int xvs_close(float a, float b, float abs_tol, float rel_tol)
++{
++    float d = fabsf(a - b), m = fmaxf(fabsf(a), fabsf(b));
++    if (a == b || (a != a && b != b))
++        return 1;
++    if (isinf(a) || isinf(b))
++        return 0;
++    return d <= abs_tol + rel_tol * m;
++}
++
++static int transform_vertex(uint32_t index, Nv2aVshOutput *out);
++
++/* RECOMP_GPU_VSH_VERIFY: the shader's outputs against the interpreter. The
++ * tolerances allow float rounding: positions 0.01 px plus 1e-4 relative, the
++ * rest 1e-3. A vertex whose inputs are not finite or are denormal is counted
++ * apart: the GPU flushes denormals and the interpreter does not. */
++static void gpu_vsh_verify(uint32_t nv, uint32_t mask, uint32_t nin)
++{
++    static int every = -1;
++    static Nv2aXVsOut *g;
++    static unsigned batches, checked, bad_batches, shown;
++    static unsigned long long verts, bad_verts, odd_verts;
++    uint32_t l;
++    int bad = 0;
++
++    if (every < 0) {
++        const char *e = getenv("RECOMP_GPU_VSH_VERIFY");
++        every = e ? atoi(e) : 0;
++    }
++    if (every <= 0 || !s_xbackend->vsh_readback || ++batches % (unsigned)every)
++        return;
++    if (!g && !(g = (Nv2aXVsOut *)malloc(NV_MAX_INDICES * sizeof *g)))
++        return;
++    if (!s_xbackend->vsh_readback(g, nv))
++        return;
++    checked++;
++    for (l = 0; l < nv; l++) {
++        Nv2aVshOutput c;
++        const Nv2aXVsOut *o = &g[l];
++        const char *what = NULL;
++        uint32_t a, odd = 0;
++        float cd0, cd1;
++        int k, j;
++
++        for (a = 0; a < NV2A_VSH_INPUTS; a++) {
++            float in[4];
++            if (!(mask & (1u << a)))
++                continue;
++            if (!s_gpu.attr[a].size)
++                memcpy(in, s_gpu.imm_attr[a], sizeof in);
++            else
++                fetch_attr(&s_gpu.attr[a], s_xvs_uidx[l], in);
++            for (k = 0; k < 4; k++)
++                if (!isfinite(in[k]) || (in[k] != 0.0f && fabsf(in[k]) < 1.17549435e-38f))
++                    odd = 1;
++        }
++        if (!transform_vertex(s_xvs_uidx[l], &c))
++            return;
++        verts++;
++        if (odd) {
++            odd_verts++;
++            continue;
++        }
++        cd0 = c.pos[3] - NV_CLIP_W;
++        cd1 = (c.pos[2] - s_xf_o[2]) * c.pos[3];
++        if (!xvs_close(o->pos[3], c.pos[3], 1e-6f, 1e-5f)) what = "w";
++        else if (c.pos[3] > NV_CLIP_W && (!xvs_close(o->pos[0], c.pos[0], 0.01f, 1e-4f)
++                                          || !xvs_close(o->pos[1], c.pos[1], 0.01f, 1e-4f)))
++            what = "xy";
++        else if (c.pos[3] > NV_CLIP_W && !xvs_close(o->pos[2], c.pos[2], 1.0f, 1e-4f))
++            what = "z";
++        else if (!xvs_close(o->fog, fog_factor(c.fog[0]), 1e-3f, 1e-3f)) what = "fog";
++        else if (!xvs_close(o->clip[0], cd0, 1e-4f, 1e-4f)) what = "clip w";
++        else if (xf_near_clip_enabled() && !xvs_close(o->clip[1], cd1, 1e-2f, 1e-3f))
++            what = "clip near";
++        for (k = 0; k < 4 && !what; k++) {
++            if (!xvs_close(o->d0[k], c.d0[k], 1e-3f, 1e-3f)) what = "d0";
++            else if (!xvs_close(o->d1[k], c.d1[k], 1e-3f, 1e-3f)) what = "d1";
++            for (j = 0; j < 4 && !what; j++)
++                if (!xvs_close(o->tc[k][j], c.tex[k][j], 1e-3f, 1e-3f)) what = "tex";
++        }
++        if (!what)
++            continue;
++        bad_verts++;
++        bad = 1;
++        if (shown++ < 16)
++            fprintf(stderr, "[VSH-VERIFY] batch %u vertex %u (index %u) differs in %s:"
++                    " gpu pos %g %g %g %g, cpu pos %g %g %g %g\n",
++                    s_gpu.batches_program, l, s_xvs_uidx[l], what,
++                    o->pos[0], o->pos[1], o->pos[2], o->pos[3],
++                    c.pos[0], c.pos[1], c.pos[2], c.pos[3]);
++    }
++    (void)nin;
++    bad_batches += bad;
++    if (checked % 100 == 0 || checked <= 3)
++        fprintf(stderr, "[VSH-VERIFY] %u batches checked, %u differ; %llu vertices, %llu differ,"
++                        " %llu skipped (odd inputs)\n",
++                checked, bad_batches, verts, bad_verts, odd_verts);
++}
++
++static int gpu_vsh_batch(void)
++{
++    uint32_t n = s_gpu.idx_count, i, a, nins = 0, mask, nin, nv = 0, ni = 0, first = 0;
++    const uint32_t (*prog)[4];
++    int raw;
++    Nv2aSurface surf;
++    Nv2aRenderState rs;
++    Nv2aXVsBatch vb;
++
++    if (!s_xbackend || !s_xbackend->draw_vsh || !backend_draws() || !batch_uses_program()
++        || nv2a_vsh_cxt_write_enabled() || !gpu_vsh_on())
++        return 0;
++    if (surface_bpp() != 4 && surface_bpp() != 2)
++        return 0;
++    if (!(prog = nv2a_vsh_program(&nins)))
++        return 0;                            /* no program: the CPU path skips it too */
++    mask = nv2a_vsh_inputs_used(prog, nins);
++    nin = popcount32(mask);
++    if (!s_xvs_map) {
++        s_xvs_map = (uint32_t *)malloc(NV_MAX_INDICES * sizeof *s_xvs_map);
++        s_xvs_tri = (uint32_t *)malloc(NV_MAX_INDICES * 3 * sizeof *s_xvs_tri);
++        s_xvs_uidx = (uint32_t *)malloc(NV_MAX_INDICES * sizeof *s_xvs_uidx);
++        if (!s_xvs_map || !s_xvs_tri || !s_xvs_uidx)
++            return 0;
++    }
++    memset(&vb, 0, sizeof vb);
++    raw = xvs_streams(&vb, n, mask, &first, &nv);
++    if (raw) {
++        for (i = 0; i < n; i++)
++            s_xvs_map[i] = s_gpu.idx[i] - first;
++        for (i = 0; i < nv; i++)
++            s_xvs_uidx[i] = first + i;
++        s_xvs_raw++;
++    } else {
++        vb.nstreams = 0;
++        if ((size_t)n * nin * 4 > s_xvs_in_cap) {
++            size_t want = (size_t)n * nin * 4;
++            float *p = (float *)realloc(s_xvs_in, want * sizeof *p);
++            if (!p)
++                return 0;
++            s_xvs_in = p;
++            s_xvs_in_cap = want;
++        }
++        if (++s_xvs_batch == 0) {
++            memset(s_xvs_stamp, 0, sizeof s_xvs_stamp);
++            s_xvs_batch = 1;
++        }
++        for (i = 0; i < n; i++) {
++            uint32_t idx = s_gpu.idx[i], l;
++            float *dst;
++            if (idx < XVS_CACHE && s_xvs_stamp[idx] == s_xvs_batch) {
++                s_xvs_map[i] = s_xvs_slot[idx];
++                continue;
++            }
++            l = nv++;
++            s_xvs_uidx[l] = idx;
++            dst = s_xvs_in + (size_t)l * nin * 4;
++            for (a = 0; a < NV2A_VSH_INPUTS; a++) {
++                if (!(mask & (1u << a)))
++                    continue;
++                /* As transform_vertex: no array reads the current value. */
++                if (!s_gpu.attr[a].size)
++                    memcpy(dst, s_gpu.imm_attr[a], 4 * sizeof *dst);
++                else
++                    fetch_attr(&s_gpu.attr[a], idx, dst);
++                dst += 4;
++            }
++            if (idx < XVS_CACHE) {
++                s_xvs_stamp[idx] = s_xvs_batch;
++                s_xvs_slot[idx] = l;
++            }
++            s_xvs_map[i] = l;
++        }
++        s_xvs_gathered++;
++    }
++
++#define XVS_TRI(p, q, r) do { s_xvs_tri[ni++] = s_xvs_map[p]; s_xvs_tri[ni++] = s_xvs_map[q]; \
++                              s_xvs_tri[ni++] = s_xvs_map[r]; } while (0)
++    switch (s_gpu.prim) {
++    case NV_PRIM_TRIANGLES:
++        for (i = 0; i + 2 < n; i += 3)
++            XVS_TRI(i, i + 1, i + 2);
++        break;
++    case NV_PRIM_TRIANGLE_STRIP:                 /* one winding, for culling */
++        for (i = 0; i + 2 < n; i++) {
++            if (i & 1)
++                XVS_TRI(i + 1, i, i + 2);
++            else
++                XVS_TRI(i, i + 1, i + 2);
++        }
++        break;
++    case NV_PRIM_TRIANGLE_FAN:
++    case NV_PRIM_POLYGON:
++        for (i = 1; i + 1 < n; i++)
++            XVS_TRI(0, i, i + 1);
++        break;
++    case NV_PRIM_QUADS:
++        for (i = 0; i + 3 < n; i += 4) {
++            XVS_TRI(i, i + 1, i + 2);
++            XVS_TRI(i, i + 2, i + 3);
++        }
++        break;
++    case NV_PRIM_QUAD_STRIP:
++        for (i = 0; i + 3 < n; i += 2) {
++            XVS_TRI(i, i + 1, i + 3);
++            XVS_TRI(i, i + 3, i + 2);
++        }
++        break;
++    default:
++        break;
++    }
++#undef XVS_TRI
++    if (!ni)
++        return 0;
++
++    xf_set_viewport();
++    current_surface(&surf);
++    current_render_state(&rs);
++    fill_xbatch(&vb.xb, &rs);
++    vb.xb.cull = (uint8_t)software_cull_active();
++    vb.program = prog;
++    vb.ninstr = nins;
++    vb.consts = (const float (*)[4])nv2a_vsh_constant(0);   /* c[0..191], contiguous */
++    vb.consts_gen = nv2a_vsh_constants_gen();
++    vb.inputs = raw ? NULL : s_xvs_in;
++    vb.input_mask = mask;
++    vb.ninputs = nin;
++    vb.nverts = nv;
++    vb.indices = s_xvs_tri;
++    vb.nindices = ni;
++    vb.aa[0] = s_gpu.aa_sx;
++    vb.aa[1] = s_gpu.aa_sy;
++    vb.fog_enable = s_gpu.fog_enable;
++    vb.fog_mode = s_gpu.fog_mode;
++    vb.fog_param[0] = s_gpu.fog_param[0];
++    vb.fog_param[1] = s_gpu.fog_param[1];
++    if (!s_xbackend->draw_vsh(&surf, &vb)) {
++        s_xvs_cpu++;
++        return 0;
++    }
++    gpu_vsh_verify(nv, mask, nin);
++    s_gpu.batches_program++;
++    s_gpu.verts_program += n;
++    s_gpu.tris_drawn += ni / 3;
++    if (s_gpu.texs[0].valid)
++        note_texture_use();
++    note_drawn();
++    return 1;
++}
++
+ static void raster_batch_program(void)
+ {
+     uint32_t i, n = s_gpu.idx_count;
+ 
++    if (gpu_vsh_batch())
++        return;
++
+     if (!s_xf && !(s_xf = (Nv2aVshOutput *)calloc(NV_MAX_INDICES, sizeof *s_xf)))
+         return;
+     for (i = 0; i < n; i++)
+@@ -5049,6 +5476,10 @@ void nv2a_pb_exec_report(void)
+     fprintf(stderr, "[GPU] vertex programs: %u batches, %u vertices;"
+                     " %u triangles dropped behind the eye\n",
+             s_gpu.batches_program, s_gpu.verts_program, s_gpu.tris_behind);
++    if (s_xvs_raw || s_xvs_gathered || s_xvs_cpu)
++        fprintf(stderr, "[GPU] programs on the GPU: %llu raw, %llu gathered;"
++                        " %llu declined (CPU)\n", (unsigned long long)s_xvs_raw,
++                (unsigned long long)s_xvs_gathered, (unsigned long long)s_xvs_cpu);
+     if (s_gpu.batches_ffp)
+         fprintf(stderr, "[GPU] fixed-function transform: %u batches\n",
+                 s_gpu.batches_ffp);
+diff --git a/src/kernel/nv2a_vsh_interp.c b/src/kernel/nv2a_vsh_interp.c
+index c1b48e4..f651df9 100644
+--- a/src/kernel/nv2a_vsh_interp.c
++++ b/src/kernel/nv2a_vsh_interp.c
+@@ -39,6 +39,7 @@ static float    s_const[NV2A_VSH_CONSTANTS][4];
+ static uint32_t s_load_slot, s_load_word, s_start_slot;
+ static uint32_t s_const_load, s_const_word;
+ static uint32_t s_cxt_write;
++static uint32_t s_const_gen;             /* nv2a_vsh_constants_gen */
+ static int      s_const_trace = -1;      /* RECOMP_VSH_DUMP: constant traffic */
+ 
+ static int vsh_dump_enabled(void)
+@@ -84,6 +85,7 @@ void nv2a_vsh_set_constant_load(uint32_t index)
+ 
+ void nv2a_vsh_constant_word(uint32_t word)
+ {
++    s_const_gen++;
+     if (s_const_load < NV2A_VSH_CONSTANTS)
+         memcpy(&s_const[s_const_load][s_const_word], &word, 4);
+     else if (vsh_dump_enabled()) {
+@@ -108,6 +110,7 @@ void nv2a_vsh_constant_word(uint32_t word)
+ 
+ void nv2a_vsh_set_constant(uint32_t index, const float v[4])
+ {
++    s_const_gen++;
+     if (index < NV2A_VSH_CONSTANTS)
+         memcpy(s_const[index], v, sizeof s_const[index]);
+ }
+@@ -183,6 +186,22 @@ static void dump_program(uint32_t start)
+     fflush(stderr);
+ }
+ 
++const uint32_t (*nv2a_vsh_program(uint32_t *count))[4]
++{
++    uint32_t s;
++
++    for (s = s_start_slot; s < NV2A_VSH_SLOTS; s++)
++        if (s_program[s][3] & 1u) {                       /* FINAL */
++            *count = s - s_start_slot + 1;
++            return (const uint32_t (*)[4])s_program[s_start_slot];
++        }
++    *count = 0;
++    return NULL;
++}
++
++uint32_t nv2a_vsh_constants_gen(void) { return s_const_gen; }
++uint32_t nv2a_vsh_cxt_write_enabled(void) { return s_cxt_write; }
++
+ const float *nv2a_vsh_constant(uint32_t index)
+ {
+     return s_const[index < NV2A_VSH_CONSTANTS ? index : 0];
+@@ -190,6 +209,7 @@ const float *nv2a_vsh_constant(uint32_t index)
+ 
+ void nv2a_vsh_constant_component(uint32_t index, uint32_t comp, uint32_t word)
+ {
++    s_const_gen++;
+     if (index < NV2A_VSH_CONSTANTS && comp < 4)
+         memcpy(&s_const[index][comp], &word, 4);
+ }
+@@ -401,8 +421,10 @@ int nv2a_vsh_run(const float in[NV2A_VSH_INPUTS][4], Nv2aVshOutput *out)
+         if (omask) {
+             const vec4 *src = field(ins, 3, 2, 1) ? &ires : &mres;
+             if (!field(ins, 3, 11, 1)) {                  /* to c[] */
+-                if (s_cxt_write && oaddr < NV2A_VSH_CONSTANTS)
++                if (s_cxt_write && oaddr < NV2A_VSH_CONSTANTS) {
+                     write_masked(s_const[oaddr], src, omask);
++                    s_const_gen++;
++                }
+             } else if (oaddr == 0) {
+                 write_masked(opos.v, src, omask);
+             } else if (oaddr < 13) {
+diff --git a/src/kernel/nv2a_vsh_interp.h b/src/kernel/nv2a_vsh_interp.h
+index 8acb0af..1912a45 100644
+--- a/src/kernel/nv2a_vsh_interp.h
++++ b/src/kernel/nv2a_vsh_interp.h
+@@ -58,4 +58,14 @@ const float *nv2a_vsh_constant(uint32_t index);   /* for traces */
+ void nv2a_vsh_constant_component(uint32_t index, uint32_t comp, uint32_t word);
+ void nv2a_vsh_set_instruction(uint32_t slot, const uint32_t words[4]);
+ 
++/* For a back end that runs programs on the GPU (nv2a_backend_ext.h,
++ * draw_vsh). The program from the start slot to its FINAL instruction
++ * inclusive, with *count set; NULL if there is none. */
++const uint32_t (*nv2a_vsh_program(uint32_t *count))[4];
++/* Bumped by every write to c[0..191]: equal values mean the constant file
++ * did not change in between. */
++uint32_t nv2a_vsh_constants_gen(void);
++/* _CXT_WRITE_EN: programs may write their own constants. */
++uint32_t nv2a_vsh_cxt_write_enabled(void);
++
+ #endif

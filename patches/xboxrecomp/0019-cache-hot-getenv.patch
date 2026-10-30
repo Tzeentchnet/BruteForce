@@ -1,0 +1,56 @@
+diff --git a/src/kernel/nv2a_pb_exec.c b/src/kernel/nv2a_pb_exec.c
+index fc7bb98..76cf7f7 100644
+--- a/src/kernel/nv2a_pb_exec.c
++++ b/src/kernel/nv2a_pb_exec.c
+@@ -4070,7 +4070,11 @@ static void draw_primitive(void)
+         }
+     }
+ 
+-    if (getenv("RECOMP_PB_EXEC_VERBOSE")) {
++    /* Cached: this runs for every draw, and getenv scans the environment. */
++    static int verbose_draws = -1;
++    if (verbose_draws < 0)
++        verbose_draws = getenv("RECOMP_PB_EXEC_VERBOSE") != NULL;
++    if (verbose_draws) {
+         static int shown;
+         if (shown++ < 6) {
+             fprintf(stderr, "  [GPU] prim %u, %u indices, pos attr:"
+diff --git a/src/kernel/nv2a_pb_scan.c b/src/kernel/nv2a_pb_scan.c
+index 89b7294..51e5666 100644
+--- a/src/kernel/nv2a_pb_scan.c
++++ b/src/kernel/nv2a_pb_scan.c
+@@ -308,6 +308,16 @@ static void pb_consume(const uint8_t *mem, uint32_t put, uint32_t *words)
+     }
+ }
+ 
++/* RECOMP_PB_TRACE_CALLS, read once: CALLs are frequent and getenv scans the
++ * environment. */
++static int trace_calls(void)
++{
++    static int on = -1;
++    if (on < 0)
++        on = getenv("RECOMP_PB_TRACE_CALLS") != NULL;
++    return on;
++}
++
+ static void pb_walk(uint32_t put_phys, int publish_get)
+ {
+     const uint8_t *mem = (const uint8_t *)xbox_GetMemoryOffset();
+@@ -426,7 +436,7 @@ static void pb_walk(uint32_t put_phys, int publish_get)
+             *s_dma_subroutine = s_ret | NV2A_DMA_SUBROUTINE_STATE;
+             s_tot_calls++;
+             pb_flow(at, w, target);
+-            if (getenv("RECOMP_PB_TRACE_CALLS") && s_tot_calls <= 16)
++            if (s_tot_calls <= 16 && trace_calls())
+                 fprintf(stderr, "  [PB] CALL #%u at 0x%08X -> 0x%08X "
+                                 "(PUT 0x%08X)\n", s_tot_calls, at, target, put);
+             s_get = target;
+@@ -636,7 +646,7 @@ static uint32_t pb_walk_segment(uint32_t va, uint32_t end_va, int in_call,
+                     sub_end = 0x80000000u + PB_RAM_BYTES;
+                 s_tot_calls++;
+                 pb_flow(at, w, target);
+-                if (getenv("RECOMP_PB_TRACE_CALLS") && s_tot_calls <= 16) {
++                if (s_tot_calls <= 16 && trace_calls()) {
+                     unsigned k;
+                     fprintf(stderr, "  [PB] CALL #%u at 0x%08X -> 0x%08X, "
+                                     "segment end 0x%08X\n",

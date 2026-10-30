@@ -1,0 +1,3 @@
+#ifndef TEST_RECOMP_TYPES_H
+#define TEST_RECOMP_TYPES_H
+#endif

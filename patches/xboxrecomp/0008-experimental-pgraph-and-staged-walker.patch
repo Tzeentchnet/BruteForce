@@ -1,0 +1,1165 @@
+diff --git a/src/kernel/kernel.h b/src/kernel/kernel.h
+index 3617c0d..0db1543 100644
+--- a/src/kernel/kernel.h
++++ b/src/kernel/kernel.h
+@@ -905,6 +905,7 @@ enum {
+     XBOX_IRQ_VBLANK,
+     XBOX_IRQ_APU,
+     XBOX_IRQ_OHCI,
++    XBOX_IRQ_PGRAPH,
+     XBOX_IRQ_LINES
+ };
+ /* What xbox_IrqPost tells the device model to do. */
+@@ -934,6 +935,12 @@ unsigned long xbox_DispatchGateOwner(void);
+  * or RECOMP_IRQ_SAFE_FORCE): one line naming the holder it runs beside (the
+  * first 20 per line), and a count in the [IRQ] summary. */
+ void    xbox_IrqNoteUngated(int line);
++int     xbox_Nv2aGraphTrapPending(void);
++int     xbox_Nv2aGraphSoftwareTrap(uint32_t subch, uint32_t method, uint32_t data);
++int     xbox_Nv2aGraphAcknowledgeTrap(uint32_t context, uint32_t data);
++void    xbox_Nv2aGraphCompleteTrap(void);
++int     xbox_KeRegisterTitleEvent(uint32_t guest_va);
++uint32_t xbox_GetConnectedInterrupt(uint32_t vector);
+ 
+ /* DPCs queued by an interrupt (the queue in kernel_bridge.c). On the console
+  * one runs when the processor drops below DISPATCH, before the interrupted
+diff --git a/src/kernel/kernel_bridge.c b/src/kernel/kernel_bridge.c
+index 051e8da..bb7be13 100644
+--- a/src/kernel/kernel_bridge.c
++++ b/src/kernel/kernel_bridge.c
+@@ -2807,6 +2807,204 @@ static int kernel_call_isr(uint32_t vector)
+ #define NV2A_PCRTC_INTR_VBLANK (1u << 0)
+ #define NV2A_PCRTC_INTR_EN_0   0x00600140u
+ #define NV2A_VECTOR            3u
++#define NV2A_PMC_INTR_PGRAPH   (1u << 12)
++#define NV2A_PGRAPH_INTR       0x00400100u
++#define NV2A_PGRAPH_NSOURCE    0x00400108u
++#define NV2A_PGRAPH_INTR_EN    0x00400140u
++#define NV2A_PGRAPH_TRAP_ADDR  0x00400704u
++#define NV2A_PGRAPH_TRAP_DATA  0x00400708u
++#define NV2A_PGRAPH_NOTIFY     (1u << 0)
++
++enum {
++    GRAPH_IDLE,
++    GRAPH_PENDING,
++    GRAPH_ARMING,
++    GRAPH_HANDLING
++};
++static volatile LONG g_graph_pending;
++static volatile LONG g_graph_posted;
++static volatile LONG g_graph_traps;
++static volatile LONG g_graph_acks;
++static volatile LONG g_graph_deliveries;
++static volatile LONG g_graph_seen_methods;
++static uint32_t g_graph_data;
++static HANDLE g_graph_done;
++
++void xbox_Nv2aAckBusyBits(void);
++static void kernel_timer_start(void);
++
++int xbox_Nv2aGraphTrapPending(void)
++{
++    return InterlockedCompareExchange(&g_graph_pending, GRAPH_IDLE, GRAPH_IDLE) != GRAPH_IDLE;
++}
++
++int xbox_Nv2aGraphSoftwareTrap(uint32_t subch, uint32_t method, uint32_t data)
++{
++    static int enabled = -1;
++    DWORD started;
++
++    if (enabled < 0) {
++        const char *env = getenv("RECOMP_PGRAPH_IRQ");
++        enabled = env && *env == '1';
++    }
++    if (!enabled)
++        return 0;
++    if (subch != 0 || method != 0x100u || data == 0) {
++        fprintf(stderr, "  [PGRAPH] unsupported software trap %u:%03X data=%08X\n",
++                subch, method, data);
++        abort();
++    }
++    if (!xbox_IrqSafePointsStrict() || !xbox_GetConnectedInterrupt(NV2A_VECTOR)) {
++        fprintf(stderr, "  [PGRAPH] software trap requires the strict IRQ gate "
++                        "and a connected GPU ISR\n");
++        abort();
++    }
++    kernel_timer_start();
++    if (!g_graph_done) {
++        g_graph_done = CreateEventA(NULL, FALSE, FALSE, NULL);
++        if (!g_graph_done) {
++            fprintf(stderr, "  [PGRAPH] cannot create trap event: %lu\n",
++                    (unsigned long)GetLastError());
++            abort();
++        }
++    }
++    if (InterlockedCompareExchange(&g_graph_pending, GRAPH_ARMING, GRAPH_IDLE) != GRAPH_IDLE) {
++        fprintf(stderr, "  [PGRAPH] nested software trap\n");
++        abort();
++    }
++    g_graph_data = data;
++    BRIDGE_MEM32(XBOX_NV2A_REG_BASE + NV2A_PGRAPH_NSOURCE) = NV2A_PGRAPH_NOTIFY;
++    BRIDGE_MEM32(XBOX_NV2A_REG_BASE + NV2A_PGRAPH_TRAP_ADDR) =
++        method | (subch << 16);
++    BRIDGE_MEM32(XBOX_NV2A_REG_BASE + NV2A_PGRAPH_TRAP_DATA) = data;
++    InterlockedOr((volatile LONG *)&BRIDGE_MEM32(XBOX_NV2A_REG_BASE + NV2A_PGRAPH_INTR),
++                  NV2A_PGRAPH_NOTIFY);
++    if (BRIDGE_MEM32(XBOX_NV2A_REG_BASE + NV2A_PGRAPH_INTR_EN) & NV2A_PGRAPH_NOTIFY)
++        InterlockedOr((volatile LONG *)&BRIDGE_MEM32(XBOX_NV2A_REG_BASE + NV2A_PMC_INTR_0),
++                      NV2A_PMC_INTR_PGRAPH);
++    InterlockedExchange(&g_graph_pending, GRAPH_PENDING);
++    xbox_HostTimerWake();
++    {
++        LONG bit = (LONG)(1u << (data & 31u));
++        LONG seen = InterlockedOr(&g_graph_seen_methods, bit);
++        LONG traps = InterlockedIncrement(&g_graph_traps);
++        if (!(seen & bit) || traps <= 4)
++            fprintf(stderr, "  [PGRAPH] software trap method=%03X data=%08X\n", method, data);
++    }
++    started = GetTickCount();
++    while (xbox_Nv2aGraphTrapPending()) {
++        DWORD wait = WaitForSingleObject(g_graph_done, 2);
++        if (wait == WAIT_FAILED) {
++            fprintf(stderr, "  [PGRAPH] trap wait failed: %lu\n",
++                    (unsigned long)GetLastError());
++            abort();
++        }
++        xbox_Nv2aAckBusyBits();
++        if ((DWORD)(GetTickCount() - started) > 5000) {
++            fprintf(stderr, "  [PGRAPH] waiting for guest software-trap acknowledgement\n");
++            started = GetTickCount();
++        }
++    }
++    return 1;
++}
++
++int xbox_Nv2aGraphAcknowledgeTrap(uint32_t context, uint32_t data)
++{
++    uint32_t interrupt, remaining;
++
++    if (InterlockedCompareExchange(&g_graph_pending, GRAPH_IDLE, GRAPH_IDLE) != GRAPH_PENDING)
++        return 0;
++    interrupt = xbox_GetConnectedInterrupt(NV2A_VECTOR);
++    if (!interrupt || context != BRIDGE_MEM32(interrupt + 4) ||
++        data != g_graph_data ||
++        BRIDGE_MEM32(XBOX_NV2A_REG_BASE + NV2A_PGRAPH_TRAP_ADDR) != 0x100u ||
++        BRIDGE_MEM32(XBOX_NV2A_REG_BASE + NV2A_PGRAPH_TRAP_DATA) != data) {
++        fprintf(stderr, "  [PGRAPH] invalid software-trap acknowledgement "
++                        "context=%08X data=%08X (expected %08X)\n",
++                context, data, g_graph_data);
++        abort();
++    }
++    if (InterlockedCompareExchange(&g_graph_pending, GRAPH_HANDLING, GRAPH_PENDING) != GRAPH_PENDING) {
++        fprintf(stderr, "  [PGRAPH] concurrent software-trap acknowledgement\n");
++        abort();
++    }
++    remaining = (uint32_t)InterlockedAnd(
++        (volatile LONG *)&BRIDGE_MEM32(XBOX_NV2A_REG_BASE + NV2A_PGRAPH_INTR),
++        (LONG)~NV2A_PGRAPH_NOTIFY) & ~NV2A_PGRAPH_NOTIFY;
++    if (!(remaining & BRIDGE_MEM32(XBOX_NV2A_REG_BASE + NV2A_PGRAPH_INTR_EN)))
++        InterlockedAnd((volatile LONG *)&BRIDGE_MEM32(XBOX_NV2A_REG_BASE + NV2A_PMC_INTR_0),
++                       (LONG)~NV2A_PMC_INTR_PGRAPH);
++    if (InterlockedIncrement(&g_graph_acks) <= 4)
++        fprintf(stderr, "  [PGRAPH] guest acknowledged software trap %08X\n", data);
++    return 1;
++}
++
++void xbox_Nv2aGraphCompleteTrap(void)
++{
++    if (InterlockedCompareExchange(&g_graph_pending, GRAPH_IDLE, GRAPH_HANDLING) != GRAPH_HANDLING) {
++        fprintf(stderr, "  [PGRAPH] software trap completed in an invalid state\n");
++        abort();
++    }
++    InterlockedExchange(&g_graph_posted, 0);
++    if (!SetEvent(g_graph_done)) {
++        fprintf(stderr, "  [PGRAPH] cannot wake trapped GPU: %lu\n",
++                (unsigned long)GetLastError());
++        abort();
++    }
++}
++
++static void kernel_graph_deliver(void)
++{
++    int claimed;
++
++    if (InterlockedCompareExchange(&g_graph_pending, GRAPH_IDLE, GRAPH_IDLE) != GRAPH_PENDING ||
++        !(BRIDGE_MEM32(XBOX_NV2A_REG_BASE + NV2A_PGRAPH_INTR_EN) & NV2A_PGRAPH_NOTIFY) ||
++        !BRIDGE_MEM32(XBOX_NV2A_REG_BASE + NV2A_PMC_INTR_EN_0)) {
++        InterlockedExchange(&g_graph_posted, 0);
++        return;
++    }
++    claimed = kernel_call_isr(NV2A_VECTOR);
++    if (InterlockedIncrement(&g_graph_deliveries) <= 4 || claimed < 0)
++        fprintf(stderr, "  [PGRAPH] ISR %s\n",
++                claimed < 0 ? "not callable" : claimed ? "claimed" : "declined");
++    if (claimed < 0) {
++        fprintf(stderr, "  [PGRAPH] connected GPU ISR cannot be called\n");
++        abort();
++    }
++    if (!claimed)
++        InterlockedExchange(&g_graph_posted, 0);
++}
++
++static void kernel_graph_maybe_raise(void)
++{
++    if (InterlockedCompareExchange(&g_graph_pending, GRAPH_IDLE, GRAPH_IDLE) != GRAPH_PENDING ||
++        !(BRIDGE_MEM32(XBOX_NV2A_REG_BASE + NV2A_PGRAPH_INTR_EN) & NV2A_PGRAPH_NOTIFY))
++        return;
++    InterlockedOr((volatile LONG *)&BRIDGE_MEM32(XBOX_NV2A_REG_BASE + NV2A_PMC_INTR_0),
++                  NV2A_PMC_INTR_PGRAPH);
++    if (InterlockedCompareExchange(&g_graph_pending, GRAPH_IDLE, GRAPH_IDLE) != GRAPH_PENDING) {
++        if (!(BRIDGE_MEM32(XBOX_NV2A_REG_BASE + NV2A_PGRAPH_INTR) &
++              BRIDGE_MEM32(XBOX_NV2A_REG_BASE + NV2A_PGRAPH_INTR_EN)))
++            InterlockedAnd((volatile LONG *)&BRIDGE_MEM32(XBOX_NV2A_REG_BASE + NV2A_PMC_INTR_0),
++                           (LONG)~NV2A_PMC_INTR_PGRAPH);
++        return;
++    }
++    if (!BRIDGE_MEM32(XBOX_NV2A_REG_BASE + NV2A_PMC_INTR_EN_0) ||
++        InterlockedCompareExchange(&g_graph_posted, 1, 0) != 0)
++        return;
++    xbox_IrqSetHandler(XBOX_IRQ_PGRAPH, kernel_graph_deliver);
++    switch (xbox_IrqPost(XBOX_IRQ_PGRAPH)) {
++    case XBOX_IRQ_GATED:
++        kernel_graph_deliver();
++        xbox_DispatchGateLeave();
++        break;
++    case XBOX_IRQ_POSTED:
++        break;
++    default:
++        fprintf(stderr, "  [PGRAPH] software trap was delivered without the IRQ gate\n");
++        abort();
++    }
++}
+ 
+ /* Milliseconds on the performance counter, for the vblank schedule, the
+  * kernel timers and the vblank ack wait. GetTickCount64 is not good enough
+@@ -3602,7 +3800,8 @@ typedef struct {
+ } XboxTimer;
+ static XboxTimer g_timers[XBOX_MAX_TIMERS];
+ static CRITICAL_SECTION g_timer_lock;
+-static int g_timer_started;
++static volatile LONG g_timer_started;
++static INIT_ONCE g_timer_once = INIT_ONCE_STATIC_INIT;
+ 
+ /* Whether the timer thread runs the paced loop below (kernel_timer_loop_ns):
+  * only for what needs it, the 60 Hz vblank (RECOMP_VBLANK=paced) and the
+@@ -3710,6 +3909,7 @@ static void kernel_timer_loop_ns(void)
+          * drains at a raise runs now rather than at the next edge. */
+         xbox_HostTimerSleepNs(wait);
+         kernel_vblank_tick_ns(xbox_HostNowNs(), &vbl_next);
++        kernel_graph_maybe_raise();
+         busy = kernel_drain_dpcs(&ran);   /* deferred work, before due timers */
+         now_ms = kernel_timer_clock_ms();
+         kernel_fire_timers(now_ms, &timer_due);
+@@ -3737,15 +3937,31 @@ static void kernel_timer_loop_ns(void)
+     }
+ }
+ 
+-static DWORD WINAPI kernel_timer_thread(LPVOID unused)
++typedef struct {
++    HANDLE ready_event;
++    int ready;
++} KernelTimerStartup;
++
++static void kernel_timer_signal_ready(KernelTimerStartup *startup, int ready)
++{
++    startup->ready = ready;
++    if (!SetEvent(startup->ready_event)) {
++        fprintf(stderr, "  [KERNEL] cannot signal timer startup: %lu\n",
++                (unsigned long)GetLastError());
++        abort();
++    }
++}
++
++static DWORD WINAPI kernel_timer_thread(LPVOID parameter)
+ {
++    KernelTimerStartup *startup = (KernelTimerStartup *)parameter;
+     int slot = xbox_worker_stack_alloc();
+ 
+-    (void)unused;
+     if (slot < 0) {
+         fprintf(stderr, "  [KERNEL] timer thread has no worker stack; "
+                         "timer DPCs will not run\n");
+         fflush(stderr);
++        kernel_timer_signal_ready(startup, 0);
+         return 0;
+     }
+     g_esp = XBOX_WORKER_STACK_TOP(slot);
+@@ -3759,10 +3975,13 @@ static DWORD WINAPI kernel_timer_thread(LPVOID unused)
+             fprintf(stderr, "  [KERNEL] timer thread has no TIB; "
+                             "timer DPCs will not run\n");
+             fflush(stderr);
++            xbox_worker_stack_free(slot);
++            kernel_timer_signal_ready(startup, 0);
+             return 0;
+         }
+         g_fs_base = tib;
+     }
++    kernel_timer_signal_ready(startup, 1);
+ 
+     if (!kernel_timer_paced()) {
+         /* Neither the 60 Hz vblank nor the gate: the 10 ms tick, the
+@@ -3774,6 +3993,7 @@ static DWORD WINAPI kernel_timer_thread(LPVOID unused)
+ 
+             Sleep(10);
+             kernel_vblank_tick();  /* the GPU's frame clock */
++            kernel_graph_maybe_raise();
+             kernel_drain_dpcs(&ran);
+             kernel_fire_timers(kernel_timer_clock_ms(), &timer_due);
+         }
+@@ -3798,6 +4018,52 @@ static DWORD WINAPI kernel_timer_thread(LPVOID unused)
+     return 0;
+ }
+ 
++static BOOL CALLBACK kernel_timer_start_once(PINIT_ONCE once, PVOID parameter, PVOID *context)
++{
++    HANDLE thread;
++    KernelTimerStartup startup;
++    (void)once; (void)parameter; (void)context;
++
++    InitializeCriticalSection(&g_timer_lock);
++    startup.ready = 0;
++    startup.ready_event = CreateEventA(NULL, FALSE, FALSE, NULL);
++    if (!startup.ready_event) {
++        fprintf(stderr, "  [KERNEL] cannot create timer startup event: %lu\n",
++                (unsigned long)GetLastError());
++        DeleteCriticalSection(&g_timer_lock);
++        return FALSE;
++    }
++    thread = CreateThread(NULL, 0, kernel_timer_thread, &startup, 0, NULL);
++    if (!thread) {
++        fprintf(stderr, "  [KERNEL] cannot start timer thread: %lu\n",
++                (unsigned long)GetLastError());
++        CloseHandle(startup.ready_event);
++        DeleteCriticalSection(&g_timer_lock);
++        return FALSE;
++    }
++    if (WaitForSingleObject(startup.ready_event, INFINITE) != WAIT_OBJECT_0) {
++        fprintf(stderr, "  [KERNEL] cannot wait for timer startup: %lu\n",
++                (unsigned long)GetLastError());
++        abort();
++    }
++    CloseHandle(startup.ready_event);
++    if (!startup.ready) {
++        WaitForSingleObject(thread, INFINITE);
++        CloseHandle(thread);
++        DeleteCriticalSection(&g_timer_lock);
++        return FALSE;
++    }
++    InterlockedExchange(&g_timer_started, 1);
++    CloseHandle(thread);
++    return TRUE;
++}
++
++static void kernel_timer_start(void)
++{
++    if (!InitOnceExecuteOnce(&g_timer_once, kernel_timer_start_once, NULL, NULL))
++        abort();
++}
++
+ /* Shared by KeSetTimer and KeSetTimerEx; period is 0 for the former. */
+ static void kernel_set_timer(uint32_t timer_va, long long due_100ns,
+                              long period_ms, uint32_t dpc_va)
+@@ -3806,11 +4072,7 @@ static void kernel_set_timer(uint32_t timer_va, long long due_100ns,
+     int i, free_slot = -1;
+     uint32_t was_set = 0;
+ 
+-    if (!g_timer_started) {
+-        InitializeCriticalSection(&g_timer_lock);
+-        g_timer_started = 1;
+-        CloseHandle(CreateThread(NULL, 0, kernel_timer_thread, NULL, 0, NULL));
+-    }
++    kernel_timer_start();
+ 
+     EnterCriticalSection(&g_timer_lock);
+     for (i = 0; i < XBOX_MAX_TIMERS; i++) {
+@@ -7501,16 +7763,20 @@ static void bridge_RtlCaptureStackBackTrace(void)
+ typedef struct { uint32_t guest_va; HANDLE host_handle; uint32_t in_use; } KE_SHADOW_SLOT;
+ static KE_SHADOW_SLOT g_ke_shadow[KE_SHADOW_SIZE];
+ static CRITICAL_SECTION g_ke_shadow_cs;
+-static int g_ke_shadow_init;
++static INIT_ONCE g_ke_shadow_once = INIT_ONCE_STATIC_INIT;
++static volatile LONG g_ke_explicit_title_events;
+ 
+-static void ke_shadow_init(void)
++static BOOL CALLBACK ke_shadow_initialize(PINIT_ONCE once, PVOID parameter, PVOID *context)
+ {
+-    if (g_ke_shadow_init)
+-        return;
++    (void)once; (void)parameter; (void)context;
+     InitializeCriticalSection(&g_ke_shadow_cs);
+-    /* Wipe any stale pointers from a prior lifecycle (defensive). */
+     memset(g_ke_shadow, 0, sizeof(g_ke_shadow));
+-    g_ke_shadow_init = 1;
++    return TRUE;
++}
++
++static void ke_shadow_init(void)
++{
++    InitOnceExecuteOnce(&g_ke_shadow_once, ke_shadow_initialize, NULL, NULL);
+ }
+ 
+ /* Insert a mapping guest_va -> host HANDLE. Replaces any prior mapping for
+@@ -7532,6 +7798,7 @@ static void ke_shadow_insert(uint32_t guest_va, HANDLE host)
+             if (g_ke_shadow[i].host_handle && g_ke_shadow[i].host_handle != host)
+                 CloseHandle(g_ke_shadow[i].host_handle);
+             g_ke_shadow[i].host_handle = host;
++            g_ke_shadow[i].in_use = 1;
+             LeaveCriticalSection(&g_ke_shadow_cs);
+             return;
+         }
+@@ -7622,22 +7889,55 @@ static void ke_shadow_remove(uint32_t guest_va)
+  * once now blocks until the event is set, and on a title whose setter the
+  * runtime does not model yet (a GPU interrupt, say) that turns a spin into a
+  * hang. Turn it on for a title that waits on events it built itself. */
+-static HANDLE ke_guest_event(uint32_t guest_va, int *type)
++static HANDLE ke_guest_event_open(uint32_t guest_va, int *type, int explicit_registration)
+ {
+-    static int enabled = -1;
++    static volatile LONG enabled = -1;
+     uint32_t hdr, i;
+     HANDLE h = NULL;
++    MEMORY_BASIC_INFORMATION info;
++    uintptr_t host, region;
++    DWORD writable = PAGE_READWRITE | PAGE_WRITECOPY | PAGE_EXECUTE_READWRITE;
++    DWORD inaccessible = PAGE_NOACCESS;
+ 
+-    if (enabled < 0) {
++#ifdef PAGE_EXECUTE_WRITECOPY
++    writable |= PAGE_EXECUTE_WRITECOPY;
++#endif
++#ifdef PAGE_GUARD
++    inaccessible |= PAGE_GUARD;
++#endif
++
++    if (InterlockedCompareExchange(&enabled, 0, 0) < 0) {
+         const char *e = getenv("RECOMP_TITLE_KEVENTS");
+-        enabled = e && *e == '1';
++        InterlockedCompareExchange(&enabled, e && *e == '1', -1);
++    }
++    if (!enabled && !explicit_registration) {
++        int registered = 0;
++        if (!InterlockedCompareExchange(&g_ke_explicit_title_events, 0, 0))
++            return NULL;
++        ke_shadow_init();
++        EnterCriticalSection(&g_ke_shadow_cs);
++        for (i = 0; i < KE_SHADOW_SIZE; i++) {
++            if (g_ke_shadow[i].in_use == 3 && g_ke_shadow[i].guest_va == guest_va) {
++                registered = 1;
++                break;
++            }
++        }
++        LeaveCriticalSection(&g_ke_shadow_cs);
++        if (!registered)
++            return NULL;
+     }
+-    if (!enabled)
+-        return NULL;
+     if (guest_va < 0x10000u || (guest_va & 3u))
+         return NULL;
+-    if (guest_va >= 0x04000000u && (guest_va < 0x80000000u || guest_va >= 0x84000000u))
+-        return NULL;                               /* RAM or the contiguous window */
++    if (!bridge_va_mapped(guest_va, 8))
++        return NULL;
++    host = (uintptr_t)XBOX_TO_NATIVE(guest_va);
++    if (VirtualQuery((const void *)host, &info, sizeof(info)) != sizeof(info) ||
++        info.State != MEM_COMMIT || (info.Protect & inaccessible) ||
++        !(info.Protect & writable))
++        return NULL;
++    region = (uintptr_t)info.BaseAddress;
++    if (host < region || info.RegionSize < 8u || host - region > info.RegionSize - 8u)
++        return NULL;
+     hdr = BRIDGE_MEM32(guest_va);
+     if (((hdr & 0xFFu) != 0 && (hdr & 0xFFu) != 1) || ((hdr >> 16) & 0xFFu) != 4)
+         return NULL;
+@@ -7647,18 +7947,26 @@ static HANDLE ke_guest_event(uint32_t guest_va, int *type)
+     EnterCriticalSection(&g_ke_shadow_cs);
+     for (i = 0; i < KE_SHADOW_SIZE; i++) {
+         if (g_ke_shadow[i].in_use && g_ke_shadow[i].guest_va == guest_va) {
+-            h = g_ke_shadow[i].in_use == 2 ? g_ke_shadow[i].host_handle : NULL;
++            if (explicit_registration || g_ke_shadow[i].in_use == 2 ||
++                g_ke_shadow[i].in_use == 3)
++                h = g_ke_shadow[i].host_handle;
+             LeaveCriticalSection(&g_ke_shadow_cs);
+             return h;                              /* a KeInitializeEvent shadow: old path */
+         }
+     }
++    if (!enabled && !explicit_registration) {
++        LeaveCriticalSection(&g_ke_shadow_cs);
++        return NULL;
++    }
+     for (i = 0; i < KE_SHADOW_SIZE; i++) {
+         if (!g_ke_shadow[i].in_use) {
+             h = CreateEventA(NULL, *type == 0, BRIDGE_MEM32(guest_va + 4) != 0, NULL);
+             if (h) {
+-                g_ke_shadow[i].in_use      = 2;
++                g_ke_shadow[i].in_use      = explicit_registration ? 3 : 2;
+                 g_ke_shadow[i].guest_va    = guest_va;
+                 g_ke_shadow[i].host_handle = h;
++                if (explicit_registration)
++                    InterlockedExchange(&g_ke_explicit_title_events, 1);
+             }
+             break;
+         }
+@@ -7673,6 +7981,21 @@ static HANDLE ke_guest_event(uint32_t guest_va, int *type)
+     return h;
+ }
+ 
++static HANDLE ke_guest_event(uint32_t guest_va, int *type)
++{
++    return ke_guest_event_open(guest_va, type, 0);
++}
++
++int xbox_KeRegisterTitleEvent(uint32_t guest_va)
++{
++    int type;
++    if (!ke_guest_event_open(guest_va, &type, 1)) {
++        fprintf(stderr, "  [KERNEL] cannot register title event 0x%08X\n", guest_va);
++        return 0;
++    }
++    return 1;
++}
++
+ /* ═══════════════════════════════════════════════════════════════════════════
+  * Data Exports (102, 120, 154, 240, 245, 249)
+  *
+diff --git a/src/kernel/kernel_hal.c b/src/kernel/kernel_hal.c
+index 9cc7142..7140285 100644
+--- a/src/kernel/kernel_hal.c
++++ b/src/kernel/kernel_hal.c
+@@ -350,7 +350,7 @@ static int s_dpc_on;            /* RECOMP_DPC_ON_RAISE, under the gate */
+ static XBOX_THREAD_LOCAL int t_guest_thread;
+ static XBOX_THREAD_LOCAL int t_in_dpc;
+ static uint64_t s_irq_wait_ns;
+-static const char *const s_irq_names[XBOX_IRQ_LINES] = { "vblank", "apu", "ohci" };
++static const char *const s_irq_names[XBOX_IRQ_LINES] = { "vblank", "apu", "ohci", "pgraph" };
+ 
+ static struct {
+     volatile LONG posted[XBOX_IRQ_LINES], on_holder[XBOX_IRQ_LINES],
+@@ -814,10 +814,10 @@ void xbox_IrqReport(void)
+ 
+     xbox_IrqStatsGet(&s, 1);
+     if (!xbox_IrqSafePointsOn()) {
+-        if (s.ungated[0] | s.ungated[1] | s.ungated[2]) {
++        if (s.ungated[0] | s.ungated[1] | s.ungated[2] | s.ungated[3]) {
+             fprintf(stderr, "  [IRQ] ungated ISRs beside the gate holder"
+-                    " vbl/apu/ohci %ld/%ld/%ld\n",
+-                    s.ungated[0], s.ungated[1], s.ungated[2]);
++                    " vbl/apu/ohci/pgraph %ld/%ld/%ld/%ld\n",
++                    s.ungated[0], s.ungated[1], s.ungated[2], s.ungated[3]);
+             fflush(stderr);
+         }
+         return;
+@@ -826,17 +826,18 @@ void xbox_IrqReport(void)
+         any |= s.posted[i] | s.on_holder[i] | s.forced[i] | s.ungated[i];
+     if (!any && !s.wait_logs)
+         return;
+-    fprintf(stderr, "  [IRQ] posted vbl/apu/ohci %ld/%ld/%ld, run on holder"
+-            " %ld/%ld/%ld, poster's retry %ld/%ld/%ld, forced %ld/%ld/%ld,"
+-            " ungated %ld/%ld/%ld,"
+-            " longest wait %.2f/%.2f/%.2f ms, wait logs %ld, refused %ld\n",
+-            s.posted[0], s.posted[1], s.posted[2],
+-            s.on_holder[0], s.on_holder[1], s.on_holder[2],
+-            s.second_try[0], s.second_try[1], s.second_try[2],
+-            s.forced[0], s.forced[1], s.forced[2],
+-            s.ungated[0], s.ungated[1], s.ungated[2],
++    fprintf(stderr, "  [IRQ] posted vbl/apu/ohci/pgraph %ld/%ld/%ld/%ld, run on holder"
++            " %ld/%ld/%ld/%ld, poster's retry %ld/%ld/%ld/%ld, forced %ld/%ld/%ld/%ld,"
++            " ungated %ld/%ld/%ld/%ld,"
++            " longest wait %.2f/%.2f/%.2f/%.2f ms, wait logs %ld, refused %ld\n",
++            s.posted[0], s.posted[1], s.posted[2], s.posted[3],
++            s.on_holder[0], s.on_holder[1], s.on_holder[2], s.on_holder[3],
++            s.second_try[0], s.second_try[1], s.second_try[2], s.second_try[3],
++            s.forced[0], s.forced[1], s.forced[2], s.forced[3],
++            s.ungated[0], s.ungated[1], s.ungated[2], s.ungated[3],
+             s.max_wait_us[0] / 1000.0, s.max_wait_us[1] / 1000.0,
+-            s.max_wait_us[2] / 1000.0, s.wait_logs, s.refused);
++            s.max_wait_us[2] / 1000.0, s.max_wait_us[3] / 1000.0,
++            s.wait_logs, s.refused);
+     fflush(stderr);
+ }
+ 
+diff --git a/src/kernel/nv2a_pb_exec.c b/src/kernel/nv2a_pb_exec.c
+index aaf118f..f73152c 100644
+--- a/src/kernel/nv2a_pb_exec.c
++++ b/src/kernel/nv2a_pb_exec.c
+@@ -4048,6 +4048,8 @@ void nv2a_pb_exec_method(uint32_t subch, uint32_t method, uint32_t param)
+             s_gpu.idx[s_gpu.idx_count++] = param;
+         break;
+     case NV097_NO_OPERATION:
++        if (subch == 0 && param)
++            xbox_Nv2aGraphSoftwareTrap(subch, method, param);
+         /* Non-zero, it is one of D3D's software methods, which the GPU traps
+          * to D3D's interrupt handler on the console. Only the swap's interval
+          * matters here (nv2a_flip_hold.h); the rest stays a no-op. */
+diff --git a/src/kernel/nv2a_pb_scan.c b/src/kernel/nv2a_pb_scan.c
+index e3a16e2..89b7294 100644
+--- a/src/kernel/nv2a_pb_scan.c
++++ b/src/kernel/nv2a_pb_scan.c
+@@ -44,6 +44,7 @@ static uint32_t s_tot_calls;
+  * the executor writes to guest memory. */
+ extern void nv2a_pb_exec_method(uint32_t subch, uint32_t method, uint32_t param);
+ extern void nv2a_pb_exec_report(void);
++extern void nv2a_pb_exec_walk_begin(void);
+ static int s_exec_enabled = -1;
+ static int s_scan_enabled = -1;
+ 
+@@ -190,9 +191,9 @@ void nv2a_pb_scan_report(void)
+  * PUT. Addresses are physical; the contiguous window at XBOX_CONTIG_BASE is
+  * the physical view.
+  *
+- * ponytail: if the walk desynchronises (a run of words that decode as
+- * nothing), GET snaps to PUT rather than wandering through guest RAM. */
+-#define PB_PHYS_MASK 0x0FFFFFFCu
++ * Invalid control flow or a desynchronised stream stops the process rather
++ * than claiming that unexecuted commands were consumed. */
++#define PB_PHYS_MASK 0x1FFFFFFCu
+ #define PB_RAM_BYTES (64u * 1024u * 1024u)   /* XBOX_CONTIG_SIZE */
+ 
+ /* A jump or call outside RAM means the walk is reading data as commands. */
+@@ -220,7 +221,7 @@ static int pb_bad_target(uint32_t w, uint32_t at, uint32_t target, uint32_t put)
+         return 0;
+     if (++total <= 16 || total % 100 == 0) {
+         fprintf(stderr, "  [PB] bad target #%u 0x%08X from word 0x%08X at 0x%08X"
+-                        " (PUT 0x%08X); resync\n", total, target, w, at, put);
++                        " (PUT 0x%08X)\n", total, target, w, at, put);
+         if (total <= 4)
+             for (k = 0; k < PB_HIST && k < s_hist_n; k++) {
+                 unsigned i = (s_hist_n - 1 - k) % PB_HIST;
+@@ -238,6 +239,7 @@ static int pb_bad_target(uint32_t w, uint32_t at, uint32_t target, uint32_t put)
+ }
+ static uint32_t s_get = 0xFFFFFFFFu, s_ret;
+ static int      s_in_call;
++static volatile uint32_t *s_dma_subroutine;
+ 
+ /* A method whose parameters the walk has not all reached: the header said
+  * `count` words and PUT came first. The DMA engine stalls at PUT and carries
+@@ -247,6 +249,12 @@ static int      s_in_call;
+ static uint32_t s_pend_left, s_pend_i, s_pend_method, s_pend_subch;
+ static int      s_pend_noninc;
+ 
++static void pb_abort_walk(uint32_t put)
++{
++    fprintf(stderr, "  [PB] pusher stopped without consuming PUT 0x%08X\n", put);
++    abort();
++}
++
+ /* DMA_GET is the GPU's fetch pointer: nothing at or past it has been read, and
+  * XDK D3D relies on exactly that. Its fence wait reads GET and, when the fence
+  * is far enough on, patches a "wake me" software method into the pushbuffer at
+@@ -258,6 +266,8 @@ static int      s_pend_noninc;
+  * follows. */
+ extern volatile uint32_t *xbox_Nv2aRegPtr(uint32_t offset);
+ #define NV2A_USER_DMA_GET 0x800044u
++#define NV2A_PFIFO_DMA_SUBROUTINE 0x00324Cu
++#define NV2A_DMA_SUBROUTINE_STATE 1u
+ static uint32_t s_pub = 0xFFFFFFFFu;
+ 
+ /* The title moved GET itself: XDK D3D resets the ring by writing DMA_PUT and
+@@ -286,8 +296,11 @@ static void pb_consume(const uint8_t *mem, uint32_t put, uint32_t *words)
+         /* Same walk, two consumers: the survey counts, the executor
+          * acts. Keeping them on one decode means they can never
+          * disagree about what the stream said. */
+-        if (s_exec_enabled)
++        if (s_exec_enabled) {
++            s_in_call = (*s_dma_subroutine & NV2A_DMA_SUBROUTINE_STATE) != 0;
+             nv2a_pb_exec_method(s_pend_subch, m, param);
++            s_in_call = (*s_dma_subroutine & NV2A_DMA_SUBROUTINE_STATE) != 0;
++        }
+         s_get = (s_get + 4) & PB_PHYS_MASK;
+         s_pend_i++;
+         s_pend_left--;
+@@ -295,7 +308,7 @@ static void pb_consume(const uint8_t *mem, uint32_t put, uint32_t *words)
+     }
+ }
+ 
+-void nv2a_pb_scan(uint32_t put_phys)
++static void pb_walk(uint32_t put_phys, int publish_get)
+ {
+     const uint8_t *mem = (const uint8_t *)xbox_GetMemoryOffset();
+     uint32_t put = put_phys & PB_PHYS_MASK;
+@@ -304,12 +317,24 @@ void nv2a_pb_scan(uint32_t put_phys)
+ 
+     if (!pb_walk_enabled())
+         return;
++    s_dma_subroutine = xbox_Nv2aRegPtr(NV2A_PFIFO_DMA_SUBROUTINE);
++    if (!s_dma_subroutine) {
++        fprintf(stderr, "  [PB] DMA subroutine register is unavailable\n");
++        abort();
++    }
++    if (put >= PB_RAM_BYTES) {
++        fprintf(stderr, "  [PB] PUT 0x%08X is outside physical RAM\n", put);
++        pb_abort_walk(put);
++    }
+     if (s_get == 0xFFFFFFFFu) {               /* never resynced: start at PUT */
+         s_get = put, s_pend_left = 0;
+         return;
+     }
+-    if (s_exec_enabled)
++    if (s_exec_enabled && publish_get)
+         get_reg = xbox_Nv2aRegPtr(NV2A_USER_DMA_GET);
++    if (s_exec_enabled && !publish_get) {
++        nv2a_pb_exec_walk_begin();
++    }
+ 
+     pb_consume(mem, put, &words);             /* the method PUT stalled inside */
+ 
+@@ -338,7 +363,9 @@ void nv2a_pb_scan(uint32_t put_phys)
+             xbox_Nv2aAckBusyBits();
+ 
+         if (s_get >= PB_RAM_BYTES) {
+-            s_get = put, s_pend_left = 0;
++            fprintf(stderr, "  [PB] GET 0x%08X is outside physical RAM\n",
++                    s_get);
++            pb_abort_walk(put);
+             break;
+         }
+         w = *(const uint32_t *)(mem + (0x80000000u | s_get));
+@@ -347,14 +374,16 @@ void nv2a_pb_scan(uint32_t put_phys)
+         s_hist_n++;
+ 
+         if (++words > 0x400000u || unknown > 64) {
+-            s_get = put, s_pend_left = 0;                      /* lost sync, or runaway */
++            fprintf(stderr, "  [PB] walk limit reached at 0x%08X "
++                            "(%u words, %u unknown)\n", at, words, unknown);
++            pb_abort_walk(put);
+             break;
+         }
+         s_get = (s_get + 4) & PB_PHYS_MASK;
+ 
+         if ((w & 0xE0000003u) == 0x20000000u) {         /* old-style jump */
+             target = w & 0x1FFFFFFCu;
+-            if (pb_bad_target(w, at, target, put)) { s_get = put, s_pend_left = 0; break; }
++            if (pb_bad_target(w, at, target, put)) { pb_abort_walk(put); break; }
+             pb_flow(at, w, target);
+             s_get = target;
+             jumps++;
+@@ -362,39 +391,68 @@ void nv2a_pb_scan(uint32_t put_phys)
+         }
+         if ((w & 3u) == 1u) {                            /* jump */
+             target = w & 0xFFFFFFFCu;
+-            if (pb_bad_target(w, at, target, put)) { s_get = put, s_pend_left = 0; break; }
++            if (pb_bad_target(w, at, target, put)) { pb_abort_walk(put); break; }
+             pb_flow(at, w, target);
+             s_get = target;
+             jumps++;
+             continue;
+         }
+         if ((w & 3u) == 2u) {                            /* call */
++            uint32_t subroutine = *s_dma_subroutine;
+             target = w & 0xFFFFFFFCu;
+-            if (pb_bad_target(w, at, target, put)) { s_get = put, s_pend_left = 0; break; }
++            if (pb_bad_target(w, at, target, put)) { pb_abort_walk(put); break; }
++            s_in_call = (subroutine & NV2A_DMA_SUBROUTINE_STATE) != 0;
++            s_ret = subroutine & PB_PHYS_MASK;
+             if (s_in_call) {
++                static unsigned shown;
++                unsigned k;
+                 /* One level only: the hardware raises a CALL error and stops
+                  * the pusher. Taking it would overwrite the return address
+                  * and send the first RETURN to the wrong place. */
+-                s_in_call = 0;
+-                s_get = put, s_pend_left = 0;
++                fprintf(stderr, "  [PB] nested CALL at 0x%08X\n", at);
++                if (shown++ < 4) {
++                    fprintf(stderr, "  [PB] return=0x%08X PUT=0x%08X\n", s_ret, put);
++                    for (k = 0; k < PB_HIST && k < s_flow_n; k++) {
++                        unsigned i = (s_flow_n - 1 - k) % PB_HIST;
++                        fprintf(stderr, "  [PB]   flow 0x%08X at 0x%08X -> 0x%08X\n",
++                                s_flow[i].w, s_flow[i].at, s_flow[i].to);
++                    }
++                }
++                pb_abort_walk(put);
+                 break;
+             }
+             s_ret = s_get;
+             s_in_call = 1;
++            *s_dma_subroutine = s_ret | NV2A_DMA_SUBROUTINE_STATE;
+             s_tot_calls++;
+             pb_flow(at, w, target);
++            if (getenv("RECOMP_PB_TRACE_CALLS") && s_tot_calls <= 16)
++                fprintf(stderr, "  [PB] CALL #%u at 0x%08X -> 0x%08X "
++                                "(PUT 0x%08X)\n", s_tot_calls, at, target, put);
+             s_get = target;
+             continue;
+         }
+         if ((w & 0xFFFF0003u) == 0x00020000u) {          /* return */
++            uint32_t subroutine = *s_dma_subroutine;
++            s_in_call = (subroutine & NV2A_DMA_SUBROUTINE_STATE) != 0;
++            s_ret = subroutine & PB_PHYS_MASK;
+             if (s_in_call) {
++                if (pb_bad_target(w, at, s_ret, put)) {
++                    pb_abort_walk(put);
++                    break;
++                }
+                 pb_flow(at, w, s_ret);
+                 s_get = s_ret;
++                *s_dma_subroutine = subroutine & ~NV2A_DMA_SUBROUTINE_STATE;
+                 s_in_call = 0;
++            } else {
++                fprintf(stderr, "  [PB] RETURN without CALL at 0x%08X\n", at);
++                pb_abort_walk(put);
+             }
+             continue;
+         }
+-        if ((w & 0x00030003u) == 0u) {
++        if ((w & 0xE0030003u) == 0u ||
++                (w & 0xE0030003u) == 0x40000000u) {
+             uint32_t count  = (w >> 18) & 0x7FFu;
+             uint32_t subch  = (w >> 13) & 7u;
+             uint32_t method =  w & 0x1FFCu;
+@@ -427,6 +485,26 @@ void nv2a_pb_scan(uint32_t put_phys)
+     s_tot_segments++;
+ }
+ 
++void nv2a_pb_scan(uint32_t put_phys)
++{
++    pb_walk(put_phys, 1);
++}
++
++void nv2a_pb_scan_staged(uint32_t put_phys)
++{
++    pb_walk(put_phys, 0);
++}
++
++int nv2a_pb_staged_walk(void)
++{
++    static int on = -1;
++    if (on < 0) {
++        const char *e = getenv("RECOMP_PB_WALK");
++        on = e && !strcmp(e, "staged");
++    }
++    return on;
++}
++
+ /* RECOMP_PB_WALK=dma selects the DMA-engine walk above. The default is the
+  * segment scan below, which is what the executor did before the walk existed.
+  *
+@@ -466,14 +544,59 @@ int nv2a_pb_dma_walk(void)
+ static int s_in_call;
+ int nv2a_pb_scan_in_call(void) { return s_in_call; }
+ 
++typedef struct {
++    uint32_t left, index, method, subch, next;
++    int noninc;
++} PbSegmentPacket;
++
++static PbSegmentPacket s_segment_packet;
++
++static void pb_segment_consume(const uint8_t *mem, uint32_t *va, uint32_t end_va,
++                               uint32_t *words, PbSegmentPacket *packet)
++{
++    while (packet->left && *va < end_va && *words < 0x100000u) {
++        uint32_t m = packet->noninc ? packet->method
++                                    : packet->method + packet->index * 4;
++        note(packet->subch, m);
++        if (s_exec_enabled)
++            nv2a_pb_exec_method(packet->subch, m, *(const uint32_t *)(mem + *va));
++        *va += 4;
++        ++*words;
++        ++packet->index;
++        --packet->left;
++    }
++    packet->next = *va;
++}
++
+ static uint32_t pb_walk_segment(uint32_t va, uint32_t end_va, int in_call,
+-                                uint32_t *jumps, uint32_t *unknown)
++                                uint32_t *jumps, uint32_t *unknown,
++                                uint32_t *ring_jump)
+ {
+     const uint8_t *mem = (const uint8_t *)xbox_GetMemoryOffset();
+     uint32_t words = 0;
++    int returned = 0;
++
++    if (!in_call && s_segment_packet.left) {
++        if (s_segment_packet.next != va) {
++            static unsigned discontinuities;
++            if (++discontinuities <= 8 || discontinuities % 100 == 0)
++                fprintf(stderr, "  [PB] incomplete segment packet #%u at 0x%08X; "
++                                "next segment starts at 0x%08X, resync\n",
++                        discontinuities, s_segment_packet.next, va);
++            s_segment_packet.left = 0;
++        } else {
++            pb_segment_consume(mem, &va, end_va, &words, &s_segment_packet);
++            if (s_segment_packet.left)
++                return words;
++        }
++    }
+ 
+     while (va < end_va && words < 0x100000u) {
++        uint32_t at = va;
+         uint32_t w = *(const uint32_t *)(mem + va);
++        s_hist[s_hist_n % PB_HIST].at = at;
++        s_hist[s_hist_n % PB_HIST].w = w;
++        s_hist_n++;
+         va += 4;
+         words++;
+ 
+@@ -481,55 +604,98 @@ static uint32_t pb_walk_segment(uint32_t va, uint32_t end_va, int in_call,
+             uint32_t target = (w & 3u) == 1u ? (w & 0xFFFFFFFCu)
+                                              : (w & 0x1FFFFFFCu);
+             (*jumps)++;
+-            if (!in_call)
+-                break;                        /* the ring: a jump ends it */
+-            va = 0x80000000u | (target & 0x0FFFFFFFu);
++            if (pb_bad_target(w, at, target, end_va & 0x0FFFFFFFu))
++                break;
++            pb_flow(at, w, target);
++            if (!in_call) {
++                *ring_jump = 0x80000000u | target;
++                break;
++            }
++            va = 0x80000000u | target;
+             end_va = va + 0x400000u;
++            if (end_va > 0x80000000u + PB_RAM_BYTES)
++                end_va = 0x80000000u + PB_RAM_BYTES;
+             continue;
+         }
+         if ((w & 0xFFFF0003u) == 0x00020000u) {  /* RETURN */
+-            if (in_call)
++            if (in_call) {
++                returned = 1;
+                 break;
++            }
+             continue;
+         }
+         if ((w & 3u) == 2u) {                    /* CALL */
+             if (!in_call) {
+-                uint32_t sub = 0x80000000u | ((w & 0xFFFFFFFCu) & 0x0FFFFFFFu);
++                uint32_t target = w & 0xFFFFFFFCu;
++                uint32_t sub, sub_end;
++                if (pb_bad_target(w, at, target, end_va & 0x0FFFFFFFu))
++                    break;
++                sub = 0x80000000u | target;
++                sub_end = sub + 0x400000u;
++                if (sub_end > 0x80000000u + PB_RAM_BYTES)
++                    sub_end = 0x80000000u + PB_RAM_BYTES;
+                 s_tot_calls++;
++                pb_flow(at, w, target);
++                if (getenv("RECOMP_PB_TRACE_CALLS") && s_tot_calls <= 16) {
++                    unsigned k;
++                    fprintf(stderr, "  [PB] CALL #%u at 0x%08X -> 0x%08X, "
++                                    "segment end 0x%08X\n",
++                            s_tot_calls, at, sub, end_va);
++                    for (k = 0; k < PB_HIST && k < s_hist_n; k++) {
++                        unsigned i = (s_hist_n - 1 - k) % PB_HIST;
++                        fprintf(stderr, "  [PB]   earlier header 0x%08X at 0x%08X\n",
++                                s_hist[i].w, s_hist[i].at);
++                    }
++                }
+                 s_in_call = 1;
+-                words += pb_walk_segment(sub, sub + 0x400000u, 1, jumps, unknown);
++                words += pb_walk_segment(sub, sub_end, 1, jumps, unknown, ring_jump);
+                 s_in_call = 0;
+             }
+             continue;
+         }
+         if ((w & 0x00030003u) == 0u) {
+-            uint32_t count  = (w >> 18) & 0x7FFu;
+-            uint32_t subch  = (w >> 13) & 7u;
+-            uint32_t method =  w & 0x1FFCu;
+-            int noninc = (w & 0xE0000000u) == 0x40000000u;
+-
+-            for (uint32_t i = 0; i < count && va < end_va; i++) {
+-                uint32_t m = noninc ? method : method + i * 4;
+-                note(subch, m);
+-                if (s_exec_enabled)
+-                    nv2a_pb_exec_method(subch, m,
+-                                        *(const uint32_t *)(mem + va));
+-                va += 4;
+-                words++;
++            PbSegmentPacket packet = {
++                (w >> 18) & 0x7FFu, 0, w & 0x1FFCu, (w >> 13) & 7u, 0,
++                (w & 0xE0000000u) == 0x40000000u
++            };
++            pb_segment_consume(mem, &va, end_va, &words, &packet);
++            if (packet.left) {
++                if (!in_call)
++                    s_segment_packet = packet;
++                else {
++                    static unsigned incomplete_calls;
++                    if (++incomplete_calls <= 8 || incomplete_calls % 100 == 0)
++                        fprintf(stderr, "  [PB] incomplete CALL packet #%u at 0x%08X, resync\n",
++                                incomplete_calls, va);
++                }
++                break;
+             }
+             continue;
+         }
+         (*unknown)++;
+     }
++    if (in_call && !returned && (va >= end_va || words >= 0x100000u)) {
++        static unsigned unterminated;
++        if (++unterminated <= 8 || unterminated % 100 == 0)
++            fprintf(stderr, "  [PB] CALL #%u at 0x%08X reached its walk limit "
++                            "without RETURN, resync\n", unterminated, va);
++    }
+     return words;
+ }
+ 
+-void nv2a_pb_scan_segment(uint32_t start_va, uint32_t end_va)
++uint32_t nv2a_pb_scan_segment(uint32_t start_va, uint32_t end_va)
+ {
+-    uint32_t words, jumps = 0, unknown = 0;
++    uint32_t words, jumps = 0, unknown = 0, ring_jump = 0;
+ 
+     if (!pb_walk_enabled() || end_va <= start_va)
+-        return;
++        return 0;
++    if (start_va < 0x80000000u || end_va > 0x80000000u + PB_RAM_BYTES ||
++            (start_va & 3u) || (end_va & 3u)) {
++        fprintf(stderr, "  [PB] invalid segment 0x%08X..0x%08X, resync\n",
++                start_va, end_va);
++        s_segment_packet.left = 0;
++        return 0;
++    }
+     if (end_va - start_va > 0x400000u)        /* a sane single-frame bound */
+         end_va = start_va + 0x400000u;
+ 
+@@ -537,10 +703,32 @@ void nv2a_pb_scan_segment(uint32_t start_va, uint32_t end_va)
+         extern void nv2a_pb_exec_walk_begin(void);
+         nv2a_pb_exec_walk_begin();      /* the flip hold's vblank */
+     }
+-    words = pb_walk_segment(start_va, end_va, 0, &jumps, &unknown);
++    words = pb_walk_segment(start_va, end_va, 0, &jumps, &unknown, &ring_jump);
+ 
+     s_tot_words += words;
+     s_tot_unknown += unknown;
+     s_tot_jumps += jumps;
+     s_tot_segments++;
++    return ring_jump;
++}
++
++void nv2a_pb_scan_wrapped(uint32_t start_va, uint32_t end_va,
++                          uint32_t put_va, uint32_t fallback_va)
++{
++    uint32_t next = nv2a_pb_scan_segment(start_va, end_va);
++    if (!next) {
++        static unsigned missing_jumps;
++        if (++missing_jumps <= 8 || missing_jumps % 100 == 0)
++            fprintf(stderr, "  [PB] ring wrap #%u has no observed JUMP; "
++                            "resync at 0x%08X\n", missing_jumps, fallback_va);
++        next = fallback_va;
++    }
++    if (next > put_va) {
++        fprintf(stderr, "  [PB] ring wrap target 0x%08X is beyond PUT 0x%08X, resync\n",
++                next, put_va);
++        s_segment_packet.left = 0;
++        return;
++    }
++    if (next < put_va)
++        nv2a_pb_scan_segment(next, put_va);
+ }
+diff --git a/src/kernel/xbox_memory_layout.c b/src/kernel/xbox_memory_layout.c
+index 1962022..9af4198 100644
+--- a/src/kernel/xbox_memory_layout.c
++++ b/src/kernel/xbox_memory_layout.c
+@@ -28,6 +28,10 @@
+ #include <unistd.h>   /* _exit */
+ #endif
+ 
++extern int nv2a_pb_staged_walk(void);
++extern void nv2a_pb_scan_staged(uint32_t);
++extern void nv2a_pb_scan_wrapped(uint32_t, uint32_t, uint32_t, uint32_t);
++
+ /* XBE header field offsets (per xboxdevwiki.net/Xbe) */
+ #define XBE_MAGIC_OFFSET        0x0000
+ #define XBE_BASE_ADDR_OFFSET    0x0104
+@@ -1378,6 +1382,8 @@ static void framebuffer_probe_tick(void)
+ /* The vblank's two status bits, which the vblank-ack thread owns. */
+ #define NV2A_ACK_PMC_INTR_0         0x000100u
+ #define NV2A_ACK_PMC_INTR_PCRTC     (1u << 24)
++#define NV2A_ACK_PMC_INTR_PGRAPH    (1u << 12)
++#define NV2A_ACK_PGRAPH_INTR        0x400100u
+ #define NV2A_ACK_PCRTC_INTR_0       0x600100u
+ #define NV2A_ACK_PCRTC_INTR_VBLANK  (1u << 0)
+ 
+@@ -1414,6 +1420,12 @@ static void nv2a_ack_busy_bits(int flip_held)
+             else if (NV2A_ACK[i].offset == NV2A_ACK_PCRTC_INTR_0)
+                 mask &= ~NV2A_ACK_PCRTC_INTR_VBLANK;
+         }
++        if (xbox_Nv2aGraphTrapPending()) {
++            if (NV2A_ACK[i].offset == NV2A_ACK_PMC_INTR_0)
++                mask &= ~NV2A_ACK_PMC_INTR_PGRAPH;
++            else if (NV2A_ACK[i].offset == NV2A_ACK_PGRAPH_INTR)
++                mask = 0;
++        }
+         /* Interlocked: the vblank-ack thread and the guest change other
+          * bits of the same word meanwhile. */
+         if (*r & mask)
+@@ -1526,7 +1538,7 @@ static DWORD WINAPI nv2a_ack_thread(LPVOID param)
+                      * guess. */
+                     extern void nv2a_pb_resync(uint32_t);
+                     extern int  nv2a_pb_dma_walk(void);
+-                    extern void nv2a_pb_scan_segment(uint32_t, uint32_t);
++                    extern uint32_t nv2a_pb_scan_segment(uint32_t, uint32_t);
+ 
+                     if (nv2a_pb_dma_walk()) {
+                         uint32_t get_now = *(volatile uint32_t *)
+@@ -1541,27 +1553,54 @@ static DWORD WINAPI nv2a_ack_thread(LPVOID param)
+                             nv2a_pb_resync(get_now);
+                         if (put != last_put)
+                             nv2a_pb_scan(put);
++                    } else if (nv2a_pb_staged_walk()) {
++                        uint32_t get_now = *(volatile uint32_t *)
++                                           ((char *)regs + NV2A_USER_DMA_GET);
++                        if (!last_put)
++                            nv2a_pb_resync(put);
++                        else if (get_written != 0xFFFFFFFFu && get_now != get_written)
++                            nv2a_pb_resync(get_now);
++                        if (last_put && put != last_put)
++                            nv2a_pb_scan_staged(put);
+                     } else {
+                         /* The segment scan, the default: the bytes between
+-                         * the previous PUT and this one. The pushbuffer is a
+-                         * ring, so PUT coming back below where it was is a
+-                         * wrap, not a rewind; the ring's bounds are learned
+-                         * from the lowest and highest PUT seen. */
++                         * PUTs. At a wrap, scan to the end of the containing
++                         * allocation and follow its actual JUMP. The largest
++                         * PUT observed can stop in the middle of a packet,
++                         * before the commands and JUMP written during wrap. */
+                         static uint32_t put_lo, put_hi;
++                        static int trace_get = -1;
++                        uint32_t get_now = *(volatile uint32_t *)
++                                           ((char *)regs + NV2A_USER_DMA_GET);
++                        if (trace_get < 0)
++                            trace_get = getenv("RECOMP_PB_TRACE_CALLS") != NULL;
++                        if (trace_get && get_written != 0xFFFFFFFFu &&
++                                get_now != get_written)
++                            fprintf(stderr, "  [PB] guest changed GET 0x%08X -> "
++                                            "0x%08X (last PUT 0x%08X, PUT 0x%08X)\n",
++                                    get_written, get_now, last_put, put);
+                         if (!put_lo || put < put_lo) put_lo = put;
+                         if (put > put_hi) put_hi = put;
+                         if (last_put && put > last_put) {
+                             nv2a_pb_scan_segment(XBOX_CONTIG_BASE | (last_put & 0x0FFFFFFFu),
+                                                  XBOX_CONTIG_BASE | (put      & 0x0FFFFFFFu));
+                         } else if (last_put && put < last_put) {
+-                            if (put_hi > last_put)
+-                                nv2a_pb_scan_segment(
+-                                    XBOX_CONTIG_BASE | (last_put & 0x0FFFFFFFu),
+-                                    XBOX_CONTIG_BASE | (put_hi   & 0x0FFFFFFFu));
+-                            if (put > put_lo)
+-                                nv2a_pb_scan_segment(
+-                                    XBOX_CONTIG_BASE | (put_lo & 0x0FFFFFFFu),
+-                                    XBOX_CONTIG_BASE | (put    & 0x0FFFFFFFu));
++                            uint32_t start = XBOX_CONTIG_BASE | (last_put & 0x0FFFFFFFu);
++                            uint32_t remaining = xbox_ContiguousBlockSize(start);
++                            uint32_t end = remaining ? start + remaining
++                                : XBOX_CONTIG_BASE | (put_hi & 0x0FFFFFFFu);
++                            nv2a_pb_scan_wrapped(start, end,
++                                XBOX_CONTIG_BASE | (put & 0x0FFFFFFFu),
++                                XBOX_CONTIG_BASE | (put_lo & 0x0FFFFFFFu));
++                        }
++                        if (trace_get) {
++                            uint32_t get_after = *(volatile uint32_t *)
++                                                 ((char *)regs + NV2A_USER_DMA_GET);
++                            if (get_after != get_now)
++                                fprintf(stderr, "  [PB] guest changed GET during scan "
++                                                "0x%08X -> 0x%08X (last PUT 0x%08X, "
++                                                "PUT 0x%08X)\n",
++                                        get_now, get_after, last_put, put);
+                         }
+                     }
+                     /* Periodic, because what the title submits at init is not

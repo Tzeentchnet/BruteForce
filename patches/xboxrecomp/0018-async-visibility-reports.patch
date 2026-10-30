@@ -1,0 +1,65 @@
+diff --git a/src/kernel/nv2a_backend_ext.h b/src/kernel/nv2a_backend_ext.h
+index 280c1fb..42d4981 100644
+--- a/src/kernel/nv2a_backend_ext.h
++++ b/src/kernel/nv2a_backend_ext.h
+@@ -138,6 +138,16 @@ typedef struct {
+      * a title that culls by visibility draws nothing behind its tests. */
+     void (*zpass)(int op);
+     uint32_t (*zpass_count)(void);
++    /* Optional, asynchronous reports. At GET_REPORT the executor offers the
++     * report to zpass_report(report_va, stamp) first; a back end returning 1
++     * writes the 16-byte report itself (stamp, count, status 0) once the
++     * count is known, as the GPU writes a report after the draws before it.
++     * Until then the slot keeps what the title left there, and D3D's
++     * GetVisibilityTestResult keeps reporting the test incomplete.
++     * poll() runs on every pass of the NV2A thread, also while it is idle,
++     * so pending reports complete while the title waits for them. */
++    int (*zpass_report)(uint32_t report_va, uint64_t stamp);
++    void (*poll)(void);
+ } Nv2aBackendExt;
+ 
+ enum { NV2A_ZPASS_END = 0, NV2A_ZPASS_BEGIN = 1, NV2A_ZPASS_CLEAR = 2 };
+diff --git a/src/kernel/nv2a_pb_exec.c b/src/kernel/nv2a_pb_exec.c
+index 0a0fefc..fc7bb98 100644
+--- a/src/kernel/nv2a_pb_exec.c
++++ b/src/kernel/nv2a_pb_exec.c
+@@ -858,6 +858,13 @@ void nv2a_backend_register(const Nv2aBackend *backend)
+     s_backend = backend;
+ }
+ 
++/* Once per pass of the NV2A thread, busy or idle (xbox_memory_layout.c). */
++void nv2a_pb_exec_poll(void)
++{
++    if (s_xbackend && s_xbackend->poll)
++        s_xbackend->poll();
++}
++
+ void nv2a_backend_ext_register(const Nv2aBackendExt *backend)
+ {
+     s_xbackend = backend;
+@@ -4871,6 +4878,9 @@ void nv2a_pb_exec_method(uint32_t subch, uint32_t method, uint32_t param)
+         uint64_t stamp = (uint64_t)s_gpu.reports++ * 1000u;
+         /* A back end draws the pixels, so it counts them. One that cannot
+          * leaves the count at 0, which a culling title reads as hidden. */
++        if (backend_draws() && s_xbackend && s_xbackend->zpass_report
++            && s_xbackend->zpass_report(at, stamp))
++            break;                                /* written when known */
+         if (backend_draws()) {
+             if (s_xbackend && s_xbackend->zpass_count) {
+                 s_gpu.zpass_count = s_xbackend->zpass_count();
+diff --git a/src/kernel/xbox_memory_layout.c b/src/kernel/xbox_memory_layout.c
+index 9af4198..7bb983f 100644
+--- a/src/kernel/xbox_memory_layout.c
++++ b/src/kernel/xbox_memory_layout.c
+@@ -1464,7 +1464,11 @@ static DWORD WINAPI nv2a_ack_thread(LPVOID param)
+          * its segment and the two are the same; a segment carrying two
+          * flips paces only the last. */
+         extern int nv2a_pb_exec_flip_poll(void);
++        extern void nv2a_pb_exec_poll(void);
+         int flip_held = nv2a_pb_exec_flip_poll();
++        /* A back end's asynchronous work (nv2a_backend_ext.h, poll): pending
++         * visibility reports complete here even while nothing is walked. */
++        nv2a_pb_exec_poll();
+         nv2a_ack_busy_bits(flip_held);
+         for (size_t i = 0; i < sizeof(NV2A_IDLE) / sizeof(NV2A_IDLE[0]); i++) {
+             volatile uint32_t *r =

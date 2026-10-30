@@ -1,0 +1,208 @@
+diff --git a/src/kernel/nv2a_pb_exec.c b/src/kernel/nv2a_pb_exec.c
+index f73152c..87175a2 100644
+--- a/src/kernel/nv2a_pb_exec.c
++++ b/src/kernel/nv2a_pb_exec.c
+@@ -40,6 +40,7 @@
+ #include "nv2a_vsh_interp.h"
+ #include "nv2a_combiner.h"
+ #include "nv2a_backend.h"
++#include "nv2a_window_clip.h"
+ #if defined(_WIN32)
+ #include <windows.h>
+ #define NV_TLS __declspec(thread)
+@@ -180,6 +181,9 @@ static int surface_write_refused(uint32_t base, uint32_t bytes, const char *what
+ #define NV097_SET_SURFACE_FORMAT          0x0208
+ #define NV097_SET_SURFACE_PITCH           0x020C
+ #define NV097_SET_SURFACE_COLOR_OFFSET    0x0210
++#define NV097_SET_WINDOW_CLIP_TYPE        0x02B4
++#define NV097_SET_WINDOW_CLIP_HORIZONTAL 0x02C0
++#define NV097_SET_WINDOW_CLIP_VERTICAL   0x02E0
+ #define NV097_SET_COLOR_CLEAR_VALUE       0x1D90
+ #define NV097_CLEAR_SURFACE               0x1D94
+ #define NV097_SET_VERTEX_DATA_ARRAY_OFFSET 0x1720   /* +i*4, 16 attributes */
+@@ -310,6 +314,8 @@ static struct {
+     uint32_t pixel_max;   /* brightest value any pixel write carried */
+     uint32_t clip_x, clip_w, clip_y, clip_h;       /* real (anti-aliased) pixels */
+     uint32_t clip_raw_h, clip_raw_v;    /* SET_SURFACE_CLIP_* as sent: logical */
++    Nv2aWindowClip window_clip;
++    int window_clip_enabled;
+     float    aa_sx, aa_sy;              /* anti-aliasing scale of the surface */
+     uint32_t clear_color;
+     uint32_t clears, unhandled_total;
+@@ -794,8 +800,18 @@ static void surface_apply_clip(void)
+ 
+ static const Nv2aBackend *s_backend;
+ 
++static void check_window_clip_backend(const Nv2aBackend *backend)
++{
++    if (s_gpu.window_clip_enabled && backend && backend->draw) {
++        fprintf(stderr, "[GPU] RECOMP_WINDOW_CLIP requires the software rasterizer;"
++                        " registered render back ends do not receive window clip state\n");
++        abort();
++    }
++}
++
+ void nv2a_backend_register(const Nv2aBackend *backend)
+ {
++    check_window_clip_backend(backend);
+     s_backend = backend;
+ }
+ 
+@@ -804,6 +820,13 @@ static int backend_draws(void)
+     return s_backend && s_backend->draw;
+ }
+ 
++static inline int window_clip_allows(int x, int y)
++{
++    return !s_gpu.window_clip_enabled ||
++           nv2a_window_clip_allows(&s_gpu.window_clip, (uint32_t)x, (uint32_t)y,
++                                   s_gpu.aa_sx > 1.5f, s_gpu.aa_sy > 1.5f);
++}
++
+ static void current_surface(Nv2aSurface *out)
+ {
+     out->color_va        = dma_resolve(s_gpu.color_offset);
+@@ -1618,6 +1641,8 @@ static void raster_triangle(const float a[2], const float b[2],
+             if (!((w0 >= 0 && w1 >= 0 && w2 >= 0)
+                || (w0 <= 0 && w1 <= 0 && w2 <= 0)))
+                 continue;
++            if (!window_clip_allows(x, y))
++                continue;
+             if (textured) {
+                 /* Barycentric, straight from the edge functions already
+                  * computed: w1 is the area opposite a, w2 opposite b, w0
+@@ -2422,6 +2447,8 @@ static void xf_rows(const XfTri *T, int y0, int step, XfCount *cnt)
+             if (!((w0 >= 0 && w1 >= 0 && w2 >= 0)
+                || (w0 <= 0 && w1 <= 0 && w2 <= 0)))
+                 continue;
++            if (!window_clip_allows(x, y))
++                continue;
+             /* w1 is opposite a, w2 opposite b, w0 opposite c. */
+             l0 = w1 * T->inv_area; l1 = w2 * T->inv_area; l2 = w0 * T->inv_area;
+             z = l0 * a[2] + l1 * b[2] + l2 * c[2];
+@@ -3779,7 +3806,19 @@ void nv2a_pb_exec_method(uint32_t subch, uint32_t method, uint32_t param)
+         }
+     }
+     if (!inited) {
++        const char *window_clip = getenv("RECOMP_WINDOW_CLIP");
++
++        if (window_clip && *window_clip &&
++            strcmp(window_clip, "0") != 0 && strcmp(window_clip, "1") != 0) {
++            fprintf(stderr, "[GPU] RECOMP_WINDOW_CLIP must be 0 or 1\n");
++            abort();
++        }
+         inited = 1;
++        s_gpu.window_clip_enabled = window_clip && strcmp(window_clip, "1") == 0;
++        check_window_clip_backend(s_backend);
++        if (s_gpu.window_clip_enabled)
++            fprintf(stderr, "[GPU] experimental window clipping enabled"
++                            " (software rasterizer only)\n");
+         s_gpu.aa_sx = s_gpu.aa_sy = 1.0f;
+         /* Stencil state as the hardware resets it: GL_ALWAYS, masks 0xFF,
+          * GL_KEEP, until the title says otherwise. */
+@@ -3895,6 +3934,12 @@ void nv2a_pb_exec_method(uint32_t subch, uint32_t method, uint32_t param)
+         s_gpu.format = param;
+         surface_apply_clip();
+         break;
++    case NV097_SET_WINDOW_CLIP_TYPE:
++        if (s_gpu.window_clip_enabled)
++            s_gpu.window_clip.exclusive = param & 1u;
++        else
++            note_unhandled(method, param);
++        break;
+     case 0x1D98:                       /* SET_CLEAR_RECT_HORIZONTAL */
+         s_gpu.clear_rect_h = param;
+         s_gpu.clear_rect_set |= 1;
+@@ -4216,6 +4261,21 @@ void nv2a_pb_exec_method(uint32_t subch, uint32_t method, uint32_t param)
+     case 0x1D8C: s_gpu.zstencil_clear = param; break; /* ZSTENCIL_CLEAR_VALUE */
+ 
+     default:
++        if ((method >= NV097_SET_WINDOW_CLIP_HORIZONTAL &&
++             method < NV097_SET_WINDOW_CLIP_HORIZONTAL + NV2A_WINDOW_CLIP_COUNT * 4) ||
++            (method >= NV097_SET_WINDOW_CLIP_VERTICAL &&
++             method < NV097_SET_WINDOW_CLIP_VERTICAL + NV2A_WINDOW_CLIP_COUNT * 4)) {
++            if (s_gpu.window_clip_enabled) {
++                int vertical = method >= NV097_SET_WINDOW_CLIP_VERTICAL;
++                uint32_t first = vertical ? NV097_SET_WINDOW_CLIP_VERTICAL
++                                          : NV097_SET_WINDOW_CLIP_HORIZONTAL;
++                nv2a_window_clip_write(&s_gpu.window_clip, vertical,
++                                       (method - first) / 4, param);
++            } else {
++                note_unhandled(method, param);
++            }
++            break;
++        }
+         if (method >= 0x0260 && method < 0x0280) {         /* ALPHA_ICW(i) */
+             s_gpu.rc.alpha_icw[(method - 0x0260) / 4] = param;
+             break;
+diff --git a/src/kernel/nv2a_window_clip.h b/src/kernel/nv2a_window_clip.h
+new file mode 100644
+index 0000000..8537b4c
+--- /dev/null
++++ b/src/kernel/nv2a_window_clip.h
+@@ -0,0 +1,65 @@
++#ifndef NV2A_WINDOW_CLIP_H
++#define NV2A_WINDOW_CLIP_H
++
++#include <stdint.h>
++
++#define NV2A_WINDOW_CLIP_COUNT 8
++
++typedef struct {
++    uint32_t horizontal[NV2A_WINDOW_CLIP_COUNT];
++    uint32_t vertical[NV2A_WINDOW_CLIP_COUNT];
++    unsigned int axes, exclusive, uniform;
++} Nv2aWindowClip;
++
++static inline void nv2a_window_clip_write(Nv2aWindowClip *clip,
++                                           int vertical, unsigned int slot,
++                                           uint32_t value)
++{
++    uint32_t *axis = vertical ? clip->vertical : clip->horizontal;
++    unsigned int i;
++
++    for (i = slot; i < NV2A_WINDOW_CLIP_COUNT; ++i)
++        axis[i] = value;
++    clip->axes |= vertical ? 2u : 1u;
++    clip->uniform = 1;
++    for (i = 1; i < NV2A_WINDOW_CLIP_COUNT; ++i) {
++        if (clip->horizontal[i] != clip->horizontal[0] ||
++            clip->vertical[i] != clip->vertical[0]) {
++            clip->uniform = 0;
++            break;
++        }
++    }
++}
++
++static inline int nv2a_window_clip_contains(uint32_t horizontal,
++                                             uint32_t vertical,
++                                             uint32_t x, uint32_t y)
++{
++    return x >= (horizontal & 0xFFFu) && x <= ((horizontal >> 16) & 0xFFFu)
++        && y >= (vertical & 0xFFFu) && y <= ((vertical >> 16) & 0xFFFu);
++}
++
++static inline int nv2a_window_clip_allows(const Nv2aWindowClip *clip,
++                                          uint32_t x, uint32_t y,
++                                          unsigned int x_shift,
++                                          unsigned int y_shift)
++{
++    unsigned int i, count;
++    int contained = 0;
++
++    if (clip->axes != 3)
++        return 1;
++    x >>= x_shift;
++    y >>= y_shift;
++    count = clip->uniform ? 1u : NV2A_WINDOW_CLIP_COUNT;
++    for (i = 0; i < count; ++i) {
++        if (nv2a_window_clip_contains(clip->horizontal[i], clip->vertical[i],
++                                      x, y)) {
++            contained = 1;
++            break;
++        }
++    }
++    return clip->exclusive ? !contained : contained;
++}
++
++#endif

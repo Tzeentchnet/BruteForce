@@ -1,0 +1,3 @@
+#ifndef TEST_RECOMP_FUNCS_H
+#define TEST_RECOMP_FUNCS_H
+#endif

@@ -1,0 +1,33 @@
+diff --git a/src/kernel/nv2a_combiner.c b/src/kernel/nv2a_combiner.c
+index 0113446..a721106 100644
+--- a/src/kernel/nv2a_combiner.c
++++ b/src/kernel/nv2a_combiner.c
+@@ -11,6 +11,11 @@
+ 
+ #include <string.h>
+ 
++#if defined(__SSE2__) || defined(_M_X64) || (defined(_M_IX86_FP) && _M_IX86_FP >= 2)
++#include <emmintrin.h>
++#define NV_RC_SSE2 1
++#endif
++
+ /* The rasteriser evaluates pixels on several threads. */
+ #if defined(_MSC_VER)
+ #define NV_RC_TLS __declspec(thread)
+@@ -23,10 +28,16 @@ enum { R_ZERO = 0, R_C0 = 1, R_C1 = 2, R_FOG = 3, R_V0 = 4, R_V1 = 5,
+ 
+ void nv2a_rc_unpack(uint32_t c, float o[4])
+ {
++#if defined(NV_RC_SSE2)
++    __m128i rgba = _mm_set_epi32((int)(c >> 24), (int)(c & 0xFF),
++                                (int)((c >> 8) & 0xFF), (int)((c >> 16) & 0xFF));
++    _mm_storeu_ps(o, _mm_div_ps(_mm_cvtepi32_ps(rgba), _mm_set1_ps(255.0f)));
++#else
+     o[0] = (float)((c >> 16) & 0xFF) / 255.0f;
+     o[1] = (float)((c >>  8) & 0xFF) / 255.0f;
+     o[2] = (float)( c        & 0xFF) / 255.0f;
+     o[3] = (float)( c >> 24        ) / 255.0f;
++#endif
+ }
+ 
+ /* D3DCOLOR to floats, memoised: a program's constants are the same for

@@ -1,0 +1,46 @@
+diff --git a/src/kernel/kernel_bridge.c b/src/kernel/kernel_bridge.c
+index 0f5d7e4..34f3242 100644
+--- a/src/kernel/kernel_bridge.c
++++ b/src/kernel/kernel_bridge.c
+@@ -4745,30 +4745,26 @@ static void bridge_NtReadFile(void)
+     g_eax = (uint32_t)xbox_NtReadFile(handle, NULL, NULL, NULL, &ios,
+                 XBOX_TO_NATIVE(buffer_va), length, poff);
+ 
+-    /* What a read actually delivered. A decoder that rejects its input cannot
+-     * say whether the bytes were wrong or the read was, and the two look
+-     * identical from inside the title -- the first bytes settle it. */
+-    {
++    /* Successful reads can be traced with their first bytes when diagnosing
++     * a decoder. Failures are always reported without dumping guest data. */
++    if (getenv("RECOMP_READ_TRACE") != NULL || (int32_t)ios.Status < 0) {
++        int trace_bytes = getenv("RECOMP_READ_TRACE") != NULL;
+         const uint8_t *p = (const uint8_t *)XBOX_TO_NATIVE(buffer_va);
+         uint32_t got = (uint32_t)ios.Information;
+-        /* The offset matters as much as the length. A title streaming a pack
+-         * file reads sector-aligned chunks, so the first bytes belong to
+-         * whatever precedes the file it actually wants, and a read that stops
+-         * early looks identical to one that never started -- until you can
+-         * see where each one landed. */
+         if (poff)
+-            fprintf(stderr, "  [READ] from=0x%08X ev=%08X apc=%08X @%lld want=%u got=%u st=0x%08X  %02X %02X %02X %02X\n",
++            fprintf(stderr, "  [READ] from=0x%08X ev=%08X apc=%08X @%lld want=%u got=%u st=0x%08X",
+                     g_xbox_kernel_caller, STACK_ARG(1), STACK_ARG(2),
+                     (long long)off.QuadPart, length, got,
+-                    (uint32_t)ios.Status,
+-                    got > 0 ? p[0] : 0, got > 1 ? p[1] : 0,
+-                    got > 2 ? p[2] : 0, got > 3 ? p[3] : 0);
++                    (uint32_t)ios.Status);
+         else
+-            fprintf(stderr, "  [READ] from=0x%08X @seq want=%u got=%u st=0x%08X  %02X %02X %02X %02X\n",
++            fprintf(stderr, "  [READ] from=0x%08X @seq want=%u got=%u st=0x%08X",
+                     g_xbox_kernel_caller,
+-                    length, got, (uint32_t)ios.Status,
++                    length, got, (uint32_t)ios.Status);
++        if (trace_bytes)
++            fprintf(stderr, "  %02X %02X %02X %02X",
+                     got > 0 ? p[0] : 0, got > 1 ? p[1] : 0,
+                     got > 2 ? p[2] : 0, got > 3 ? p[3] : 0);
++        fputc('\n', stderr);
+         fflush(stderr);
+     }
+     bridge_write_iostatus(iostatus, ios.Status, (uint32_t)ios.Information);

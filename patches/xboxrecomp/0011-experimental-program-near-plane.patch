@@ -1,0 +1,116 @@
+diff --git a/src/kernel/nv2a_pb_exec.c b/src/kernel/nv2a_pb_exec.c
+index 6e20743..a4d72ba 100644
+--- a/src/kernel/nv2a_pb_exec.c
++++ b/src/kernel/nv2a_pb_exec.c
+@@ -323,6 +323,7 @@ static struct {
+         uint32_t enabled, face, front, programmed;
+     } cull;
+     int software_cull_enabled;
++    int program_near_zero_enabled;
+     float    aa_sx, aa_sy;              /* anti-aliasing scale of the surface */
+     uint32_t clear_color;
+     uint32_t clears, unhandled_total;
+@@ -819,6 +820,11 @@ static void check_software_backend(const Nv2aBackend *backend)
+                         " registered render back ends are unsupported\n");
+         abort();
+     }
++    if (s_gpu.program_near_zero_enabled && backend && backend->draw) {
++        fprintf(stderr, "[GPU] RECOMP_PROGRAM_NEAR_ZERO requires the software rasterizer;"
++                        " registered render back ends are unsupported\n");
++        abort();
++    }
+ }
+ 
+ void nv2a_backend_register(const Nv2aBackend *backend)
+@@ -2851,17 +2857,15 @@ static void raster_xf_triangle(const Nv2aVshOutput *va, const Nv2aVshOutput *vb,
+  * coordinates -- is linear in clip space and is interpolated directly.
+  *
+  * The polygon is clipped against w = NV_CLIP_W and then the near plane
+- * z = 0 (Sutherland-Hodgman), divided back by w, and fanned. The near plane
+- * is screen z = the viewport's z offset (s_xf_o[2], 0 for D3D). Clipping at
+- * w alone let geometry between the eye and the near plane through at huge
+- * screen coordinates: torn streaks at the frame's edges. RECOMP_CLIP_NEAR_Z=0
+- * clips at w only.
++ * z = 0 (Sutherland-Hodgman), divided back by w, and fanned. The legacy near
++ * plane is screen z = c[59].z. RECOMP_PROGRAM_NEAR_ZERO=1 instead uses screen
++ * z = 0 for programmable vertices, while leaving fixed-function behavior
++ * unchanged. RECOMP_CLIP_NEAR_Z=0 clips at w only.
+  * ponytail: near planes only; x/y/far fall to the rasteriser's bounds
+  * check, which is correct, just slower for huge off-screen triangles. */
+ #define NV_CLIP_W 1e-3f
+ 
+-/* The z offset of the current batch's screen-space transform (the near
+- * plane, see above), scaled like the vertices. Set by xf_set_viewport(). */
++/* The selected near-plane offset, scaled like the vertices. */
+ static float s_xf_o[3];
+ 
+ static void xf_lerp(const Nv2aVshOutput *a, const Nv2aVshOutput *b, float t,
+@@ -3009,7 +3013,7 @@ static void xf_set_viewport(void)
+ 
+     s_xf_o[0] = of[0] * s_gpu.aa_sx;
+     s_xf_o[1] = of[1] * s_gpu.aa_sy;
+-    s_xf_o[2] = of[2];
++    s_xf_o[2] = s_gpu.program_near_zero_enabled && batch_uses_program() ? 0.0f : of[2];
+ }
+ 
+ static void raster_batch_program(void)
+@@ -3339,11 +3343,17 @@ static void draw_primitive(void)
+                     s_gpu.depth_test, s_gpu.depth_func, s_gpu.depth_mask,
+                     s_gpu.tris_drawn - t0,
+                     (unsigned long long)(s_gpu.pixels - p0));
+-            if ((s_gpu.xf_mode & 3) == 2 && s_xf)
++            if ((s_gpu.xf_mode & 3) == 2 && s_xf) {
+                 fprintf(stderr, "[FTRACE]     v0 %g %g %g %g  v1 %g %g  v2 %g %g%c",
+                         s_xf[0].pos[0], s_xf[0].pos[1], s_xf[0].pos[2],
+                         s_xf[0].pos[3], s_xf[1].pos[0], s_xf[1].pos[1],
+                         s_xf[2].pos[0], s_xf[2].pos[1], 10);
++                fprintf(stderr, "[FTRACE]     near c59_z %g selected_z %g"
++                                " v1_z,w %g %g v2_z,w %g %g\n",
++                        nv2a_vsh_constant(59)[2], s_xf_o[2],
++                        s_xf[1].pos[2], s_xf[1].pos[3],
++                        s_xf[2].pos[2], s_xf[2].pos[3]);
++            }
+             if (s_gpu.rc_seen) {
+                 int st;
+                 fprintf(stderr, "[FTRACE]     rc stages %u ctl %08X prog %05X fin %08X %08X",
+@@ -3851,6 +3861,8 @@ void nv2a_pb_exec_method(uint32_t subch, uint32_t method, uint32_t param)
+     if (!inited) {
+         const char *window_clip = getenv("RECOMP_WINDOW_CLIP");
+         const char *software_cull = getenv("RECOMP_CULL_FACE");
++        const char *program_near_zero = getenv("RECOMP_PROGRAM_NEAR_ZERO");
++        const char *near_z = getenv("RECOMP_CLIP_NEAR_Z");
+ 
+         if (window_clip && *window_clip &&
+             strcmp(window_clip, "0") != 0 && strcmp(window_clip, "1") != 0) {
+@@ -3862,9 +3874,21 @@ void nv2a_pb_exec_method(uint32_t subch, uint32_t method, uint32_t param)
+             fprintf(stderr, "[GPU] RECOMP_CULL_FACE must be 0 or 1\n");
+             abort();
+         }
++        if (program_near_zero && *program_near_zero &&
++            strcmp(program_near_zero, "0") != 0 && strcmp(program_near_zero, "1") != 0) {
++            fprintf(stderr, "[GPU] RECOMP_PROGRAM_NEAR_ZERO must be 0 or 1\n");
++            abort();
++        }
++        if (program_near_zero && strcmp(program_near_zero, "1") == 0 &&
++            near_z && near_z[0] == '0') {
++            fprintf(stderr, "[GPU] RECOMP_PROGRAM_NEAR_ZERO requires RECOMP_CLIP_NEAR_Z"
++                            " to remain enabled\n");
++            abort();
++        }
+         inited = 1;
+         s_gpu.window_clip_enabled = window_clip && strcmp(window_clip, "1") == 0;
+         s_gpu.software_cull_enabled = software_cull && strcmp(software_cull, "1") == 0;
++        s_gpu.program_near_zero_enabled = program_near_zero && strcmp(program_near_zero, "1") == 0;
+         check_software_backend(s_backend);
+         if (s_gpu.window_clip_enabled)
+             fprintf(stderr, "[GPU] experimental window clipping enabled"
+@@ -3872,6 +3896,9 @@ void nv2a_pb_exec_method(uint32_t subch, uint32_t method, uint32_t param)
+         if (s_gpu.software_cull_enabled)
+             fprintf(stderr, "[GPU] experimental face culling enabled"
+                             " (software rasterizer only)\n");
++        if (s_gpu.program_near_zero_enabled)
++            fprintf(stderr, "[GPU] experimental programmable screen-zero near plane enabled"
++                            " (software rasterizer only)\n");
+         s_gpu.aa_sx = s_gpu.aa_sy = 1.0f;
+         /* Stencil state as the hardware resets it: GL_ALWAYS, masks 0xFF,
+          * GL_KEEP, until the title says otherwise. */

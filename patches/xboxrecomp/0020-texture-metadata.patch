@@ -1,0 +1,47 @@
+diff --git a/src/kernel/nv2a_backend.h b/src/kernel/nv2a_backend.h
+index 327f01d..8be176f 100644
+--- a/src/kernel/nv2a_backend.h
++++ b/src/kernel/nv2a_backend.h
+@@ -51,6 +51,7 @@ typedef struct {
+      * a linear texture) and the raw SET_TEXTURE_FILTER word (MIN in bits
+      * 16-23). A back end that ignores them samples level 0. */
+     uint32_t levels, filter;
++    uint32_t palette;           /* guest address of the P8 palette, or 0 */
+ } Nv2aTexture;
+ 
+ typedef struct {
+diff --git a/src/kernel/nv2a_pb_exec.c b/src/kernel/nv2a_pb_exec.c
+index 76cf7f7..760a29f 100644
+--- a/src/kernel/nv2a_pb_exec.c
++++ b/src/kernel/nv2a_pb_exec.c
+@@ -966,7 +966,7 @@ int nv2a_backend_decode_texture(const Nv2aTexture *tex, uint32_t *argb_out)
+     s_gpu.texs[0].color  = tex->color;
+     s_gpu.texs[0].addr_u = 3;
+     s_gpu.texs[0].addr_v = 3;
+-    s_gpu.texs[0].palette = 0;          /* ponytail: no palettised formats */
++    s_gpu.texs[0].palette = tex->palette;
+     s_gpu.texs[0].levels = 1;
+     s_gpu.texs[0].filter = 0;
+     s_gpu.texs[0].cube   = 0;
+@@ -2163,8 +2163,9 @@ static void backend_flush(int textured)
+         tex.color  = s_gpu.texs[0].color;
+         tex.addr_u = s_gpu.texs[0].addr_u;
+         tex.addr_v = s_gpu.texs[0].addr_v;
+-        tex.levels = s_gpu.texs[0].pitch ? 1 : s_gpu.texs[0].levels;
++        tex.levels = tex_size_from_format(tex.color) ? s_gpu.texs[0].levels : 1;
+         tex.filter = s_gpu.texs[0].filter;
++        tex.palette = s_gpu.texs[0].palette;
+         batch.texture = &tex;
+     }
+     s_backend->draw(&surf, &batch);
+@@ -2211,8 +2212,9 @@ static void copy_texture(const Texture *t, Nv2aTexture *o)
+     o->color  = t->color;
+     o->addr_u = t->addr_u;
+     o->addr_v = t->addr_v;
+-    o->levels = t->pitch ? 1 : t->levels;
++    o->levels = tex_size_from_format(t->color) ? t->levels : 1;
+     o->filter = t->filter;
++    o->palette = t->palette;
+ }
+ 
+ /* The batch state an extended back end needs besides the vertices. */

@@ -1,0 +1,515 @@
+diff --git a/src/kernel/nv2a_backend_ext.h b/src/kernel/nv2a_backend_ext.h
+new file mode 100644
+index 0000000..0e1d63d
+--- /dev/null
++++ b/src/kernel/nv2a_backend_ext.h
+@@ -0,0 +1,183 @@
++/*
++ * Extended render back-end interface: the full pixel pipeline.
++ *
++ * Adapted from Blood Wake's bw_backend_ext.h (bloodwake-recomp at
++ * e631edddfe56d22344e9f696923aeb6d78a9e7ba, MIT licence).
++ *
++ * The base interface (nv2a_backend.h) hands a back end texture stage 0 and
++ * the diffuse colour, so a hardware back end cannot reproduce the register
++ * combiners the CPU rasteriser evaluates (nv2a_combiner.c). For transformed
++ * batches -- vertex programs and the fixed-function pipeline -- this hands
++ * over everything the CPU path's per-pixel loop reads instead:
++ *   - per vertex: position (surface pixels, 1/w), both colours, the fog
++ *     factor after the fog unit, and all four texture coordinate sets;
++ *   - per batch: all four texture stages, the stage programs, the combiner
++ *     registers, the fog colour, the clip-plane mode and the near plane.
++ * Screen-space (pre-transformed) batches still use the base draw().
++ *
++ * Optionally (draw_vsh), vertex-program batches go over untransformed: the
++ * program, the constants and the raw vertex streams, so the back end runs
++ * the program on the GPU (nv2a_vsh_interp.c semantics). It returns 0 to have
++ * the executor transform the batch on the CPU instead.
++ *
++ * Everything is called on the NV2A thread, one call at a time, like the
++ * base interface. Registering an extended back end requires a base back end
++ * (nv2a_backend_register) for clears, screen-space draws and flips.
++ */
++#ifndef NV2A_BACKEND_EXT_H
++#define NV2A_BACKEND_EXT_H
++
++#include <stdint.h>
++#include "nv2a_backend.h"
++#include "nv2a_combiner.h"
++
++typedef struct {
++    float x, y, z, rhw;         /* surface pixels, z as produced, 1/w */
++    float d0[4], d1[4];         /* diffuse, specular: r, g, b, a in [0,1] */
++    float fog;                  /* fog factor (1 = no fog) */
++    float pad[3];
++    float tc[4][4];             /* texture coordinates, stages 0-3 (s, t, r, q) */
++} Nv2aXVertex;                  /* 32 floats */
++
++typedef struct {
++    const Nv2aXVertex *vertices;    /* triangle list */
++    uint32_t count;
++    const Nv2aRenderState *state;
++    const Nv2aCombiner *rc;         /* NULL: the title never programmed the
++                                       combiners; stage 0 times diffuse */
++    Nv2aTexture tex[4];             /* valid only where tex_valid[i] */
++    uint8_t tex_valid[4];
++    uint8_t tex_normalized[4];      /* coordinates are 0..1 (swizzled, DXT); else texels */
++    uint8_t tex_cube[4];
++    uint8_t pad;
++    float fogc[4];                  /* fog colour r, g, b (a unused) */
++    uint32_t clip_plane_mode;       /* SET_SHADER_CLIP_PLANE_MODE */
++    uint32_t alpha_func, alpha_ref; /* NV2A values; also in state */
++    float near_z;                   /* the screen-space near plane the CPU path clips at */
++    int near_clip;                  /* 0: no near-plane clip (RECOMP_CLIP_NEAR_Z=0) */
++} Nv2aXBatch;
++
++/* Vertex programs on the GPU (draw_vsh). Each vertex stream's span over the
++ * batch's index range goes over as the title's own bytes; the back end's
++ * input layout and shader prologue convert each format exactly as fetch_attr
++ * does. Inputs fetch_attr reads differently arrive gathered as floats. */
++#define NV2A_XVS_MAX_STREAMS 16
++enum {                              /* Nv2aXVsInput.conv >> 4; the low nibble is the size */
++    NV2A_XVS_GATHERED = 0,          /* `inputs` (no streams) */
++    NV2A_XVS_FLOAT = 1,             /* type 2, 1-4 floats */
++    NV2A_XVS_COLOR = 2,             /* type 0, D3DCOLOR: bytes B,G,R,A -> r,g,b,a / 255 */
++    NV2A_XVS_UBYTE = 3,             /* type 4, 1-4 bytes / 255 */
++    NV2A_XVS_SHORT = 4,             /* type 5, 1-4 shorts as they are */
++    NV2A_XVS_CMP = 5,               /* type 6, packed 11:11:10 normal */
++    NV2A_XVS_CONST = 6              /* no array: the current value (4 floats, stride 0) */
++};
++typedef struct {
++    const void *data;               /* the span: vertex `first` of the stream's lowest attribute */
++    uint32_t bytes;
++    uint32_t stride;                /* 0: one value for every vertex */
++} Nv2aXVsStream;
++typedef struct {
++    uint8_t stream;                 /* index into streams */
++    uint8_t conv;                   /* NV2A_XVS_* << 4 | components */
++    uint16_t offset;                /* the attribute's byte offset in a vertex of its stream */
++} Nv2aXVsInput;
++
++typedef struct {
++    Nv2aXBatch xb;                  /* everything except vertices and count */
++    const uint32_t (*program)[4];   /* from the start slot ... */
++    uint32_t ninstr;                /* ... to the FINAL instruction, inclusive */
++    const float (*consts)[4];       /* c[0..191] */
++    uint32_t consts_gen;            /* bumped by every constant write; equal means unchanged */
++    const float *inputs;            /* nverts x ninputs float4s; NULL with streams */
++    uint32_t input_mask;            /* bit i: v<i> is read; ascending order */
++    uint32_t ninputs, nverts;
++    const uint32_t *indices;        /* triangle list into the vertices */
++    uint32_t nindices;
++    float aa[2];                    /* surface pixels per logical pixel */
++    uint32_t fog_enable, fog_mode;
++    float fog_param[2];
++    uint32_t nstreams;              /* > 0: vertices are the streams' spans */
++    Nv2aXVsStream streams[NV2A_XVS_MAX_STREAMS];
++    Nv2aXVsInput in[16];
++} Nv2aXVsBatch;
++
++/* What the back end's vertex shader produced for one vertex, in the
++ * executor's terms (pos as transform_vertex leaves it), for verification. */
++typedef struct {
++    float pos[4];
++    float d0[4], d1[4];
++    float fog, clip[2], pad;        /* fog factor; clip distances (w, near plane) */
++    float tc[4][4];
++} Nv2aXVsOut;                       /* 32 floats */
++
++typedef struct {
++    void (*draw)(const Nv2aSurface *s, const Nv2aXBatch *b);
++    /* Optional. Returns 1 if it drew the batch, 0 to have the executor
++     * transform it on the CPU and call draw() instead. */
++    int (*draw_vsh)(const Nv2aSurface *s, const Nv2aXVsBatch *b);
++    /* Optional, for verification: re-run the last draw_vsh batch's vertices
++     * through its shader and read the results back (slow). 1 on success. */
++    int (*vsh_readback)(Nv2aXVsOut *out, uint32_t nverts);
++    /* Optional: 1 if the back end takes the next batch as raw streams. */
++    int (*vsh_raw_ok)(void);
++    /* Optional: at a flip, before the frame is presented or hashed, copy the
++     * colour surface at guest address color_va from the GPU into guest
++     * memory. Returns 1 if guest memory now holds the frame. Without it, or
++     * when it returns 0, the presenter and RECOMP_FRAME_STATS see whatever
++     * guest memory held. */
++    int (*readback)(uint32_t color_va);
++    /* Optional: visibility tests (D3D's Begin/EndVisibilityTest). The title
++     * counts the pixels that pass the depth test between
++     * SET_ZPASS_PIXEL_COUNT_ENABLE 1 and 0 and reads the total with
++     * GET_REPORT; titles cull geometry by it. zpass(ZPASS_BEGIN/END) brackets
++     * counting, zpass(ZPASS_CLEAR) is CLEAR_REPORT_VALUE, and zpass_count()
++     * at GET_REPORT returns the pixels counted since the last clear (it may
++     * wait for the GPU). Without them a back end's pixels count as none, and
++     * a title that culls by visibility draws nothing behind its tests. */
++    void (*zpass)(int op);
++    uint32_t (*zpass_count)(void);
++} Nv2aBackendExt;
++
++enum { NV2A_ZPASS_END = 0, NV2A_ZPASS_BEGIN = 1, NV2A_ZPASS_CLEAR = 2 };
++
++/* One vertex-program instruction field, (dword, lowest bit, width), as
++ * nv2a_vsh_interp.c reads it. */
++static inline uint32_t nv2a_vsh_field(const uint32_t *ins, int dw, int lo, int width)
++{
++    return (ins[dw] >> lo) & ((1u << width) - 1u);
++}
++
++/* The inputs a program reads (bit i for v<i>), counting only the sources
++ * each op uses: A for any MAC op, B for mul, mad, dp3/dph/dp4, dst, min, max,
++ * slt, sge; C for add, mad and every ILU op. The executor fetches exactly
++ * these and the shader reads them in this order. */
++static inline uint32_t nv2a_vsh_inputs_used(const uint32_t (*p)[4], uint32_t n)
++{
++    uint32_t m = 0, i;
++    for (i = 0; i < n; i++) {
++        const uint32_t *ins = p[i];
++        uint32_t mac = nv2a_vsh_field(ins, 1, 21, 4), ilu = nv2a_vsh_field(ins, 1, 25, 3);
++        int ua = mac != 0;
++        int ub = mac == 2 || (mac >= 4 && mac <= 12);
++        int uc = mac == 3 || mac == 4 || ilu != 0;
++        if ((ua && nv2a_vsh_field(ins, 2, 26, 2) == 2)
++         || (ub && nv2a_vsh_field(ins, 2, 11, 2) == 2)
++         || (uc && nv2a_vsh_field(ins, 3, 28, 2) == 2))
++            m |= 1u << nv2a_vsh_field(ins, 1, 9, 4);
++    }
++    return m;
++}
++
++/* Register (or, with NULL, remove) the extended entry. */
++void nv2a_backend_ext_register(const Nv2aBackendExt *backend);
++
++/* During clear(): the title's clear rectangle (SET_CLEAR_RECT_HORIZONTAL /
++ * _VERTICAL) as x0, y0, x1, y1 with x1/y1 exclusive, in the title's logical
++ * pixels. Returns 0 if it never sent both. */
++int nv2a_backend_clear_rect(uint32_t r[4]);
++
++/* The last value the title wrote to NV097 method `method` (the executor's
++ * register mirror). */
++uint32_t nv2a_backend_reg(uint32_t method);
++
++#endif /* NV2A_BACKEND_EXT_H */
+diff --git a/src/kernel/nv2a_pb_exec.c b/src/kernel/nv2a_pb_exec.c
+index e0aa62e..8ed6d41 100644
+--- a/src/kernel/nv2a_pb_exec.c
++++ b/src/kernel/nv2a_pb_exec.c
+@@ -40,6 +40,7 @@
+ #include "nv2a_vsh_interp.h"
+ #include "nv2a_combiner.h"
+ #include "nv2a_backend.h"
++#include "nv2a_backend_ext.h"
+ #include "nv2a_window_clip.h"
+ #include "nv2a_texture_sample.h"
+ #include "nv2a_frame_stats.h"
+@@ -392,6 +393,17 @@ static float reg_f(uint32_t method)
+     return f;
+ }
+ 
++int nv2a_backend_clear_rect(uint32_t r[4])
++{
++    if (s_gpu.clear_rect_set != 3)
++        return 0;
++    r[0] = s_gpu.clear_rect_h & 0xFFFFu;
++    r[1] = s_gpu.clear_rect_v & 0xFFFFu;
++    r[2] = (s_gpu.clear_rect_h >> 16) + 1u;
++    r[3] = (s_gpu.clear_rect_v >> 16) + 1u;
++    return 1;
++}
++
+ /* Where BACK_END_WRITE_SEMAPHORE_RELEASE lands; see nv2a_backend.h. */
+ #if defined(_WIN32)
+ static volatile LONG s_sem_va;
+@@ -812,19 +824,28 @@ static void surface_apply_clip(void)
+ 
+ static const Nv2aBackend *s_backend;
+ 
++/* The extended entry (nv2a_backend_ext.h), used for transformed batches
++ * while a base back end is registered. */
++static const Nv2aBackendExt *s_xbackend;
++
++/* Culling and the programmable near plane are applied by the executor
++ * before an extended back end sees a CPU-transformed triangle, and passed
++ * to draw_vsh for the GPU to apply; a base back end gets neither. */
+ static void check_software_backend(const Nv2aBackend *backend)
+ {
++    int extended = s_xbackend != NULL;
++
+     if (s_gpu.window_clip_enabled && backend && backend->draw) {
+         fprintf(stderr, "[GPU] RECOMP_WINDOW_CLIP requires the software rasterizer;"
+                         " registered render back ends do not receive window clip state\n");
+         abort();
+     }
+-    if (s_gpu.software_cull_enabled && backend && backend->draw) {
++    if (s_gpu.software_cull_enabled && backend && backend->draw && !extended) {
+         fprintf(stderr, "[GPU] RECOMP_CULL_FACE requires the software rasterizer;"
+                         " registered render back ends are unsupported\n");
+         abort();
+     }
+-    if (s_gpu.program_near_zero_enabled && backend && backend->draw) {
++    if (s_gpu.program_near_zero_enabled && backend && backend->draw && !extended) {
+         fprintf(stderr, "[GPU] RECOMP_PROGRAM_NEAR_ZERO requires the software rasterizer;"
+                         " registered render back ends are unsupported\n");
+         abort();
+@@ -837,6 +858,17 @@ void nv2a_backend_register(const Nv2aBackend *backend)
+     s_backend = backend;
+ }
+ 
++void nv2a_backend_ext_register(const Nv2aBackendExt *backend)
++{
++    s_xbackend = backend;
++    check_software_backend(s_backend);
++}
++
++uint32_t nv2a_backend_reg(uint32_t method)
++{
++    return s_reg[(method & 0x1FFCu) / 4];
++}
++
+ static int backend_draws(void)
+ {
+     return s_backend && s_backend->draw;
+@@ -2069,6 +2101,9 @@ static int s_xf_no_tex;
+ static Nv2aVertex *s_bverts;     /* about 5.5 MB: allocated by the first vertex */
+ static uint32_t   s_bcount;
+ 
++static float s_xf_o[3];
++static int xf_near_clip_enabled(void);
++
+ static Nv2aVertex *backend_slot(void)
+ {
+     if (!s_bverts
+@@ -2131,6 +2166,97 @@ static void backend_flush(int textured)
+     note_drawn();
+ }
+ 
++/* The extended path's vertices: everything the CPU path's per-pixel loop
++ * reads (xf_rows), per vertex. */
++static Nv2aXVertex *s_xverts;
++static uint32_t s_xcount;
++static float fog_factor(float d);
++
++static Nv2aXVertex *xbackend_slot(void)
++{
++    if (!s_xverts
++        && !(s_xverts = (Nv2aXVertex *)calloc(NV_BACKEND_MAX_VERTS, sizeof *s_xverts)))
++        return NULL;
++    if (s_xcount + 3 > NV_BACKEND_MAX_VERTS)
++        return NULL;
++    return &s_xverts[s_xcount];
++}
++
++static void xbackend_from_xf(const Nv2aVshOutput *v, Nv2aXVertex *o)
++{
++    o->x = v->pos[0];
++    o->y = v->pos[1];
++    o->z = v->pos[2];
++    o->rhw = 1.0f / v->pos[3];
++    memcpy(o->d0, v->d0, sizeof o->d0);
++    memcpy(o->d1, v->d1, sizeof o->d1);
++    o->fog = fog_factor(v->fog[0]);
++    o->pad[0] = o->pad[1] = o->pad[2] = 0.0f;
++    memcpy(o->tc, v->tex, sizeof o->tc);
++}
++
++static void copy_texture(const Texture *t, Nv2aTexture *o)
++{
++    o->offset = t->offset;
++    o->width  = t->width;
++    o->height = t->height;
++    o->pitch  = t->pitch;
++    o->color  = t->color;
++    o->addr_u = t->addr_u;
++    o->addr_v = t->addr_v;
++    o->levels = t->pitch ? 1 : t->levels;
++    o->filter = t->filter;
++}
++
++/* The batch state an extended back end needs besides the vertices. */
++static void fill_xbatch(Nv2aXBatch *xb, const Nv2aRenderState *rs)
++{
++    static int no_rc = -1;
++    int st;
++
++    if (no_rc < 0)
++        no_rc = getenv("RECOMP_NO_COMBINERS") != NULL;
++    memset(xb, 0, sizeof *xb);
++    xb->state = rs;
++    xb->rc = s_gpu.rc_seen && !no_rc ? &s_gpu.rc : NULL;
++    for (st = 0; st < 4; st++) {
++        const Texture *t = &s_gpu.texs[st];
++        if (!t->valid)
++            continue;
++        copy_texture(t, &xb->tex[st]);
++        xb->tex_valid[st] = 1;
++        xb->tex_normalized[st] = tex_size_from_format(t->color) != 0;
++        xb->tex_cube[st] = (uint8_t)t->cube;
++    }
++    /* FOG_COLOR is R in bits 0-7, the reverse of a D3DCOLOR. */
++    nv2a_rc_unpack(s_gpu.fog_color, xb->fogc);
++    { float r = xb->fogc[2]; xb->fogc[2] = xb->fogc[0]; xb->fogc[0] = r; }
++    xb->clip_plane_mode = s_gpu.clip_plane_mode;
++    xb->alpha_func = s_gpu.alpha_func;
++    xb->alpha_ref = s_gpu.alpha_ref;
++    xb->near_z = s_xf_o[2];
++    xb->near_clip = xf_near_clip_enabled();
++}
++
++static void xbackend_flush(void)
++{
++    Nv2aSurface surf;
++    Nv2aRenderState rs;
++    Nv2aXBatch xb;
++
++    if (!s_xcount)
++        return;
++    current_surface(&surf);
++    current_render_state(&rs);
++    fill_xbatch(&xb, &rs);
++    xb.vertices = s_xverts;
++    xb.count = s_xcount;
++    s_xbackend->draw(&surf, &xb);
++    s_gpu.tris_drawn += s_xcount / 3;
++    s_xcount = 0;
++    note_drawn();
++}
++
+ /* One triangle by vertex index: gather position and, if the batch has one,
+  * texture coordinate 0. A vertex whose position cannot be read is not drawn;
+  * a batch whose texcoords cannot be read is drawn untextured rather than not
+@@ -2757,6 +2883,16 @@ static void raster_xf_triangle(const Nv2aVshOutput *va, const Nv2aVshOutput *vb,
+         s_gpu.tris_culled++;
+         return;
+     }
++    if (backend_draws() && s_xbackend && s_xbackend->draw) {
++        Nv2aXVertex *o = xbackend_slot();
++        if (o) {
++            xbackend_from_xf(va, &o[0]);
++            xbackend_from_xf(vb, &o[1]);
++            xbackend_from_xf(vc, &o[2]);
++            s_xcount += 3;
++        }
++        return;
++    }
+     if (backend_draws()) {                     /* a back end rasterises */
+         Nv2aVertex *o = backend_slot();
+         if (o) {
+@@ -2852,8 +2988,8 @@ static void raster_xf_triangle(const Nv2aVshOutput *va, const Nv2aVshOutput *vb,
+  * check, which is correct, just slower for huge off-screen triangles. */
+ #define NV_CLIP_W 1e-3f
+ 
+-/* The selected near-plane offset, scaled like the vertices. */
+-static float s_xf_o[3];
++/* The selected near-plane offset, scaled like the vertices (declared
++ * above, with the back-end helpers). */
+ 
+ static void xf_lerp(const Nv2aVshOutput *a, const Nv2aVshOutput *b, float t,
+                     Nv2aVshOutput *out)
+@@ -2896,19 +3032,26 @@ static int xf_clip_poly(const Nv2aVshOutput *in, int n, int pl,
+     return m;
+ }
+ 
+-static void raster_xf_clipped(const Nv2aVshOutput *a, const Nv2aVshOutput *b,
+-                              const Nv2aVshOutput *c)
++/* RECOMP_CLIP_NEAR_Z=0 clips at w only. */
++static int xf_near_clip_enabled(void)
+ {
+     static int near_z = -1;
+-    const Nv2aVshOutput *in[3];
+-    Nv2aVshOutput p0[8], p1[8];
+-    int n = 3, i, j, pl, planes, inside = 1;
+ 
+     if (near_z < 0) {
+         const char *e = getenv("RECOMP_CLIP_NEAR_Z");
+         near_z = !(e && e[0] == '0');
+     }
+-    planes = near_z ? 2 : 1;
++    return near_z;
++}
++
++static void raster_xf_clipped(const Nv2aVshOutput *a, const Nv2aVshOutput *b,
++                              const Nv2aVshOutput *c)
++{
++    const Nv2aVshOutput *in[3];
++    Nv2aVshOutput p0[8], p1[8];
++    int n = 3, i, j, pl, planes, inside = 1;
++
++    planes = xf_near_clip_enabled() ? 2 : 1;
+     in[0] = a; in[1] = b; in[2] = c;
+     for (i = 0; i < 3; i++) {
+         p0[i] = *in[i];
+@@ -3143,7 +3286,9 @@ static void raster_batch_program(void)
+     }
+     /* The batch's triangles, all at once (see xf_queue_push). */
+     xf_queue_flush();
+-    if (backend_draws())
++    if (backend_draws() && s_xbackend && s_xbackend->draw)
++        xbackend_flush();
++    else if (backend_draws())
+         backend_flush(!s_xf_no_tex);
+ }
+ 
+@@ -3867,6 +4012,8 @@ static void tex_stage_method(uint32_t method, uint32_t param)
+  * back end the pixels are not in guest memory, so the hash is unknown. */
+ static Nv2aFrameStats s_frame_stats;
+ static int s_frame_stats_on = -1;
++/* At the flip being handled: guest memory holds the presented frame. */
++static int s_frame_in_guest;
+ /* Constant uploads since the last flip (TRANSFORM_CONSTANT words and the
+  * load index), for the frame statistics' constants column. */
+ static uint64_t s_frame_constants;
+@@ -3900,7 +4047,7 @@ static void frame_stats_flip(void)
+ 
+     if (!frame_stats_on())
+         return;
+-    if (!backend_draws()) {
++    if (s_frame_in_guest) {
+         int drawn = s_gpu.drawn_offset != 0;
+         uint32_t offset = drawn ? s_gpu.drawn_offset : s_gpu.color_offset;
+         uint32_t pitch = drawn ? s_gpu.drawn_pitch : s_gpu.pitch;
+@@ -4275,8 +4422,13 @@ void nv2a_pb_exec_method(uint32_t subch, uint32_t method, uint32_t param)
+     case 0x09C4: memcpy(&s_gpu.fog_param[1], &param, 4); break;
+     case 0x17C8:                                  /* CLEAR_REPORT_VALUE */
+         s_gpu.zpass_count = 0;
++        if (backend_draws() && s_xbackend && s_xbackend->zpass)
++            s_xbackend->zpass(NV2A_ZPASS_CLEAR);
+         break;
+     case 0x17CC:                                  /* SET_ZPASS_PIXEL_COUNT_ENABLE */
++        if (backend_draws() && s_xbackend && s_xbackend->zpass
++            && (param != 0) != (s_gpu.zpass_enable != 0))
++            s_xbackend->zpass(param ? NV2A_ZPASS_BEGIN : NV2A_ZPASS_END);
+         s_gpu.zpass_enable = param;
+         break;
+     case 0x17D0: {                                /* GET_REPORT */
+@@ -4290,6 +4442,18 @@ void nv2a_pb_exec_method(uint32_t subch, uint32_t method, uint32_t param)
+         uint8_t *mem = (uint8_t *)xbox_GetMemoryOffset();
+         uint32_t at = dma_resolve(param & 0x00FFFFFFu);
+         uint64_t stamp = (uint64_t)s_gpu.reports++ * 1000u;
++        /* A back end draws the pixels, so it counts them. One that cannot
++         * leaves the count at 0, which a culling title reads as hidden. */
++        if (backend_draws()) {
++            if (s_xbackend && s_xbackend->zpass_count) {
++                s_gpu.zpass_count = s_xbackend->zpass_count();
++            } else {
++                static int said;
++                if (!said++)
++                    fprintf(stderr, "[GPU] visibility tests read 0 pixels: the registered"
++                                    " back end does not count them (zpass_count)\n");
++            }
++        }
+         memcpy(mem + at, &stamp, 8);
+         memcpy(mem + at + 8, &s_gpu.zpass_count, 4);
+         memset(mem + at + 12, 0, 4);
+@@ -4447,6 +4611,15 @@ void nv2a_pb_exec_method(uint32_t subch, uint32_t method, uint32_t param)
+          * here, rather than letting the window read guest memory on its own
+          * clock, is what stops it showing a surface the rasteriser is still
+          * writing. */
++        /* A back end that renders on the GPU puts the finished frame back
++         * into guest memory first, so the presenter, the frame dumps and
++         * the frame statistics see it (nv2a_backend_ext.h, readback). */
++        s_frame_in_guest = !backend_draws();
++        if (backend_draws() && s_xbackend && s_xbackend->readback) {
++            uint32_t done = s_gpu.drawn_offset ? s_gpu.drawn_offset : s_gpu.color_offset;
++            if (done)
++                s_frame_in_guest = s_xbackend->readback(dma_resolve(done));
++        }
+         {
+             extern void xbox_FramebufferWindowFrameStats(uint32_t);
+             static uint32_t draws_at_flip;

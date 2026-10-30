@@ -1,0 +1,498 @@
+diff --git a/src/kernel/kernel.h b/src/kernel/kernel.h
+index 4a6389d..3617c0d 100644
+--- a/src/kernel/kernel.h
++++ b/src/kernel/kernel.h
+@@ -919,6 +919,8 @@ enum {
+  * hold-off, keyed on the gate when it is on and on the raised-IRQL count
+  * (xbox_IrqlBlocksInterrupts) when it is off. */
+ int     xbox_IrqSafePointsOn(void);
++/* Safe points with no forced delivery beside the gate holder. */
++int     xbox_IrqSafePointsStrict(void);
+ /* The routine the holder runs for a line: it finds the connected ISR and
+  * calls it on g_esp (a worker stack the caller set up) at the device IRQL. */
+ void    xbox_IrqSetHandler(int line, void (*run)(void));
+diff --git a/src/kernel/kernel_hal.c b/src/kernel/kernel_hal.c
+index 45d548c..9cc7142 100644
+--- a/src/kernel/kernel_hal.c
++++ b/src/kernel/kernel_hal.c
+@@ -434,6 +434,12 @@ int xbox_IrqSafePointsOn(void)
+     return s_irq_mode;
+ }
+ 
++int xbox_IrqSafePointsStrict(void)
++{
++    irq_config_once();
++    return s_irq_mode && !s_irq_force;
++}
++
+ int xbox_DpcOnRaise(void)
+ {
+     irq_config_once();
+diff --git a/src/usb/ohci.c b/src/usb/ohci.c
+index efa5046..958ba9d 100644
+--- a/src/usb/ohci.c
++++ b/src/usb/ohci.c
+@@ -1,10 +1,7 @@
+ /*
+  * ohci.c -- OHCI 1.0a host controller registers for the MCPX.
+  *
+- * See ohci.h for what this is and is not. The short version: enough for a
+- * title's own USB driver to find a controller and a populated root hub port,
+- * plus a trace of every register access, because what the driver does after
+- * that decides how the rest gets built.
++ * See ohci.h for the model's scope and integration requirements.
+  */
+ #include "ohci.h"
+ #include "../platform/mmio_decode.h"
+@@ -182,8 +179,18 @@ static int s_device_hc;
+  * 1-4). Which slot XAPI gives a pad is decided by its port: see OHCI_PORTS. */
+ static unsigned s_ndp = OHCI_PORTS;
+ static int s_npads = 1;          /* RECOMP_USB_PADS */
+-static int s_enabled;
++static volatile LONG s_enabled;
+ static int s_trace;
++static HANDLE s_worker;
++static uint32_t s_worker_tib;
++static volatile LONG s_stop;
++static int s_started;
++static int s_protected[2];
++static DWORD s_old_protect[2];
++
++#ifndef OHCI_SHUTDOWN_WAIT_MS
++#define OHCI_SHUTDOWN_WAIT_MS 5000u
++#endif
+ 
+ static uint32_t *reg_of(OhciController *hc, uint32_t off)
+ {
+@@ -1040,14 +1047,8 @@ static void ohci_reset(OhciController *hc, uint32_t base, int index)
+  * hardware does -- an interrupt arrives when the controller decides, not when
+  * the driver next reads a register.
+  *
+- * ponytail: one delivery, of the root hub status change that is already
+- * pending from bring-up. There is nothing behind it yet -- no descriptor list
+- * walking, so an enumeration attempt has nothing to answer it -- and the point
+- * of this delivery is to find out what the driver does when it finally gets
+- * the interrupt it has been waiting for. Repeat delivery and the transfer
+- * lists come after that answer, not before it.
+  */
+-static DWORD WINAPI ohci_thread(LPVOID unused)
++static DWORD WINAPI ohci_thread(LPVOID tib_arg)
+ {
+     /* This thread calls recompiled code, so it needs what any thread running
+      * recompiled code needs: its own TIB. The guest register set is already
+@@ -1057,7 +1058,7 @@ static DWORD WINAPI ohci_thread(LPVOID unused)
+      * dereferences null before it executes a line of its own body. That is
+      * what killed the process here, two interrupts in, with no fault report
+      * because the fault was in the runtime rather than in the title. */
+-    unsigned waited = 0;
++    DWORD started = GetTickCount();
+     int plugged = 0;
+     uint32_t last_status = 0;
+     unsigned repeats = 0;
+@@ -1066,32 +1067,22 @@ static DWORD WINAPI ohci_thread(LPVOID unused)
+     unsigned last_ack = 0;
+     unsigned first_port = 0, settle = 0;
+ 
+-    (void)unused;
+-    {
+-        uint32_t tib = xbox_AllocThreadTib();
+-        if (!tib) {
+-            fprintf(stderr, "  [OHCI0] no TIB for the controller thread; "
+-                            "not delivering interrupts\n");
+-            fflush(stderr);
+-            return 0;
+-        }
+-        g_fs_base = tib;
+-    }
++    g_fs_base = (uint32_t)(uintptr_t)tib_arg;
+ 
+-    for (;;) {
++    while (!InterlockedCompareExchange(&s_stop, 0, 0)) {
+         OhciController *hc = &s_hc[s_device_hc];
+         uint32_t control, enable, status;
+         uint32_t pass_done = 0;     /* this pass's done queue, newest first */
+ 
+         Sleep(OHCI_TICK_MS);
++        if (InterlockedCompareExchange(&s_stop, 0, 0))
++            break;
+         control = hc->reg[HcControl / 4];
+         enable  = hc->reg[HcInterruptEnable / 4];
+ 
+         /* Operational is HCFS == 10b in bits 7:6. Interrupting a controller
+          * the driver has not started yet is not a test of anything. */
+         if ((control & 0xC0u) != 0x80u) {
+-            if (++waited > 1500)              /* 30 s and it never started */
+-                break;
+             continue;
+         }
+         if (!(enable & INTR_MIE))
+@@ -1117,7 +1108,8 @@ static DWORD WINAPI ohci_thread(LPVOID unused)
+             s_plugged_pads = 1;
+             first_port = port;
+             fprintf(stderr, "  [OHCI0] operational after %u ms; device "
+-                            "arriving on port %u\n", waited * 20, port + 1);
++                            "arriving on port %u\n",
++                    (unsigned)(GetTickCount() - started), port + 1);
+             fflush(stderr);
+         }
+ 
+@@ -1127,7 +1119,7 @@ static DWORD WINAPI ohci_thread(LPVOID unused)
+          * RECOMP_USB_PADS sets how many (1-4). */
+         if (plugged && s_plugged_pads < s_npads
+             && usb_gamepad_configured(s_plugged_pads - 1)) {
+-            if (++settle > 50) {                 /* ~1 s after the last */
++            if (++settle > 50) {                 /* ~200 ms after the last */
+                 unsigned port = (first_port + (unsigned)s_plugged_pads) % s_ndp;
+                 hc->reg[(HcRhPortStatus1 + port * 4) / 4] |= PORT_CCS | PORT_CSC;
+                 hc->reg[HcInterruptStatus / 4] |= INTR_RHSC;
+@@ -1149,10 +1141,8 @@ static DWORD WINAPI ohci_thread(LPVOID unused)
+          * a frame ever starting, enumeration stops one transfer past
+          * SET_ADDRESS with the driver waiting for time to pass.
+          *
+-         * Twenty frames a tick because a frame is 1 ms and this loop sleeps
+-         * 20. The count is what drivers compare; the rate is what they feel,
+-         * and both are closer to right this way than a counter that never
+-         * moves. */
++         * One frame is 1 ms, so advance by the number of milliseconds per
++         * tick. */
+         {
+             uint32_t hcca = hc->reg[HcHCCA / 4];
+ 
+@@ -1310,7 +1300,7 @@ static DWORD WINAPI ohci_thread(LPVOID unused)
+                 fflush(stderr);
+                 if (gated)
+                     xbox_DispatchGateLeave();
+-                break;
++                return 1;
+             }
+         } else {
+             last_status = status;
+@@ -1324,21 +1314,56 @@ static DWORD WINAPI ohci_thread(LPVOID unused)
+     return 0;
+ }
+ 
+-void xbox_OhciInit(void)
++static int ohci_restore_pages(void)
+ {
+-    static int done;
++    ptrdiff_t off = xbox_GetMemoryOffset();
++    int i, ok = 1;
+ 
+-    if (done)
+-        return;
+-    done = 1;
++    for (i = 1; i >= 0; --i) {
++        DWORD ignored;
++        LPVOID at;
++        if (!s_protected[i])
++            continue;
++        at = (LPVOID)((uintptr_t)off + s_hc[i].base);
++        if (!VirtualProtect(at, XBOX_OHCI_SIZE, s_old_protect[i], &ignored)) {
++            fprintf(stderr, "  OHCI: cannot restore 0x%08X (error %lu)\n",
++                    s_hc[i].base, (unsigned long)GetLastError());
++            ok = 0;
++        } else {
++            s_protected[i] = 0;
++        }
++    }
++    if (!s_protected[0] && !s_protected[1])
++        InterlockedExchange(&s_enabled, 0);
++    return ok;
++}
++
++int xbox_OhciInit(void)
++{
++    ptrdiff_t off;
++    int i;
++
++    if (InterlockedCompareExchange(&s_enabled, 0, 0) && s_worker &&
++        !InterlockedCompareExchange(&s_stop, 0, 0)) {
++        DWORD exit_code;
++        if (GetExitCodeThread(s_worker, &exit_code) && exit_code == STILL_ACTIVE)
++            return 1;
++        fprintf(stderr, "  OHCI: controller thread is no longer running\n");
++        return -1;
++    }
+ 
+     /* Opt-in. Without a descriptor list walker behind it a driver that finds
+      * a port has nothing to enumerate, so this must not change how a title
+      * behaves until the rest of it exists. */
+     if (!getenv("RECOMP_USB"))
+-        return;
++        return 0;
++
++    if (s_started || InterlockedCompareExchange(&s_enabled, 0, 0) ||
++        s_worker || s_worker_tib) {
++        fprintf(stderr, "  OHCI: restart or incomplete cleanup is unsupported\n");
++        return -1;
++    }
+ 
+-    s_enabled = 1;
+     s_trace   = getenv("RECOMP_USB_TRACE") != NULL;
+     {
+         const char *hcspec = getenv("RECOMP_USB_HC");
+@@ -1357,18 +1382,31 @@ void xbox_OhciInit(void)
+             s_ndp = (unsigned)s_npads;      /* a port for every pad */
+     }
+ #if !defined(OHCI_TRAP_WIN32) && !defined(OHCI_TRAP_POSIX_A64)
+-    /* No decoder for this host's instructions, so a trapped access could not
+-     * be answered. Leave the aperture as plain memory -- the title then sees
+-     * no controller, exactly as with RECOMP_USB unset -- and say so. */
+-    s_enabled = 0;
+     fprintf(stderr, "  OHCI: no trapped-MMIO decoder for this host; "
+                     "USB controllers disabled\n");
+     fflush(stderr);
+-    return;
++    return -1;
+ #endif
+ 
++    if (!xbox_IrqSafePointsStrict()) {
++        fprintf(stderr, "  OHCI: requires RECOMP_DISPATCH_GATE=1, IRQ safe "
++                        "points, and no forced ungated delivery\n");
++        return -1;
++    }
++    off = xbox_GetMemoryOffset();
++    if (!off) {
++        fprintf(stderr, "  OHCI: guest memory not mapped yet\n");
++        return -1;
++    }
++    s_worker_tib = xbox_AllocThreadTib();
++    if (!s_worker_tib) {
++        fprintf(stderr, "  OHCI: cannot allocate a controller-thread TIB\n");
++        return -1;
++    }
++
+     ohci_reset(&s_hc[0], XBOX_OHCI0_BASE, 0);
+     ohci_reset(&s_hc[1], XBOX_OHCI1_BASE, 1);
++    InterlockedExchange(&s_enabled, 1);
+ 
+     /* The registers have to fault to be answered. The MCPX aperture is mapped
+      * as plain committed memory, so both blocks are made inaccessible here and
+@@ -1380,46 +1418,98 @@ void xbox_OhciInit(void)
+      * A failed protect switches the model off rather than leaving it half on:
+      * a controller whose registers read as zero out of RAM is exactly the
+      * situation this exists to end, and it would look identical. */
+-    {
+-        ptrdiff_t off = xbox_GetMemoryOffset();
+-        int i;
+-
+-        if (!off) {
+-            s_enabled = 0;
+-            fprintf(stderr, "  OHCI: guest memory not mapped yet; disabled\n");
+-            return;
+-        }
+-        for (i = 0; i < 2; i++) {
+-            DWORD old_protect;
+-            LPVOID at = (LPVOID)((uintptr_t)off + s_hc[i].base);
+-            if (!VirtualProtect(at, XBOX_OHCI_SIZE, PAGE_NOACCESS,
+-                                &old_protect)) {
+-                s_enabled = 0;
+-                fprintf(stderr, "  OHCI: cannot trap 0x%08X (error %lu); "
+-                                "disabled\n", s_hc[i].base,
+-                                (unsigned long)GetLastError());
+-                return;
+-            }
++    for (i = 0; i < 2; i++) {
++        LPVOID at = (LPVOID)((uintptr_t)off + s_hc[i].base);
++        if (!VirtualProtect(at, XBOX_OHCI_SIZE, PAGE_NOACCESS,
++                            &s_old_protect[i])) {
++            fprintf(stderr, "  OHCI: cannot trap 0x%08X (error %lu)\n",
++                    s_hc[i].base, (unsigned long)GetLastError());
++            ohci_restore_pages();
++            xbox_HeapFree(s_worker_tib);
++            s_worker_tib = 0;
++            return -1;
+         }
++        s_protected[i] = 1;
+     }
+ 
++    InterlockedExchange(&s_stop, 0);
++    s_worker = CreateThread(NULL, 0, ohci_thread,
++                            (LPVOID)(uintptr_t)s_worker_tib, 0, NULL);
++    if (!s_worker) {
++        fprintf(stderr, "  OHCI: cannot start controller thread (error %lu)\n",
++                (unsigned long)GetLastError());
++        ohci_restore_pages();
++        xbox_HeapFree(s_worker_tib);
++        s_worker_tib = 0;
++        return -1;
++    }
++    s_started = 1;
+     fprintf(stderr, "  OHCI: two controllers at 0x%08X and 0x%08X, "
+-                    "%d ports each, one device on HC0 port 1\n",
+-            XBOX_OHCI0_BASE, XBOX_OHCI1_BASE, OHCI_PORTS);
++                    "%u ports each, %d pad(s) on HC%d\n",
++            XBOX_OHCI0_BASE, XBOX_OHCI1_BASE, s_ndp, s_npads, s_device_hc);
+     fflush(stderr);
++    return 1;
++}
+ 
+-    {
+-        HANDLE th = CreateThread(NULL, 0, ohci_thread, NULL, 0, NULL);
+-        if (th)
+-            CloseHandle(th);
++int xbox_OhciShutdown(void)
++{
++    DWORD started, exit_code;
++    int ok = 1;
++
++    if (!InterlockedCompareExchange(&s_enabled, 0, 0) &&
++        !s_worker && !s_worker_tib)
++        return 1;
++    InterlockedExchange(&s_stop, 1);
++    if (s_worker) {
++        DWORD wait = WaitForSingleObject(s_worker, OHCI_SHUTDOWN_WAIT_MS);
++        if (wait != WAIT_OBJECT_0) {
++            fprintf(stderr, "  OHCI: controller thread did not stop "
++                            "(wait 0x%08lX)\n", (unsigned long)wait);
++            return 0;
++        }
++        if (!GetExitCodeThread(s_worker, &exit_code) || exit_code != 0) {
++            fprintf(stderr, "  OHCI: controller thread stopped with an error\n");
++            ok = 0;
++        }
++        if (!CloseHandle(s_worker)) {
++            fprintf(stderr, "  OHCI: cannot close controller thread (error %lu)\n",
++                    (unsigned long)GetLastError());
++            ok = 0;
++        }
++        s_worker = NULL;
++    }
++
++    if (s_started) {
++        if (!xbox_IrqSafePointsStrict() ||
++            xbox_DispatchGateOwner() == (unsigned long)GetCurrentThreadId()) {
++            fprintf(stderr, "  OHCI: cannot safely retire the interrupt callback\n");
++            return 0;
++        }
++        started = GetTickCount();
++        while (!xbox_DispatchGateTryEnter()) {
++            if ((DWORD)(GetTickCount() - started) >= OHCI_SHUTDOWN_WAIT_MS) {
++                fprintf(stderr, "  OHCI: interrupt gate did not become available\n");
++                return 0;
++            }
++            Sleep(1);
++        }
++        xbox_IrqSetHandler(XBOX_IRQ_OHCI, NULL);
++        xbox_DispatchGateLeave();
++    }
++    if (!ohci_restore_pages())
++        ok = 0;
++    if (s_worker_tib) {
++        xbox_HeapFree(s_worker_tib);
++        s_worker_tib = 0;
+     }
++    return ok;
+ }
+ 
+ static OhciController *hc_for(uint32_t va)
+ {
+     int i;
+ 
+-    if (!s_enabled)
++    if (!InterlockedCompareExchange(&s_enabled, 0, 0))
+         return NULL;
+     for (i = 0; i < 2; i++)
+         if (va >= s_hc[i].base && va < s_hc[i].base + XBOX_OHCI_SIZE)
+@@ -1500,7 +1590,7 @@ void xbox_OhciReport(void)
+ {
+     int i;
+ 
+-    if (!s_enabled)
++    if (!InterlockedCompareExchange(&s_enabled, 0, 0))
+         return;
+     for (i = 0; i < 2; i++)
+         fprintf(stderr, "  [OHCI%d] %u reads, %u writes, %u undecoded; "
+diff --git a/src/usb/ohci.h b/src/usb/ohci.h
+index 8aa0b35..530820a 100644
+--- a/src/usb/ohci.h
++++ b/src/usb/ohci.h
+@@ -8,14 +8,9 @@
+  * HcRevision out of an aperture backed by zeroed RAM, concludes there is a
+  * host controller with no root hub ports, and enumerates nothing.
+  *
+- * This is the register half of the answer: a controller that reports a real
+- * revision, a root hub with ports, and the handful of registers that have
+- * behaviour rather than storage. It does not yet walk the endpoint and
+- * transfer descriptor lists, which is what actually moves a report, so a
+- * driver that gets this far will find a port and then have nothing to talk to.
+- * That is deliberate -- the register trace is what says whether the driver
+- * polls HcInterruptStatus or waits on the IRQ, and that answers how much of
+- * the rest is needed before any of it is written.
++ * The experimental model covers the registers and selected endpoint and
++ * transfer descriptor paths needed for Xbox gamepad enumeration and reports.
++ * It is not a complete OHCI implementation.
+  *
+  * Written from the OHCI 1.0a specification and this title's own code.
+  */
+@@ -29,14 +24,20 @@
+ #define XBOX_OHCI1_BASE   0xFED08000u
+ #define XBOX_OHCI_SIZE    0x00001000u   /* 4 KB, the length XAPI registers */
+ 
+-/* Bring the models up. Safe to call more than once; does nothing unless
+- * RECOMP_USB is set, so a title that was working without a controller keeps
+- * behaving exactly as it did. Call it after the guest memory is mapped.
++/* Call after mapping guest memory and installing the host's MMIO handler,
++ * before starting guest threads. Returns 1 when active, 0 when RECOMP_USB is
++ * unset, and -1 on failure. Active initialization is idempotent; restarting
++ * after shutdown is unsupported. USB requires the dispatch gate and IRQ safe
++ * points, with forced ungated delivery disabled.
+  *
+- * The registers are trapped on Windows x86-64 and on POSIX arm64 hosts. On
+- * any other host the model stays off, with a one-line notice, and the title
+- * sees the aperture as plain memory, as it does with RECOMP_USB unset. */
+-void xbox_OhciInit(void);
++ * Trapped registers require Windows x86-64 or POSIX arm64. */
++int xbox_OhciInit(void);
++
++/* After stopping guest threads that may access USB MMIO, stop the worker and
++ * cancel its interrupt callback before unmapping guest memory or removing
++ * the host's MMIO handler. Returns 0 on failure; in that case the caller must
++ * not unmap guest memory or remove the handler. */
++int xbox_OhciShutdown(void);
+ 
+ /* 1 if the address is inside a controller this model owns. */
+ int  xbox_OhciOwnsAddress(uint32_t xbox_va);
+diff --git a/tests/usb_ohci_posix/test_main.c b/tests/usb_ohci_posix/test_main.c
+index e9adc61..0527782 100644
+--- a/tests/usb_ohci_posix/test_main.c
++++ b/tests/usb_ohci_posix/test_main.c
+@@ -82,6 +82,12 @@ int main(int argc, char **argv)
+     }
+     /* The model is opt-in. */
+     setenv("RECOMP_USB", "1", 1);
++    setenv("RECOMP_DISPATCH_GATE", "1", 1);
++    /* Supply a minimal TLS directory for the controller thread's TIB. */
++    {
++        uint32_t tls = 0x00010700u;
++        memcpy(xbe + 0x012C, &tls, sizeof tls);
++    }
+     if (!xbox_MemoryLayoutInit(xbe, xbe_len)) {
+         fprintf(stderr, "xbox_MemoryLayoutInit failed\n");
+         return 2;
+@@ -95,15 +101,15 @@ int main(int argc, char **argv)
+     sigaction(SIGBUS, &sa, NULL);
+     sigaction(SIGSEGV, &sa, NULL);
+ 
+-    xbox_OhciInit();
+-
+ #if !defined(__aarch64__)
++    check(xbox_OhciInit() < 0, "missing decoder is reported", NULL);
+     check(!xbox_OhciOwnsAddress(XBOX_OHCI0_BASE),
+           "no decoder on this host: the model stays off", NULL);
+     printf("\n%d failure(s); trap path not available here (skipped)\n",
+            failures);
+     return failures ? 1 : 77;
+ #else
++    check(xbox_OhciInit() == 1, "controller worker starts", NULL);
+     {
+         volatile uint32_t *hc0 = (volatile uint32_t *)(s_base + XBOX_OHCI0_BASE);
+         volatile uint32_t *hc1 = (volatile uint32_t *)(s_base + XBOX_OHCI1_BASE);
+@@ -152,6 +158,7 @@ int main(int argc, char **argv)
+     }
+     check(!s_unhandled, "no access fell through to the crash path", NULL);
+     xbox_OhciReport();
++    check(xbox_OhciShutdown(), "controller worker stops safely", NULL);
+     printf("\n%d failure(s)\n", failures);
+     return failures ? 1 : 0;
+ #endif

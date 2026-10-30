@@ -1,0 +1,196 @@
+diff --git a/src/kernel/guest_vmem.c b/src/kernel/guest_vmem.c
+index 24b948e..dcb8a77 100644
+--- a/src/kernel/guest_vmem.c
++++ b/src/kernel/guest_vmem.c
+@@ -41,6 +41,20 @@ static uint32_t page_index(uint32_t va) { return (va - s_lo) / VMEM_PAGE; }
+ 
+ int guest_vmem_active(void) { return s_pages != NULL; }
+ 
++uint32_t guest_vmem_committed_pages(void)
++{
++    uint32_t count = 0, p, pages;
++
++    AcquireSRWLockShared(&s_lock);
++    pages = s_pages ? (s_top - s_lo) / VMEM_PAGE : 0;
++    for (p = 0; p < pages; ++p) {
++        if (s_pages[p].state == MEM_COMMIT_FLAG)
++            ++count;
++    }
++    ReleaseSRWLockShared(&s_lock);
++    return count;
++}
++
+ /* How far up from `host` the host address space is free, at most `limit`
+  * bytes. The guest's user range and the host's are not the same thing: with the
+  * guest image mapped at 0x10000, guest 0x7FFD0000 is host 0x7FFE0000, which on
+diff --git a/src/kernel/guest_vmem.h b/src/kernel/guest_vmem.h
+index ce05198..0dfb33a 100644
+--- a/src/kernel/guest_vmem.h
++++ b/src/kernel/guest_vmem.h
+@@ -37,6 +37,9 @@ void guest_vmem_shutdown(void);
+ /* True once guest_vmem_init has succeeded. */
+ int guest_vmem_active(void);
+ 
++/* Committed pages in the extended address-space tracker. */
++uint32_t guest_vmem_committed_pages(void);
++
+ /* Each returns 0 when the request is not the tracker's (it is not live, or the
+  * address is below the mirrors' start), in which case the caller carries on
+  * with its own path. Otherwise they return 1 with *status set. */
+diff --git a/src/kernel/kernel_bridge.c b/src/kernel/kernel_bridge.c
+index 34f3242..051e8da 100644
+--- a/src/kernel/kernel_bridge.c
++++ b/src/kernel/kernel_bridge.c
+@@ -1950,7 +1950,7 @@ static void bridge_KeQuerySystemTime(void)
+ static void bridge_MmQueryStatistics(void)
+ {
+     uint32_t stats_ptr = STACK_ARG(0);
+-    g_eax = (uint32_t)xbox_MmQueryStatistics(XBOX_TO_NATIVE(stats_ptr));
++    g_eax = (uint32_t)xbox_MmQueryStatistics(stats_ptr ? XBOX_TO_NATIVE(stats_ptr) : NULL);
+ }
+ 
+ /* ── NtCreateEvent (ordinal 189) ─────────────────────────── */
+diff --git a/src/kernel/kernel_memory.c b/src/kernel/kernel_memory.c
+index e66e3de..43897a1 100644
+--- a/src/kernel/kernel_memory.c
++++ b/src/kernel/kernel_memory.c
+@@ -127,24 +127,13 @@ VOID __stdcall xbox_MmFreeSystemMemory(PVOID BaseAddress, ULONG NumberOfBytes)
+ 
+ NTSTATUS __stdcall xbox_MmQueryStatistics(PXBOX_MM_STATISTICS MemoryStatistics)
+ {
+-    MEMORYSTATUSEX ms;
+-    ms.dwLength = sizeof(ms);
+-
+     if (!MemoryStatistics)
+         return STATUS_INVALID_PARAMETER;
+ 
+-    if (!GlobalMemoryStatusEx(&ms))
+-        return STATUS_UNSUCCESSFUL;
+-
+     memset(MemoryStatistics, 0, sizeof(XBOX_MM_STATISTICS));
+     MemoryStatistics->Length = sizeof(XBOX_MM_STATISTICS);
+-
+-    /* Xbox has 64MB RAM. Report plausible values. */
+-    ULONG page_size = 4096;
+-    MemoryStatistics->TotalPhysicalPages = 64 * 1024 * 1024 / page_size; /* 16384 pages */
+-    MemoryStatistics->AvailablePages = (ULONG)(ms.ullAvailPhys / page_size);
+-    if (MemoryStatistics->AvailablePages > MemoryStatistics->TotalPhysicalPages)
+-        MemoryStatistics->AvailablePages = MemoryStatistics->TotalPhysicalPages / 2;
++    MemoryStatistics->TotalPhysicalPages = (ULONG)(g_xbox_total_ram / 4096u);
++    MemoryStatistics->AvailablePages = xbox_MemoryAvailablePages();
+ 
+     return STATUS_SUCCESS;
+ }
+diff --git a/src/kernel/xbox_memory_layout.c b/src/kernel/xbox_memory_layout.c
+index b723a92..1962022 100644
+--- a/src/kernel/xbox_memory_layout.c
++++ b/src/kernel/xbox_memory_layout.c
+@@ -1683,6 +1683,7 @@ uint32_t g_xbox_image_hi = 0;
+ uint32_t g_xbox_region_base = XBOX_REGION_MIN;
+ uint32_t g_xbox_stack_base  = XBOX_REGION_MIN + XBOX_REGION_STACK_OFF;
+ uint32_t g_xbox_stack_size  = 8u * 1024 * 1024;
++static uint32_t g_xbox_stack_commit_pages = 1;
+ uint32_t g_xbox_code_lo = 0;
+ uint32_t g_xbox_code_hi = 0;
+ 
+@@ -2929,6 +2930,12 @@ BOOL xbox_MemoryLayoutInit(const void *xbe_data, size_t xbe_size)
+         g_xbox_region_base = region;
+         g_xbox_stack_base  = stack_base;
+         g_xbox_stack_size  = stack_size;
++        {
++            uint32_t commit = xbe_size >= 0x134 ? *(const uint32_t *)(xbe + 0x130) : 0;
++            if (commit < 4096u) commit = 4096u;
++            if (commit > stack_size) commit = stack_size;
++            g_xbox_stack_commit_pages = (commit + 4095u) / 4096u;
++        }
+         xbox_heap_reset_base();
+ 
+         fprintf(stderr, "  Toolkit region: 0x%08X (image ends 0x%08X)%s\n",
+@@ -4636,6 +4643,72 @@ void xbox_HeapFree(uint32_t xbox_va)
+     ReleaseSRWLockExclusive(&g_heap_lock);
+ }
+ 
++uint32_t xbox_MemoryAvailablePages(void)
++{
++    uint64_t used = 1u + XBOX_GPU_INSTANCE_DEFAULT / CONTIG_PAGE;
++    uint64_t total = g_xbox_total_ram / CONTIG_PAGE;
++    uint32_t previous = 0, tracked_end = XBOX_HEAP_BASE;
++    uint32_t contiguous, p;
++    int i;
++
++    /* The image extent includes its header; gaps count conservatively. The
++     * scratch region is reserved, while the main stack counts its XBE-declared
++     * initial commitment rather than the runtime's 8 MB address reservation. */
++    if (g_xbox_image_hi) {
++        uint32_t start = g_xbox_image_lo < XBOX_BASE_ADDRESS
++                       ? g_xbox_image_lo : XBOX_BASE_ADDRESS;
++        used += ((uint64_t)g_xbox_image_hi + CONTIG_PAGE - 1) / CONTIG_PAGE
++              - start / CONTIG_PAGE;
++    }
++    used += (g_xbox_stack_base - g_xbox_region_base) / CONTIG_PAGE;
++    used += g_xbox_stack_commit_pages;
++
++    /* Heap blocks can share a page. Count the union, not one rounded size per
++     * block, and keep untracked bump allocations conservative if the table
++     * fills. The table is sorted by address, including after reuse. */
++    AcquireSRWLockShared(&g_heap_lock);
++    for (i = 0; i < g_heap_block_count; ++i) {
++        uint32_t first, end, block_end;
++        if (!g_heap_blocks[i].size)
++            continue;
++        block_end = g_heap_blocks[i].addr + g_heap_blocks[i].size;
++        if (block_end > tracked_end)
++            tracked_end = block_end;
++        if (g_heap_blocks[i].free)
++            continue;
++        first = g_heap_blocks[i].addr / CONTIG_PAGE;
++        end = (uint32_t)(((uint64_t)block_end + CONTIG_PAGE - 1) / CONTIG_PAGE);
++        if (first < previous)
++            first = previous;
++        if (end > first)
++            used += end - first;
++        if (end > previous)
++            previous = end;
++    }
++    if (g_heap_block_count >= XBOX_HEAP_MAX_BLOCKS && g_heap_next > tracked_end) {
++        uint32_t first = tracked_end / CONTIG_PAGE;
++        uint32_t end = (uint32_t)(((uint64_t)g_heap_next + CONTIG_PAGE - 1)
++                                  / CONTIG_PAGE);
++        if (first < previous)
++            first = previous;
++        if (end > first)
++            used += end - first;
++    }
++    ReleaseSRWLockShared(&g_heap_lock);
++
++    contig_lock();
++    contiguous = g_contig_pages_in_use;
++    for (p = CONTIG_USABLE; p < CONTIG_PAGES; ++p) {
++        if (g_contig_used[p] == 1)
++            --contiguous; /* already counted as reserved GPU instance memory */
++    }
++    contig_unlock();
++    used += contiguous;
++    used += guest_vmem_committed_pages();
++
++    return used >= total ? 0 : (uint32_t)(total - used);
++}
++
+ HANDLE xbox_GetMappingHandle(void)
+ {
+     return g_mapping_handle;
+diff --git a/src/kernel/xbox_memory_layout.h b/src/kernel/xbox_memory_layout.h
+index 67a8792..46a366e 100644
+--- a/src/kernel/xbox_memory_layout.h
++++ b/src/kernel/xbox_memory_layout.h
+@@ -220,6 +220,10 @@ void xbox_PhysNoteRamName(uint32_t va);
+ const volatile uint8_t *xbox_PhysRamNameMap(void);
+ uint32_t xbox_ContiguousInUseBytes(void);
+ 
++/* Conservative free physical pages from the guest's tracked allocations and
++ * fixed reservations; this is independent of host physical memory. */
++uint32_t xbox_MemoryAvailablePages(void);
++
+ int xbox_Nv2aMirrorFence(uint32_t device_ptr_va,
+                          uint32_t put_off, uint32_t get_ptr_off);
+ 

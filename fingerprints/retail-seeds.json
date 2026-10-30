@@ -1,0 +1,17 @@
+[
+  {
+    "start": "0x0037EE7C",
+    "observed": true,
+    "note": "XPP descriptor callback observed at indirect call 0x0037F1CA; the target begins with a function prologue."
+  },
+  {
+    "start": "0x002F04DC",
+    "observed": true,
+    "note": "Floating-point dispatch table target observed after tutorial loading; it pops both inputs before returning zero."
+  },
+  {
+    "start": "0x002F04E3",
+    "observed": false,
+    "note": "Adjacent floating-point dispatch target reached by direct jumps; it pops both inputs before returning one."
+  }
+]

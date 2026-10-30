@@ -1,0 +1,413 @@
+diff --git a/src/kernel/CMakeLists.txt b/src/kernel/CMakeLists.txt
+index 3488265..9fdf44d 100644
+--- a/src/kernel/CMakeLists.txt
++++ b/src/kernel/CMakeLists.txt
+@@ -31,6 +31,7 @@ set(KERNEL_SOURCES
+     nv2a_vsh_interp.c
+     nv2a_combiner.c
+     nv2a_frame_stats.c
++    nv2a_census.c
+ )
+ 
+ add_library(xbox_kernel STATIC ${KERNEL_SOURCES})
+diff --git a/src/kernel/nv2a_census.c b/src/kernel/nv2a_census.c
+new file mode 100644
+index 0000000..3ce0718
+--- /dev/null
++++ b/src/kernel/nv2a_census.c
+@@ -0,0 +1,138 @@
++/* GPU feature census; see nv2a_census.h. */
++#include <stdio.h>
++#include <stdlib.h>
++#include <string.h>
++
++#include "nv2a_census.h"
++
++#define CENSUS_SLOTS 8192u            /* power of two */
++
++typedef struct {
++    const char *category;
++    uint32_t key;
++    uint64_t count, vertices;
++} CensusEntry;
++
++static CensusEntry s_entries[CENSUS_SLOTS];
++static uint32_t s_used, s_dropped;
++static int s_enabled = -1;
++static int s_gate_open;
++static const char *s_path, *s_gate;
++static uint32_t s_flips_counted;
++
++static void census_init(void)
++{
++    if (s_enabled >= 0)
++        return;
++    s_path = getenv("RECOMP_GPU_CENSUS");
++    s_gate = getenv("RECOMP_GPU_CENSUS_GATE");
++    if (s_gate && !*s_gate)
++        s_gate = NULL;
++    s_enabled = s_path && *s_path;
++    s_gate_open = s_enabled && !s_gate;
++    if (s_enabled)
++        fprintf(stderr, "[GPU] feature census -> %s%s%s\n", s_path,
++                s_gate ? " while this file exists: " : "", s_gate ? s_gate : "");
++}
++
++int nv2a_census_active(void)
++{
++    census_init();
++    return s_gate_open;
++}
++
++void nv2a_census_flip(void)
++{
++    census_init();
++    if (!s_enabled)
++        return;
++    if (s_gate) {
++        FILE *f = fopen(s_gate, "rb");
++        s_gate_open = f != NULL;
++        if (f)
++            fclose(f);
++    }
++    if (s_gate_open)
++        s_flips_counted++;
++}
++
++void nv2a_census_add(const char *category, uint32_t key, uint32_t vertices)
++{
++    uint64_t h;
++    uint32_t i, n;
++
++    if (!nv2a_census_active())
++        return;
++    h = ((uint64_t)(uintptr_t)category * 0x9E3779B97F4A7C15ull) ^ (key * 0xC2B2AE3D27D4EB4Full);
++    i = (uint32_t)(h >> 40) & (CENSUS_SLOTS - 1);
++    for (n = 0; n < CENSUS_SLOTS; n++, i = (i + 1) & (CENSUS_SLOTS - 1)) {
++        CensusEntry *e = &s_entries[i];
++        if (!e->category) {
++            if (s_used >= CENSUS_SLOTS * 3 / 4) {
++                s_dropped++;
++                return;
++            }
++            e->category = category;
++            e->key = key;
++            s_used++;
++        } else if (e->category != category || e->key != key) {
++            continue;
++        }
++        e->count++;
++        e->vertices += vertices;
++        return;
++    }
++    s_dropped++;
++}
++
++static int entry_order(const void *pa, const void *pb)
++{
++    const CensusEntry *a = (const CensusEntry *)pa, *b = (const CensusEntry *)pb;
++    int c;
++
++    if (!a->category || !b->category)
++        return !a->category - !b->category;
++    c = strcmp(a->category, b->category);
++    if (c)
++        return c;
++    if (a->count != b->count)
++        return a->count < b->count ? 1 : -1;
++    return a->key < b->key ? -1 : a->key > b->key;
++}
++
++void nv2a_census_write(void)
++{
++    static CensusEntry sorted[CENSUS_SLOTS];
++    char temp[1024];
++    FILE *f;
++    uint32_t i;
++
++    census_init();
++    if (!s_enabled)
++        return;
++    memcpy(sorted, s_entries, sizeof sorted);
++    qsort(sorted, CENSUS_SLOTS, sizeof sorted[0], entry_order);
++    snprintf(temp, sizeof temp, "%s.tmp", s_path);
++    f = fopen(temp, "w");
++    if (!f)
++        return;
++    fprintf(f, "# GPU feature census: %u flips counted, %u keys, %u dropped\n",
++            s_flips_counted, s_used, s_dropped);
++    fprintf(f, "category,key,count,vertices\n");
++    for (i = 0; i < CENSUS_SLOTS && sorted[i].category; i++)
++        fprintf(f, "%s,%08X,%llu,%llu\n", sorted[i].category, sorted[i].key,
++                (unsigned long long)sorted[i].count,
++                (unsigned long long)sorted[i].vertices);
++    if (fclose(f) != 0)
++        return;
++    remove(s_path);
++    rename(temp, s_path);
++}
++
++void nv2a_census_reset(void)
++{
++    memset(s_entries, 0, sizeof s_entries);
++    s_used = s_dropped = s_flips_counted = 0;
++    s_enabled = -1;
++    s_gate_open = 0;
++}
+diff --git a/src/kernel/nv2a_census.h b/src/kernel/nv2a_census.h
+new file mode 100644
+index 0000000..b552417
+--- /dev/null
++++ b/src/kernel/nv2a_census.h
+@@ -0,0 +1,40 @@
++/*
++ * GPU feature census (RECOMP_GPU_CENSUS=<file>).
++ *
++ * Which NV2A features a title actually uses decides which ones a renderer
++ * must implement. The executor counts, per draw, the transform path,
++ * primitive, render states, texture stages and formats, combiner setup,
++ * surfaces and render-to-texture, and the methods it does not handle; this
++ * keeps the counts and writes them as a table. Values are the registers'
++ * own encodings, written in hex, so nothing about a renderer's model of
++ * them is assumed.
++ *
++ * Counting can be confined to part of a run: with RECOMP_GPU_CENSUS_GATE
++ * naming a file, counting is on only while that file exists (checked at
++ * each flip), so a harness can census one scene. The table is rewritten at
++ * every periodic report, so a run ended by a watchdog still leaves it.
++ *
++ * Executor-thread only; no locking.
++ */
++#ifndef NV2A_CENSUS_H
++#define NV2A_CENSUS_H
++
++#include <stdint.h>
++
++/* 1 when counting is enabled and, if gated, the gate is open. */
++int nv2a_census_active(void);
++
++/* Re-check the gate. Called once per flip. */
++void nv2a_census_flip(void);
++
++/* Count one occurrence of key in category, with a vertex weight. The
++ * category must be a string literal: entries keep the pointer. */
++void nv2a_census_add(const char *category, uint32_t key, uint32_t vertices);
++
++/* Rewrite the census file. Does nothing when disabled. */
++void nv2a_census_write(void);
++
++/* For tests: forget the switches and all counts. */
++void nv2a_census_reset(void);
++
++#endif /* NV2A_CENSUS_H */
+diff --git a/src/kernel/nv2a_pb_exec.c b/src/kernel/nv2a_pb_exec.c
+index a78e04d..e0aa62e 100644
+--- a/src/kernel/nv2a_pb_exec.c
++++ b/src/kernel/nv2a_pb_exec.c
+@@ -43,6 +43,7 @@
+ #include "nv2a_window_clip.h"
+ #include "nv2a_texture_sample.h"
+ #include "nv2a_frame_stats.h"
++#include "nv2a_census.h"
+ #if defined(_WIN32)
+ #include <windows.h>
+ #define NV_TLS __declspec(thread)
+@@ -539,6 +540,7 @@ static void note_unhandled(uint32_t method, uint32_t param)
+ {
+     uint16_t *slot = &s_unhandled_slot[(method & 0x1FFC) / 4];
+ 
++    nv2a_census_add("unhandled_method", method, 0);
+     s_gpu.unhandled_total++;
+     if (*slot) {
+         s_unhandled[*slot - 1].count++;
+@@ -3145,15 +3147,136 @@ static void raster_batch_program(void)
+         backend_flush(!s_xf_no_tex);
+ }
+ 
++/* RECOMP_GPU_CENSUS (nv2a_census.h): what this draw asks of the GPU, in the
++ * registers' own encodings. Read from the executor's state and the register
++ * mirror, not from what the rasteriser does with them. */
++#define CENSUS_RECENT_SURFACES 16
++static struct {
++    uint32_t base, bytes, size;         /* resolved colour surface, w << 16 | h */
++} s_census_surfaces[CENSUS_RECENT_SURFACES];
++static uint32_t s_census_surface_next;
++
++static void census_note_surface(void)
++{
++    uint32_t base = s_gpu.color_offset ? dma_resolve(s_gpu.color_offset) : 0;
++    uint32_t bytes = s_gpu.pitch * (s_gpu.clip_y + s_gpu.clip_h);
++    uint32_t i;
++
++    if (!base || !bytes)
++        return;
++    for (i = 0; i < CENSUS_RECENT_SURFACES; i++)
++        if (s_census_surfaces[i].base == base) {
++            s_census_surfaces[i].bytes = bytes;
++            s_census_surfaces[i].size = s_gpu.clip_w << 16 | s_gpu.clip_h;
++            return;
++        }
++    i = s_census_surface_next++ % CENSUS_RECENT_SURFACES;
++    s_census_surfaces[i].base = base;
++    s_census_surfaces[i].bytes = bytes;
++    s_census_surfaces[i].size = s_gpu.clip_w << 16 | s_gpu.clip_h;
++}
++
++static void census_draw(char path)
++{
++    uint32_t n = s_gpu.idx_count, st, used = 0, stages = 0;
++    uint32_t zeta = s_gpu.zeta_offset ? dma_resolve(s_gpu.zeta_offset) : 0;
++
++    census_note_surface();
++    nv2a_census_add("path", (uint32_t)path, n);
++    nv2a_census_add("source", s_gpu.inline_active ? (s_gpu.imm_count ? 'M' : 'I') : 'A', n);
++    nv2a_census_add("primitive", s_gpu.prim, n);
++    nv2a_census_add("surface_size", s_gpu.clip_w << 16 | s_gpu.clip_h, n);
++    nv2a_census_add("surface_format", s_gpu.format, n);
++    nv2a_census_add("surface_aa", (uint32_t)s_gpu.aa_sx << 4 | (uint32_t)s_gpu.aa_sy, n);
++    nv2a_census_add("combiner_stages", s_gpu.rc_seen ? (s_gpu.rc.control & 0xFF) : 0xFFFFFFFFu, n);
++    nv2a_census_add("combiner_control", s_gpu.rc.control, n);
++    nv2a_census_add("stage_program", s_gpu.rc.stage_program, n);
++    for (st = 0; st < 4; st++) {
++        uint32_t mode = s_gpu.rc_seen ? (s_gpu.rc.stage_program >> (st * 5)) & 0x1F
++                                      : (st == 0 && s_gpu.texs[0].valid);
++        if (mode) {
++            used |= 1u << st;
++            nv2a_census_add("stage_mode", st << 8 | mode, n);
++        }
++    }
++    for (st = 0; st < 4; st++) {
++        const Texture *t = &s_gpu.texs[st];
++        uint32_t layout, i;
++        if (!(used & (1u << st)))
++            continue;
++        stages++;
++        layout = d3d8_format_dxt_block_bytes(t->color) ? 2
++                 : d3d8_format_is_swizzled(t->color) ? 1 : 0;
++        nv2a_census_add("texture_format", t->color | layout << 8 | (uint32_t)t->cube << 12
++                        | (uint32_t)t->valid << 16, n);
++        nv2a_census_add("texture_size", t->width << 16 | t->height, n);
++        nv2a_census_add("texture_address", t->addr_u | t->addr_v << 8, n);
++        nv2a_census_add("texture_filter", t->filter, n);
++        nv2a_census_add("texture_levels", t->levels, n);
++        for (i = 0; i < CENSUS_RECENT_SURFACES; i++)
++            if (s_census_surfaces[i].bytes && t->offset >= s_census_surfaces[i].base
++                && t->offset - s_census_surfaces[i].base < s_census_surfaces[i].bytes)
++                nv2a_census_add("render_to_texture", s_census_surfaces[i].size, n);
++        if (zeta && t->offset == zeta)
++            nv2a_census_add("zeta_as_texture", t->color, n);
++    }
++    nv2a_census_add("texture_stages", stages, n);
++    nv2a_census_add("blend", s_gpu.blend_enable ? s_gpu.blend_sfactor << 16
++                    | (s_gpu.blend_dfactor & 0xFFFF) : 0, n);
++    nv2a_census_add("blend_equation", s_gpu.blend_enable ? s_gpu.blend_equation : 0, n);
++    nv2a_census_add("alpha_test", s_gpu.alpha_test ? s_gpu.alpha_func : 0, n);
++    nv2a_census_add("depth_test", s_gpu.depth_test ? s_gpu.depth_func : 0, n);
++    nv2a_census_add("depth_write", s_gpu.depth_mask, n);
++    nv2a_census_add("color_mask", s_gpu.color_mask, n);
++    nv2a_census_add("fog", s_gpu.fog_enable ? s_gpu.fog_mode : 0, n);
++    nv2a_census_add("cull", s_reg[0x0308 / 4] ? s_reg[0x039C / 4] << 16 | s_reg[0x03A0 / 4] : 0, n);
++    nv2a_census_add("stencil_test", s_reg[0x032C / 4] ? s_reg[0x0364 / 4] : 0, n);
++    if (s_reg[0x032C / 4])
++        nv2a_census_add("stencil_ops", s_reg[0x0370 / 4] << 20 ^ s_reg[0x0374 / 4] << 10
++                        ^ s_reg[0x0378 / 4], n);
++    nv2a_census_add("window_clip_type", s_reg[0x02B4 / 4], n);
++    nv2a_census_add("clip_plane_mode", s_gpu.clip_plane_mode, n);
++    nv2a_census_add("point_params", s_reg[0x0318 / 4] | s_reg[0x031C / 4] << 4, n);
++    nv2a_census_add("polygon_offset", s_reg[0x0330 / 4] | s_reg[0x0334 / 4] << 4
++                    | s_reg[0x0338 / 4] << 8, n);
++    if (path == 'P')
++        nv2a_census_add("program_constant_writes", s_reg[0x1E98 / 4], n);
++    if (path == 'F')
++        nv2a_census_add("ffp_lighting", s_reg[0x0314 / 4], n);
++}
++
++/* RECOMP_PROBE_DROP_TRANSFORMED=1: a measurement aid, never a renderer
++ * setting. Batches that need a transform (a vertex program or the
++ * fixed-function pipeline) are dropped before any vertex is transformed, so
++ * a run shows what the pushbuffer walk and the title cost without vertex or
++ * pixel work. The picture is wrong by design. */
++static int probe_drop_transformed(void)
++{
++    static int on = -1;
++    if (on < 0) {
++        const char *e = getenv("RECOMP_PROBE_DROP_TRANSFORMED");
++        on = e && strcmp(e, "1") == 0;
++        if (on)
++            fprintf(stderr, "[GPU] PROBE: dropping every transformed batch"
++                            " (RECOMP_PROBE_DROP_TRANSFORMED)\n");
++    }
++    return on;
++}
++
+ static void raster_batch(void)
+ {
+     uint32_t i;
+     uint32_t before = s_gpu.tris_drawn;
+     int textured = 0;
+ 
++    if (nv2a_census_active())
++        census_draw(s_gpu.idx_count < 3 ? 'x' : batch_uses_program() ? 'P'
++                    : batch_is_ffp() ? 'F' : batch_is_screen_space() ? 'S' : 'U');
+     if (s_gpu.idx_count < 3)
+         return;
+     if (batch_uses_program() || batch_is_ffp()) {
++        if (probe_drop_transformed())
++            return;
+         raster_batch_program();
+         return;
+     }
+@@ -4186,6 +4309,11 @@ void nv2a_pb_exec_method(uint32_t subch, uint32_t method, uint32_t param)
+             fprintf(stderr, "[FTRACE] clear %X surf %08X %ux%u colour %08X%c",
+                     param, s_gpu.color_offset, s_gpu.clip_w, s_gpu.clip_h,
+                     s_gpu.clear_color, 10);
++        if (nv2a_census_active()) {
++            census_note_surface();
++            nv2a_census_add("clear_flags", param, 0);
++            nv2a_census_add("clear_surface", s_gpu.clip_w << 16 | s_gpu.clip_h, 0);
++        }
+         clear_surface(param);
+         if (param & 0x01)                         /* Z */
+             zbuf_clear();
+@@ -4359,6 +4487,9 @@ void nv2a_pb_exec_method(uint32_t subch, uint32_t method, uint32_t param)
+             }
+         }
+         frame_stats_flip();
++        if (nv2a_census_active())
++            nv2a_census_add("flip_surface", s_gpu.drawn_w << 16 | s_gpu.drawn_h, 0);
++        nv2a_census_flip();
+         s_gpu.drawn_stale = 1;
+         if (s_backend && s_backend->flip)
+             s_backend->flip();
+@@ -4706,6 +4837,7 @@ void nv2a_pb_exec_report(void)
+         last_ms = now;
+     }
+     flip_hold_report();
++    nv2a_census_write();
+     if (s_frame_stats_on > 0) {
+         uint32_t flips, distinct, unknown;
+         nv2a_frame_stats_take_report(&s_frame_stats, &flips, &distinct, &unknown);
+diff --git a/tests/nv2a_ffp_backend/CMakeLists.txt b/tests/nv2a_ffp_backend/CMakeLists.txt
+index d24de2d..79bc2c2 100644
+--- a/tests/nv2a_ffp_backend/CMakeLists.txt
++++ b/tests/nv2a_ffp_backend/CMakeLists.txt
+@@ -6,6 +6,7 @@ add_executable(nv2a-ffp-backend-test nv2a_ffp_backend_test.c
+     ../../src/kernel/nv2a_vsh_interp.c
+     ../../src/kernel/nv2a_combiner.c
+     ../../src/kernel/nv2a_frame_stats.c
++    ../../src/kernel/nv2a_census.c
+     ../../src/kernel/nv2a_flip_hold.c)
+ target_include_directories(nv2a-ffp-backend-test PRIVATE ../../src/kernel ../../src)
+ if(MSVC)
+diff --git a/tests/nv2a_raster_batch/CMakeLists.txt b/tests/nv2a_raster_batch/CMakeLists.txt
+index 0d519f9..1bc4d1c 100644
+--- a/tests/nv2a_raster_batch/CMakeLists.txt
++++ b/tests/nv2a_raster_batch/CMakeLists.txt
+@@ -6,6 +6,7 @@ add_executable(nv2a-raster-batch-test nv2a_raster_batch_test.c
+     ../../src/kernel/nv2a_vsh_interp.c
+     ../../src/kernel/nv2a_combiner.c
+     ../../src/kernel/nv2a_frame_stats.c
++    ../../src/kernel/nv2a_census.c
+     ../../src/kernel/nv2a_flip_hold.c)
+ target_include_directories(nv2a-raster-batch-test PRIVATE ../../src/kernel ../../src)
+ if(MSVC)

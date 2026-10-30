@@ -1,0 +1,19 @@
+# The disc, extracted game files, and anything generated from them stay local.
+*.iso
+*.xiso
+*.xbe
+/game/
+/analysis/
+/generated/
+/xbox_kernel.log
+
+# Downloaded dependencies and build products.
+/.deps/
+/.venv/
+/build/
+/.pytest_cache/
+__pycache__/
+*.py[cod]
+
+# The workspace also contains an unrelated disc-image source note.
+/Vimm's Lair.txt

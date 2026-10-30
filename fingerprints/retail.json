@@ -1,0 +1,7 @@
+{
+  "description": "Brute Force, North American retail executable observed on the supplied disc",
+  "title_id": "0x4D53001E",
+  "entry_point": "0x002F5D1F",
+  "xbe_size": 4366336,
+  "xbe_sha256": "25b1389b9593f280f1ab0382a776a050977ccb1e4b90611c59e2938286292e16"
+}

@@ -1,0 +1,60 @@
+diff --git a/src/kernel/nv2a_pb_exec.c b/src/kernel/nv2a_pb_exec.c
+index a513bc7..aaf118f 100644
+--- a/src/kernel/nv2a_pb_exec.c
++++ b/src/kernel/nv2a_pb_exec.c
+@@ -376,8 +376,27 @@ static float reg_f(uint32_t method)
+ }
+ 
+ /* Where BACK_END_WRITE_SEMAPHORE_RELEASE lands; see nv2a_backend.h. */
++#if defined(_WIN32)
++static volatile LONG s_sem_va;
++void nv2a_pb_set_semaphore_target(uint32_t guest_va)
++{
++    InterlockedExchange(&s_sem_va, (LONG)guest_va);
++}
++static uint32_t semaphore_target(void)
++{
++    return (uint32_t)InterlockedCompareExchange(&s_sem_va, 0, 0);
++}
++#else
+ static uint32_t s_sem_va;
+-void nv2a_pb_set_semaphore_target(uint32_t guest_va) { s_sem_va = guest_va; }
++void nv2a_pb_set_semaphore_target(uint32_t guest_va)
++{
++    __atomic_store_n(&s_sem_va, guest_va, __ATOMIC_RELEASE);
++}
++static uint32_t semaphore_target(void)
++{
++    return __atomic_load_n(&s_sem_va, __ATOMIC_ACQUIRE);
++}
++#endif
+ 
+ /* Unhandled methods, ranked. The interesting output is not that something was
+  * skipped but which things dominate, because that is the order to implement
+@@ -3751,10 +3770,13 @@ void nv2a_pb_exec_method(uint32_t subch, uint32_t method, uint32_t param)
+     /* BACK_END_WRITE_SEMAPHORE_RELEASE. The title's pointer already names the
+      * semaphore word; SET_SEMAPHORE_OFFSET is not added (in X-Men Legends it
+      * held 0xFF000000 at times, which put the write outside guest memory). */
+-    if (subch == 0 && method == 0x1D70 && s_sem_va) {
+-        uint8_t *mem = (uint8_t *)xbox_GetMemoryOffset();
+-        *(volatile uint32_t *)(mem + s_sem_va) = param;
+-        return;
++    if (subch == 0 && method == 0x1D70) {
++        uint32_t sem_va = semaphore_target();
++        if (sem_va) {
++            uint8_t *mem = (uint8_t *)xbox_GetMemoryOffset();
++            *(volatile uint32_t *)(mem + sem_va) = param;
++            return;
++        }
+     }
+     if (!inited) {
+         inited = 1;
+@@ -3844,7 +3866,7 @@ void nv2a_pb_exec_method(uint32_t subch, uint32_t method, uint32_t param)
+ 
+         if (!r)
+             return;
+-        if (!s_sem_va) {
++        if (!semaphore_target()) {
+             uint32_t va = xbox_Nv2aFenceWordVa();
+ 
+             if (va) {

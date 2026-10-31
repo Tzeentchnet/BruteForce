@@ -8,6 +8,7 @@
 #include "kernel.h"
 #include "nv2a_backend.h"
 #include "xbox_memory_layout.h"
+#include "platform/host_time.h"
 
 #define BRUTEFORCE_DEVICE_GLOBAL 0x0037DD88u
 #define BRUTEFORCE_DEVICE_SEMAPHORE_OFFSET 0x30u
@@ -17,6 +18,7 @@
 #define BRUTEFORCE_XPP_CLI 0x00384FA5u
 #define BRUTEFORCE_XPP_STI 0x00384FB6u
 #define BRUTEFORCE_EFLAGS_IF 0x00000200u
+#define BRUTEFORCE_DAC_RAMP_BYTES (256u * 3u)
 
 typedef void (*recomp_func_t)(void);
 extern void sub_00377F80_gen(void);
@@ -60,6 +62,102 @@ static void invalid_gpu_pointer(const char *name, uint32_t va)
 {
     fprintf(stderr, "[GPU] Invalid %s guest address 0x%08X\n", name, va);
     abort();
+}
+
+static void read_dac_trace_guest(uint32_t va, void *out, size_t size, const char *name)
+{
+    const uint64_t end = (uint64_t)va + size;
+    const uintptr_t offset = (uintptr_t)xbox_GetMemoryOffset();
+    const DWORD readable = PAGE_READONLY | PAGE_READWRITE | PAGE_WRITECOPY |
+                           PAGE_EXECUTE_READ | PAGE_EXECUTE_READWRITE | PAGE_EXECUTE_WRITECOPY;
+    uintptr_t host, cursor, host_end;
+    SIZE_T copied = 0;
+
+    if (!va || !size ||
+        !(end <= XBOX_CONTIG_SIZE ||
+          (va >= XBOX_CONTIG_BASE && end <= (uint64_t)XBOX_CONTIG_BASE + XBOX_CONTIG_SIZE)) ||
+        offset > UINTPTR_MAX - va || size > UINTPTR_MAX - (offset + va)) {
+        fprintf(stderr, "[DAC-TRACE] invalid %s guest range 0x%08X + %zu\n", name, va, size);
+        fflush(stderr);
+        abort();
+    }
+    host = offset + va;
+    host_end = host + size;
+    cursor = host;
+    while (cursor < host_end) {
+        MEMORY_BASIC_INFORMATION info;
+        uintptr_t region;
+        if (VirtualQuery((const void *)cursor, &info, sizeof(info)) != sizeof(info) ||
+            info.State != MEM_COMMIT || (info.Protect & (PAGE_GUARD | PAGE_NOACCESS)) ||
+            !(info.Protect & readable)) {
+            fprintf(stderr, "[DAC-TRACE] cannot read %s at 0x%08X: "
+                            "guest memory is inaccessible or guarded\n", name, va);
+            fflush(stderr);
+            abort();
+        }
+        region = (uintptr_t)info.BaseAddress;
+        if (cursor < region || info.RegionSize > UINTPTR_MAX - region ||
+            cursor >= region + info.RegionSize) {
+            fprintf(stderr, "[DAC-TRACE] cannot read %s at 0x%08X: invalid host region\n",
+                    name, va);
+            fflush(stderr);
+            abort();
+        }
+        cursor = region + info.RegionSize;
+    }
+    if (!ReadProcessMemory(GetCurrentProcess(), (const void *)host, out, size, &copied) ||
+        copied != size) {
+        fprintf(stderr, "[DAC-TRACE] cannot read %s at 0x%08X (%zu of %zu bytes, "
+                        "Windows error %lu)\n",
+                name, va, (size_t)copied, size, (unsigned long)GetLastError());
+        fflush(stderr);
+        abort();
+    }
+}
+
+void sub_0037834E_enter(void)
+{
+    static SRWLOCK lock = SRWLOCK_INIT;
+    static uint64_t sequence;
+    static const char digits[] = "0123456789abcdef";
+    const char *enabled = getenv("BRUTEFORCE_DAC_TRACE");
+    uint8_t ramp[BRUTEFORCE_DAC_RAMP_BYTES];
+    char hex[BRUTEFORCE_DAC_RAMP_BYTES * 2u + 1u];
+    uint32_t base;
+    size_t i;
+    int written;
+
+    if (!enabled || !*enabled || strcmp(enabled, "0") == 0)
+        return;
+    if (strcmp(enabled, "1") != 0) {
+        fprintf(stderr, "[DAC-TRACE] BRUTEFORCE_DAC_TRACE must be 0 or 1\n");
+        fflush(stderr);
+        abort();
+    }
+
+    /* This entry receives the miniport in EAX and planar RGB bytes in EDX. */
+    read_dac_trace_guest(g_eax, &base, sizeof(base), "miniport");
+    read_dac_trace_guest(g_edx, ramp, sizeof(ramp), "ramp");
+    for (i = 0; i < sizeof(ramp); ++i) {
+        hex[i * 2u] = digits[ramp[i] >> 4];
+        hex[i * 2u + 1u] = digits[ramp[i] & 15u];
+    }
+    hex[sizeof(hex) - 1u] = '\0';
+
+    AcquireSRWLockExclusive(&lock);
+    if (sequence == UINT64_MAX) {
+        fprintf(stderr, "[DAC-TRACE] sequence overflow\n");
+        fflush(stderr);
+        abort();
+    }
+    written = fprintf(stderr, "[DAC-TRACE] seq=%llu t_us=%llu miniport_va=%08X "
+                              "base=%08X ramp_va=%08X planar_rgb=%s\n",
+                      (unsigned long long)++sequence,
+                      (unsigned long long)(xbox_HostNowNs() / 1000u),
+                      g_eax, base, g_edx, hex);
+    if (written < 0 || fflush(stderr) != 0)
+        abort();
+    ReleaseSRWLockExclusive(&lock);
 }
 
 static uint32_t registered_miniport;

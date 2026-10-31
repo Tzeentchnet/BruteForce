@@ -1,0 +1,2973 @@
+diff --git a/src/kernel/nv2a_pb_exec.c b/src/kernel/nv2a_pb_exec.c
+index 8cbb19da52993fad29a5a6f4337a6fcd1fb58e7d..50e7defee6233c59101c279003272cdd92739e81 100644
+--- a/src/kernel/nv2a_pb_exec.c
++++ b/src/kernel/nv2a_pb_exec.c
+@@ -50,6 +50,9 @@
+ #define GPU_AUDIT(call) do { if (nv2a_gpu_audit_enabled()) { call; } } while (0)
+ #if defined(_WIN32)
+ #include <windows.h>
++#include <fcntl.h>
++#include <io.h>
++#include "../video/present_provenance.h"
+ #define NV_TLS __declspec(thread)
+ #else
+ #define NV_TLS __thread
+@@ -62,6 +65,10 @@ extern uint32_t xbox_Nv2aFenceWordVa(void);
+ extern int nv2a_pb_dma_walk(void);   /* nv2a_pb_scan.c: RECOMP_PB_WALK=dma */
+ extern void xbox_FramebufferWindowStart(void);
+ extern uint32_t g_xbox_image_lo, g_xbox_image_hi;
++#if defined(_WIN32)
++extern void xbox_FramebufferWindowPresentTagged(uint32_t, uint32_t,
++                                                 const RecompPresentTag *);
++#endif
+ 
+ /* Would writing this surface land on the title's own image?
+  *
+@@ -4607,6 +4614,64 @@ static int s_frame_in_guest;
+  * load index), for the frame statistics' constants column. */
+ static uint64_t s_frame_constants;
+ 
++#if defined(_WIN32)
++static int presenter_capture_requested(void)
++{
++    const char *path = getenv("RECOMP_PRESENTER_CAPTURE");
++    return path && *path;
++}
++
++/* A capture's statistics file must be new and have only one writer.  Its
++ * identity accompanies the flip candidate, so a different run's CSV cannot
++ * accidentally validate it.  The ordinary statistics path is unchanged. */
++static int frame_stats_open_for_capture(Nv2aFrameStats *s, const char *path)
++{
++    HANDLE h;
++    int fd;
++    FILE *f;
++
++    h = CreateFileA(path, GENERIC_WRITE, FILE_SHARE_READ, NULL, CREATE_NEW,
++                    FILE_ATTRIBUTE_NORMAL, NULL);
++    if (h == INVALID_HANDLE_VALUE)
++        return 0;
++    fd = _open_osfhandle((intptr_t)h, _O_WRONLY | _O_TEXT);
++    if (fd < 0) {
++        CloseHandle(h);
++        return 0;
++    }
++    f = _fdopen(fd, "w");
++    if (!f) {
++        _close(fd);
++        return 0;
++    }
++    memset(s, 0, sizeof *s);
++    s->file = f;
++    if (fputs("flip,t_us,draws,program_vertices,hash,distinct,constants\n", f) == EOF ||
++        fflush(f) != 0) {
++        fclose(f);
++        s->file = NULL;
++        return 0;
++    }
++    return 1;
++}
++
++static int frame_stats_file_identity(uint32_t *volume, uint64_t *index)
++{
++    BY_HANDLE_FILE_INFORMATION info;
++    intptr_t h;
++
++    if (!s_frame_stats.file)
++        return 0;
++    h = _get_osfhandle(_fileno(s_frame_stats.file));
++    if (h == -1 || !GetFileInformationByHandle((HANDLE)h, &info) ||
++        (info.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY))
++        return 0;
++    *volume = info.dwVolumeSerialNumber;
++    *index = ((uint64_t)info.nFileIndexHigh << 32) | info.nFileIndexLow;
++    return *index != 0;
++}
++#endif
++
+ static void frame_constants_mix(uint32_t word)
+ {
+     s_frame_constants = (s_frame_constants ^ word) * 0x100000001B3ull + 0x9E37u;
+@@ -4618,11 +4683,25 @@ static int frame_stats_on(void)
+         const char *path = getenv("RECOMP_FRAME_STATS");
+         s_frame_stats_on = 0;
+         if (path && *path) {
+-            if (nv2a_frame_stats_open(&s_frame_stats, path)) {
++            int opened;
++#if defined(_WIN32)
++            opened = presenter_capture_requested()
++                   ? frame_stats_open_for_capture(&s_frame_stats, path)
++                   : nv2a_frame_stats_open(&s_frame_stats, path);
++#else
++            opened = nv2a_frame_stats_open(&s_frame_stats, path);
++#endif
++            if (opened) {
+                 s_frame_stats_on = 1;
+                 fprintf(stderr, "[GPU] frame statistics -> %s\n", path);
+             } else {
+                 fprintf(stderr, "[GPU] cannot open RECOMP_FRAME_STATS file %s\n", path);
++#if defined(_WIN32)
++                if (presenter_capture_requested()) {
++                    fprintf(stderr, "[PRESCAP] statistics path must be new and writable; refusing capture\n");
++                    abort();
++                }
++#endif
+             }
+         }
+     }
+@@ -5266,6 +5345,34 @@ void nv2a_pb_exec_method(uint32_t subch, uint32_t method, uint32_t param)
+             if (done) {
+                 xbox_FramebufferWindowSet(dma_resolve(done), pitch);
+                 xbox_FramebufferWindowSetAA(s_gpu.aa_sy > 1.5f ? 2 : 1);
++#if defined(_WIN32)
++                if (presenter_capture_requested()) {
++                    enum RecompPresentStats stats = RECOMP_PRESENT_STATS_DISABLED;
++                    enum RecompPresentPixels pixels;
++                    uint32_t volume = 0;
++                    uint64_t index = 0;
++                    RecompPresentTag tag;
++
++                    if (!backend_draws())
++                        pixels = RECOMP_PRESENT_PIXELS_CPU;
++                    else if (s_frame_in_guest)
++                        pixels = RECOMP_PRESENT_PIXELS_READBACK;
++                    else if (s_xbackend && s_xbackend->readback)
++                        pixels = RECOMP_PRESENT_PIXELS_READBACK_FAILED;
++                    else
++                        pixels = RECOMP_PRESENT_PIXELS_READBACK_UNAVAILABLE;
++                    if (frame_stats_on())
++                        stats = frame_stats_file_identity(&volume, &index)
++                              ? RECOMP_PRESENT_STATS_READY : RECOMP_PRESENT_STATS_NO_ID;
++                    tag = recomp_present_tag(stats, s_frame_stats.flips,
++                                             volume, index, pixels);
++                    if (tag.stats == RECOMP_PRESENT_STATS_EXHAUSTED) {
++                        fprintf(stderr, "[PRESCAP] statistics flip ID exhausted; refusing capture\n");
++                        abort();
++                    }
++                    xbox_FramebufferWindowPresentTagged(dma_resolve(done), pitch, &tag);
++                } else
++#endif
+                 xbox_FramebufferWindowPresent(dma_resolve(done), pitch);
+             }
+         }
+diff --git a/src/video/fb_present.c b/src/video/fb_present.c
+index 24e21d46a93ea84649f30b2a2011de7759530ec7..73ab6e99533ffd53289a63ecca530af00ddc0aea 100644
+--- a/src/video/fb_present.c
++++ b/src/video/fb_present.c
+@@ -26,6 +26,7 @@
+ 
+ #if defined(_WIN32)
+ #include <windows.h>
++#include <dxgi.h>
+ #include <stdio.h>
+ #include <stdlib.h>
+ #include <string.h>
+@@ -39,10 +40,12 @@
+  * them. */
+ #include "keyboard.h"   /* src/input */
+ #include "gpu_present.h"
++#include "present_capture.h"
+ #include "recomp_exit_hook.h"   /* src/platform */
+ #include <stdbool.h>
+ #include "pvideo_scanout.h"
+ #include "../nv2a/nv2a_mmio_hook.h"
++#include "../kernel/kernel.h"
+ 
+ extern ptrdiff_t xbox_GetMemoryOffset(void);
+ 
+@@ -66,6 +69,75 @@ static LONG          s_present_idx = -1;   /* -1 until the first flip */
+ static uint64_t      s_present_id;
+ static SRWLOCK       s_present_lock = SRWLOCK_INIT;
+ 
++typedef struct FbPresentInfo {
++    uint64_t id;
++    uint32_t pitch, bpp, aa_sy;
++    RecompPresentTag tag;
++} FbPresentInfo;
++
++static FbPresentInfo s_present_info;
++static RecompPresenterCapture s_capture;
++static SRWLOCK s_fb_config_lock = SRWLOCK_INIT;
++
++static int fb_capture_requested(void)
++{
++    const char *path = getenv("RECOMP_PRESENTER_CAPTURE");
++    return path && *path;
++}
++
++static void fb_capture_fail(const char *message)
++{
++    fprintf(stderr, "  [PRESCAP] %s; capture incomplete, terminating\n", message);
++    fflush(stderr);
++    TerminateProcess(GetCurrentProcess(), 3);
++    abort();
++}
++
++static int fb_readable_surface(uint32_t va, uint32_t pitch, uint32_t bpp,
++                               uint32_t aa_sy)
++{
++    uintptr_t begin, end, at;
++    uint64_t bytes, row_stride, row_bytes, guest_end;
++
++    if (!va || !pitch || !s_fb_width || !s_fb_height)
++        return 0;
++    if (bpp != 2 && bpp != 4 && bpp != 8)
++        return 1;                       /* the presenter fills black */
++    row_stride = (uint64_t)pitch * (bpp == 8 ? aa_sy : 1);
++    row_bytes = (uint64_t)s_fb_width * bpp;
++    if (s_fb_height > 1 && row_stride > (UINT64_MAX - row_bytes) / (s_fb_height - 1))
++        return 0;
++    bytes = (uint64_t)(s_fb_height - 1) * row_stride + row_bytes;
++    guest_end = (uint64_t)va + bytes;
++    if (guest_end < bytes ||
++        !(guest_end <= XBOX_CONTIG_SIZE ||
++          ((uint64_t)va >= XBOX_CONTIG_BASE &&
++           guest_end <= (uint64_t)XBOX_CONTIG_BASE + XBOX_CONTIG_SIZE)))
++        return 0;
++    begin = (uintptr_t)va + (uintptr_t)xbox_GetMemoryOffset();
++    if (!bytes || bytes > UINTPTR_MAX - begin)
++        return 0;
++    end = begin + (uintptr_t)bytes;
++    for (at = begin; at < end;) {
++        MEMORY_BASIC_INFORMATION m;
++        uintptr_t next;
++        DWORD access;
++        if (!VirtualQuery((const void *)at, &m, sizeof m) || m.State != MEM_COMMIT ||
++            (m.Protect & (PAGE_GUARD | PAGE_NOACCESS)))
++            return 0;
++        access = m.Protect & 0xffu;
++        if (access != PAGE_READONLY && access != PAGE_READWRITE &&
++            access != PAGE_WRITECOPY && access != PAGE_EXECUTE_READ &&
++            access != PAGE_EXECUTE_READWRITE && access != PAGE_EXECUTE_WRITECOPY)
++            return 0;
++        next = (uintptr_t)m.BaseAddress + m.RegionSize;
++        if (next <= at)
++            return 0;
++        at = next;
++    }
++    return 1;
++}
++
+ /* The last PVIDEO frame shown. A frame stays on screen until the next one or
+  * STOP, but once its bank is consumed the title may reuse the memory, so the
+  * pixels are kept here rather than read again. */
+@@ -76,19 +148,19 @@ static uint32_t      s_pvideo_regs[0x1000 / 4];
+ 
+ /* Draw the video overlay over s_rgb: a newly submitted bank if there is one
+  * (copied, drawn, then handed back to the title), else the last frame. */
+-static void fb_overlay(void)
++static int fb_overlay(void)
+ {
+     uint32_t regs[0x1000 / 4];
+     unsigned bank;
+     bool presented = false;
+ 
+-    if (!s_rgb || !nv2a_hook_pvideo_snapshot(regs)) return;
++    if (!s_rgb || !nv2a_hook_pvideo_snapshot(regs)) return 0;
+     if ((regs[NV_PVIDEO_STOP / 4] & 1u) ||
+         (s_pvideo_source &&
+          regs[(NV_PVIDEO_SIZE_IN + s_pvideo_bank * 4) / 4] == UINT32_MAX)) {
+         free(s_pvideo_source);
+         s_pvideo_source = NULL;
+-        if (regs[NV_PVIDEO_STOP / 4] & 1u) return;
++        if (regs[NV_PVIDEO_STOP / 4] & 1u) return 0;
+     }
+     for (bank = 0; bank < 2; ++bank) {
+         uint64_t physical = (uint64_t)regs[(NV_PVIDEO_BASE + bank * 4) / 4] +
+@@ -126,8 +198,9 @@ static void fb_overlay(void)
+         nv2a_hook_pvideo_consume(bank);
+     }
+     if (!presented && s_pvideo_source)
+-        pvideo_scanout(s_pvideo_regs, s_pvideo_source, s_pvideo_bytes, s_rgb,
+-                       s_fb_width, s_fb_height, s_pvideo_bank);
++        presented = pvideo_scanout(s_pvideo_regs, s_pvideo_source, s_pvideo_bytes, s_rgb,
++                                   s_fb_width, s_fb_height, s_pvideo_bank) != 0;
++    return presented;
+ }
+ 
+ void xbox_FramebufferWindowSet(uint32_t fb_va, uint32_t pitch)
+@@ -137,10 +210,15 @@ void xbox_FramebufferWindowSet(uint32_t fb_va, uint32_t pitch)
+      * "the read path is broken" from "the title rendered black", and pointing
+      * it at memory known to have content settles that. */
+     const char *pin = getenv("RECOMP_FB_VA");
++    int diagnostic = fb_capture_requested();
+ 
++    if (diagnostic)
++        AcquireSRWLockExclusive(&s_fb_config_lock);
+     s_fb_va = pin ? (uint32_t)strtoul(pin, NULL, 0) : fb_va;
+     if (pitch)
+         s_fb_pitch = pitch;
++    if (diagnostic)
++        ReleaseSRWLockExclusive(&s_fb_config_lock);
+ }
+ 
+ /* Vertical anti-aliasing factor of the surface being shown: 2 for 2x2, where
+@@ -150,35 +228,55 @@ static uint32_t s_fb_aa_sy = 1;
+ 
+ void xbox_FramebufferWindowSetAA(uint32_t sy)
+ {
++    int diagnostic = fb_capture_requested();
++    if (diagnostic)
++        AcquireSRWLockExclusive(&s_fb_config_lock);
+     s_fb_aa_sy = sy ? sy : 1;
++    if (diagnostic)
++        ReleaseSRWLockExclusive(&s_fb_config_lock);
+ }
+ 
+ /* Called by the pushbuffer executor when the title flips. */
+-void xbox_FramebufferWindowPresent(uint32_t fb_va, uint32_t pitch)
++static void fb_publish(uint32_t fb_va, uint32_t pitch, const RecompPresentTag *tag)
+ {
+     const uint8_t *src;
+     LONG next;
+-    uint32_t bpp, x, y;
++    uint32_t bpp, x, y, aa_sy = 0;
++    int diagnostic = tag != NULL || fb_capture_requested();
+ 
+     if (!s_fb_running || !fb_va || !pitch)
+         return;
+     if (getenv("RECOMP_FB_VA"))
+         return;                       /* pinned: leave the old path alone */
++    bpp = pitch / s_fb_width;
++    if (diagnostic) {
++        AcquireSRWLockShared(&s_fb_config_lock);
++        aa_sy = s_fb_aa_sy;
++        ReleaseSRWLockShared(&s_fb_config_lock);
++    }
++    if (diagnostic && !fb_readable_surface(fb_va, pitch, bpp, aa_sy))
++        fb_capture_fail("published framebuffer input is not readable");
+     AcquireSRWLockExclusive(&s_present_lock);
++    if (diagnostic && s_present_id == UINT64_MAX) {
++        ReleaseSRWLockExclusive(&s_present_lock);
++        fb_capture_fail("publication ID exhausted");
++    }
+     next = (s_present_idx == 0) ? 1 : 0;
+     if (!s_present[next]) {
+         s_present[next] = (uint32_t *)calloc((size_t)s_fb_width * s_fb_height,
+                                              4);
+         if (!s_present[next]) {
+             ReleaseSRWLockExclusive(&s_present_lock);
++            if (diagnostic)
++                fb_capture_fail("cannot allocate a published frame");
+             fprintf(stderr, "  [FBWIN] cannot allocate a presentation frame\n");
+             return;
+         }
+     }
+-    bpp = pitch / s_fb_width;
+     src = (const uint8_t *)((uintptr_t)fb_va + xbox_GetMemoryOffset());
+     for (y = 0; y < s_fb_height; y++) {
+-        const uint8_t *row = src + (size_t)y * pitch * (bpp == 8 ? s_fb_aa_sy : 1);
++        const uint8_t *row = src + (size_t)y * pitch
++                           * (bpp == 8 ? (diagnostic ? aa_sy : s_fb_aa_sy) : 1);
+         uint32_t *dst = s_present[next] + (size_t)y * s_fb_width;
+ 
+         if (bpp == 4) {
+@@ -204,9 +302,30 @@ void xbox_FramebufferWindowPresent(uint32_t fb_va, uint32_t pitch)
+     }
+     s_present_idx = next;
+     s_present_id++;
++    s_present_info.id = s_present_id;
++    s_present_info.pitch = pitch;
++    s_present_info.bpp = bpp;
++    s_present_info.aa_sy = diagnostic ? aa_sy : s_fb_aa_sy;
++    if (tag)
++        s_present_info.tag = *tag;
++    else
++        memset(&s_present_info.tag, 0, sizeof s_present_info.tag);
+     ReleaseSRWLockExclusive(&s_present_lock);
+ }
+ 
++void xbox_FramebufferWindowPresent(uint32_t fb_va, uint32_t pitch)
++{
++    fb_publish(fb_va, pitch, NULL);
++}
++
++void xbox_FramebufferWindowPresentTagged(uint32_t fb_va, uint32_t pitch,
++                                         const RecompPresentTag *tag)
++{
++    if (!tag)
++        fb_capture_fail("missing flip provenance");
++    fb_publish(fb_va, pitch, tag);
++}
++
+ uint64_t xbox_FramebufferWindowNextFrameId(void)
+ {
+     uint64_t id;
+@@ -216,7 +335,7 @@ uint64_t xbox_FramebufferWindowNextFrameId(void)
+     return id;
+ }
+ 
+-static int fb_copy_presented_frame_id(uint32_t *dst, uint64_t *frame_id)
++static int fb_copy_presented_frame_info(uint32_t *dst, FbPresentInfo *info)
+ {
+     int copied = 0;
+ 
+@@ -224,14 +343,23 @@ static int fb_copy_presented_frame_id(uint32_t *dst, uint64_t *frame_id)
+     if (s_present_idx >= 0) {
+         memcpy(dst, s_present[s_present_idx],
+                (size_t)s_fb_width * s_fb_height * 4);
+-        if (frame_id)
+-            *frame_id = s_present_id;
++        if (info)
++            *info = s_present_info;
+         copied = 1;
+     }
+     ReleaseSRWLockShared(&s_present_lock);
+     return copied;
+ }
+ 
++static int fb_copy_presented_frame_id(uint32_t *dst, uint64_t *frame_id)
++{
++    FbPresentInfo info;
++    int copied = fb_copy_presented_frame_info(dst, frame_id ? &info : NULL);
++    if (copied && frame_id)
++        *frame_id = info.id;
++    return copied;
++}
++
+ static int fb_copy_presented_frame(uint32_t *dst)
+ {
+     return fb_copy_presented_frame_id(dst, NULL);
+@@ -311,6 +439,8 @@ static LRESULT CALLBACK fb_wndproc(HWND h, UINT m, WPARAM w, LPARAM l)
+          * closes the window, as before. */
+         InterlockedExchange(&s_fb_running, 0);
+         if (!getenv("RECOMP_CLOSE_KEEPS_RUNNING")) {
++            if (s_capture.active && !recomp_capture_close(&s_capture, "window_closed"))
++                fb_capture_fail("cannot close capture");
+             fprintf(stderr, "  [FBWIN] window closed: exiting\n");
+             recomp_exit_hook_run("window");
+             fflush(stdout);
+@@ -394,13 +524,14 @@ static LRESULT CALLBACK fb_wndproc(HWND h, UINT m, WPARAM w, LPARAM l)
+ /* The display formats an Xbox front buffer is actually set to. The pitch says
+  * how wide a row is in bytes, so pitch/width gives the pixel size; the exact
+  * component layout only matters for 16-bit, where 5:6:5 and 1:5:5:5 differ. */
+-static void fb_convert(const uint8_t *src, uint32_t bpp)
++static void fb_convert_mode(const uint8_t *src, uint32_t bpp, int fixed,
++                            uint32_t pitch, uint32_t aa_sy)
+ {
+     uint32_t x, y;
+ 
+     for (y = 0; y < s_fb_height; y++) {
+-        const uint8_t *row = src + (size_t)y * s_fb_pitch
+-                           * (bpp == 8 ? s_fb_aa_sy : 1);
++        const uint8_t *row = src + (size_t)y * (fixed ? pitch : s_fb_pitch)
++                           * (bpp == 8 ? (fixed ? aa_sy : s_fb_aa_sy) : 1);
+         uint32_t *dst = s_rgb + (size_t)y * s_fb_width;
+ 
+         if (bpp == 4) {
+@@ -428,6 +559,11 @@ static void fb_convert(const uint8_t *src, uint32_t bpp)
+     }
+ }
+ 
++static void fb_convert(const uint8_t *src, uint32_t bpp)
++{
++    fb_convert_mode(src, bpp, 0, 0, 0);
++}
++
+ /* Write what the window is currently showing to a 24-bit BMP.
+  *
+  * A black window is ambiguous: it means either that the read path is wrong or
+@@ -474,12 +610,25 @@ int xbox_FramebufferDumpBmp(const char *path)
+ 
+ /* GDI: the frame letterboxed into the client area, like the D3D11
+  * presenter; the borders are cleared when the size changes. */
+-static void gdi_blit(HWND hwnd, HDC hdc, const BITMAPINFO *bi)
++typedef struct FbGdiTrace {
++    int called, result;
++    DWORD error;
++} FbGdiTrace;
++
++static void gdi_blit(HWND hwnd, HDC hdc, const BITMAPINFO *bi, FbGdiTrace *trace)
+ {
+     static LONG lw, lh;
+     RECT c;
+     LONG cw, ch, w, h;
+-    GetClientRect(hwnd, &c);
++    BOOL have_client;
++    int result;
++    if (trace)
++        memset(trace, 0, sizeof *trace);
++    have_client = GetClientRect(hwnd, &c);
++    if (trace && !have_client) {
++        trace->error = GetLastError();
++        return;
++    }
+     cw = c.right - c.left; ch = c.bottom - c.top;
+     if (cw <= 0 || ch <= 0)
+         return;
+@@ -494,20 +643,110 @@ static void gdi_blit(HWND hwnd, HDC hdc, const BITMAPINFO *bi)
+     }
+     SetStretchBltMode(hdc, HALFTONE);
+     SetBrushOrgEx(hdc, 0, 0, NULL);     /* HALFTONE wants it after the mode */
+-    StretchDIBits(hdc, (cw - w) / 2, (ch - h) / 2, w, h,
+-                  0, 0, (int)s_fb_width, (int)s_fb_height,
+-                  s_rgb, bi, DIB_RGB_COLORS, SRCCOPY);
++    result = StretchDIBits(hdc, (cw - w) / 2, (ch - h) / 2, w, h,
++                           0, 0, (int)s_fb_width, (int)s_fb_height,
++                           s_rgb, bi, DIB_RGB_COLORS, SRCCOPY);
++    if (trace) {
++        trace->called = 1;
++        trace->result = result;
++        if (!result || result == (int)GDI_ERROR)
++            trace->error = GetLastError();
++    }
+ }
+ 
+ /* The converted frame in s_rgb, on screen: D3D11 when it is up (which waits
+  * for vsync, so returns 1 when the loop is already paced), else GDI. */
+-static int fb_show(HWND hwnd, HDC hdc, const BITMAPINFO *bi, uint64_t frame_id)
++static int fb_show(HWND hwnd, HDC hdc, const BITMAPINFO *bi, uint64_t frame_id,
++                   const FbPresentInfo *info, enum RecompCaptureOrigin origin,
++                   int pinned, int overlay)
+ {
+-    if (gpu_present_active())
+-        return gpu_present_frame(s_rgb, !getenv("RECOMP_FB_VA") && !s_pvideo_source,
+-                                 frame_id);
+-    gdi_blit(hwnd, hdc, bi);
+-    return 0;
++    RecompCaptureRecord record;
++    int paced = 0, reject_shared = 0;
++    if (!s_capture.active) {
++        if (gpu_present_active())
++            return gpu_present_frame(s_rgb, !getenv("RECOMP_FB_VA") && !s_pvideo_source,
++                                     frame_id);
++        gdi_blit(hwnd, hdc, bi, NULL);
++        return 0;
++    }
++    memset(&record, 0, sizeof record);
++    record.origin = origin;
++    record.pinned = pinned != 0;
++    record.overlay = overlay != 0;
++    record.width = s_fb_width;
++    record.height = s_fb_height;
++    if (info) {
++        record.pitch = info->pitch;
++        record.bpp = info->bpp;
++        record.aa_sy = info->aa_sy;
++        if (origin == RECOMP_CAPTURE_FLIP) {
++            record.publication_id = info->id;
++            if (!pinned)
++                record.tag = info->tag;
++        }
++    }
++    if (!recomp_capture_clock(&record.start_ns))
++        fb_capture_fail("cannot read the monotonic clock");
++    if (gpu_present_active()) {
++        GpuPresentTrace trace;
++        paced = gpu_present_frame_capture(s_rgb,
++                    !getenv("RECOMP_FB_VA") && !s_pvideo_source, frame_id, &trace);
++        record.route = RECOMP_CAPTURE_D3D_CPU;
++        if (trace.route == GPU_PRESENT_SHARED_REJECTED) {
++            record.route = RECOMP_CAPTURE_D3D_SHARED_REJECTED;
++            record.result = RECOMP_CAPTURE_SHARED_REJECTED;
++            record.detail = (uint32_t)trace.shared_release;
++            reject_shared = 1;
++        } else if (trace.stage == GPU_PRESENT_CALLED &&
++                   trace.route == GPU_PRESENT_CPU_UPLOAD) {
++            record.image = s_rgb;
++            record.detail = (uint32_t)trace.result;
++            record.result = trace.result == S_OK ? RECOMP_CAPTURE_D3D_OK :
++                            trace.result == DXGI_STATUS_OCCLUDED ? RECOMP_CAPTURE_D3D_OCCLUDED :
++                            FAILED(trace.result) ? RECOMP_CAPTURE_D3D_FAILED :
++                                                   RECOMP_CAPTURE_D3D_OTHER_STATUS;
++        } else if (trace.route == GPU_PRESENT_NO_INPUT) {
++            record.detail = (uint32_t)trace.result;
++            record.result = trace.stage == GPU_PRESENT_RESIZE_FAILED ?
++                            RECOMP_CAPTURE_D3D_RESIZE_FAILED :
++                            trace.stage == GPU_PRESENT_TARGET_FAILED ?
++                            RECOMP_CAPTURE_D3D_TARGET_FAILED : RECOMP_CAPTURE_D3D_NO_SURFACE;
++        } else {
++            fb_capture_fail("inconsistent D3D source selection");
++        }
++    } else {
++        FbGdiTrace trace;
++        gdi_blit(hwnd, hdc, bi, &trace);
++        record.route = RECOMP_CAPTURE_GDI;
++        if (!trace.called) {
++            record.result = RECOMP_CAPTURE_GDI_NO_CLIENT;
++            record.detail = trace.error;
++        } else {
++            record.image = s_rgb;
++            record.result = trace.result && trace.result != (int)GDI_ERROR ?
++                            RECOMP_CAPTURE_GDI_OK : RECOMP_CAPTURE_GDI_FAILED;
++            record.detail = (uint32_t)trace.result;
++        }
++    }
++    if (!recomp_capture_clock(&record.end_ns) || !recomp_capture_record(&s_capture, &record))
++        fb_capture_fail("cannot record presenter input");
++    if (reject_shared)
++        fb_capture_fail("shared GPU presenter input is unsupported (not replaced by CPU input)");
++    return paced;
++}
++
++static void fb_capture_missing_input(int pinned)
++{
++    RecompCaptureRecord record;
++    memset(&record, 0, sizeof record);
++    record.origin = RECOMP_CAPTURE_MISSING;
++    record.pinned = pinned != 0;
++    record.route = RECOMP_CAPTURE_NO_ROUTE;
++    record.result = RECOMP_CAPTURE_NO_INPUT;
++    if (!recomp_capture_clock(&record.start_ns) ||
++        !recomp_capture_clock(&record.end_ns) ||
++        !recomp_capture_record(&s_capture, &record))
++        fb_capture_fail("cannot record missing presenter input");
+ }
+ 
+ static DWORD WINAPI fb_thread(LPVOID unused)
+@@ -516,7 +755,8 @@ static DWORD WINAPI fb_thread(LPVOID unused)
+     HDC hdc;
+     BITMAPINFO bi;
+     RECT r;
+-    int fb_pinned;
++    int fb_pinned, missing_noted = 0;
++    const char *capture_path = getenv("RECOMP_PRESENTER_CAPTURE");
+ 
+     (void)unused;
+ 
+@@ -558,6 +798,8 @@ static DWORD WINAPI fb_thread(LPVOID unused)
+     }
+     if (!hwnd) {
+         InterlockedExchange(&s_fb_running, 0);
++        if (capture_path && *capture_path)
++            fb_capture_fail("cannot create the framebuffer window");
+         return 0;
+     }
+     hdc = GetDC(hwnd);
+@@ -578,6 +820,14 @@ static DWORD WINAPI fb_thread(LPVOID unused)
+     s_rgb = (uint32_t *)calloc((size_t)s_fb_width * s_fb_height, 4);
+     /* A window pinned to one address shows that memory and nothing else. */
+     fb_pinned = getenv("RECOMP_FB_VA") != NULL;
++    if (capture_path && *capture_path) {
++        if (!hdc || !s_rgb)
++            fb_capture_fail("cannot allocate the presenter input");
++        if (!recomp_capture_open(&s_capture, capture_path))
++            fb_capture_fail("capture directory must be new and writable");
++        fprintf(stderr, "  [PRESCAP] enabled: synchronous capture perturbs timing; "
++                        "submissions do not prove visible scanout\n");
++    }
+ 
+     fprintf(stderr, "  [FBWIN] framebuffer window open (%ux%u)\n",
+             s_fb_width, s_fb_height);
+@@ -588,26 +838,60 @@ static DWORD WINAPI fb_thread(LPVOID unused)
+         MSG msg;
+         int paced = 0;
+         uint64_t frame_id = 0;
++        FbPresentInfo info;
++        uint32_t capture_va = 0, capture_pitch = 0, capture_aa_sy = 0;
++        int overlay = 0;
++        memset(&info, 0, sizeof info);
+         while (PeekMessageA(&msg, NULL, 0, 0, PM_REMOVE)) {
+             TranslateMessage(&msg);
+             DispatchMessageA(&msg);
+         }
+-        if (s_rgb && fb_copy_presented_frame_id(s_rgb, &frame_id)) {
++        if (s_capture.active && !InterlockedCompareExchange(&s_fb_running, 1, 1))
++            break;
++        if (s_capture.active) {
++            AcquireSRWLockShared(&s_fb_config_lock);
++            capture_va = s_fb_va;
++            capture_pitch = s_fb_pitch;
++            capture_aa_sy = s_fb_aa_sy;
++            ReleaseSRWLockShared(&s_fb_config_lock);
++        }
++        if (s_rgb && fb_copy_presented_frame_info(s_rgb, &info)) {
++            frame_id = info.id;
++            missing_noted = 0;
+             /* A finished frame, published by the flip. Copied into s_rgb so
+              * the dump path and GDI see one consistent image even if the
+              * next flip lands mid-blit. */
+             if (!fb_pinned)
+-                fb_overlay();
+-            paced = fb_show(hwnd, hdc, &bi, frame_id);
+-        } else if (s_fb_va && s_fb_pitch && s_rgb) {
++                overlay = fb_overlay();
++            paced = fb_show(hwnd, hdc, &bi, frame_id, &info,
++                            RECOMP_CAPTURE_FLIP, fb_pinned, overlay);
++        } else if ((s_capture.active ? capture_va && capture_pitch : s_fb_va && s_fb_pitch)
++                   && s_rgb) {
+             /* No flip yet, or pinned with RECOMP_FB_VA: read guest memory as
+              * before, which is also what a title that never flips needs. */
+-            const uint8_t *src =
+-                (const uint8_t *)((uintptr_t)s_fb_va + xbox_GetMemoryOffset());
+-            fb_convert(src, s_fb_pitch / s_fb_width);
++            const uint8_t *src;
++            missing_noted = 0;
++            if (s_capture.active) {
++                uint32_t va = capture_va;
++                info.pitch = capture_pitch;
++                info.bpp = info.pitch / s_fb_width;
++                info.aa_sy = capture_aa_sy;
++                if (!fb_readable_surface(va, info.pitch, info.bpp, info.aa_sy))
++                    fb_capture_fail("fallback framebuffer input is not readable");
++                src = (const uint8_t *)((uintptr_t)va + xbox_GetMemoryOffset());
++                fb_convert_mode(src, info.bpp, 1, info.pitch, info.aa_sy);
++            } else {
++                src = (const uint8_t *)((uintptr_t)s_fb_va + xbox_GetMemoryOffset());
++                fb_convert(src, s_fb_pitch / s_fb_width);
++            }
+             if (!fb_pinned)
+-                fb_overlay();
+-            paced = fb_show(hwnd, hdc, &bi, 0);
++                overlay = fb_overlay();
++            paced = fb_show(hwnd, hdc, &bi, 0, &info,
++                            fb_pinned ? RECOMP_CAPTURE_PINNED : RECOMP_CAPTURE_FALLBACK,
++                            fb_pinned, overlay);
++        } else if (s_capture.active && !missing_noted) {
++            fb_capture_missing_input(fb_pinned);
++            missing_noted = 1;
+         }
+         {
+             /* One dump a few seconds in, so the title has had time to render
+@@ -651,6 +935,8 @@ static DWORD WINAPI fb_thread(LPVOID unused)
+             Sleep(16);                  /* D3D11's Present waited for vsync */
+     }
+ 
++    if (s_capture.active && !recomp_capture_close(&s_capture, "thread_stopped"))
++        fb_capture_fail("cannot close capture");
+     gpu_present_shutdown();
+     ReleaseDC(hwnd, hdc);
+     DestroyWindow(hwnd);
+@@ -664,16 +950,26 @@ static DWORD WINAPI fb_thread(LPVOID unused)
+ void xbox_FramebufferWindowStart(void)
+ {
+     HANDLE th;
++    const char *capture = getenv("RECOMP_PRESENTER_CAPTURE");
++    const char *direct = getenv("RECOMP_GPU_DIRECT_PRESENT");
+ 
+-    if (!getenv("RECOMP_FB_WINDOW"))
++    if (!getenv("RECOMP_FB_WINDOW")) {
++        if (capture && *capture)
++            fb_capture_fail("RECOMP_PRESENTER_CAPTURE requires RECOMP_FB_WINDOW");
+         return;
++    }
++    if (capture && *capture && direct && *direct && strcmp(direct, "0"))
++        fb_capture_fail("RECOMP_GPU_DIRECT_PRESENT is incompatible with presenter capture");
+     if (InterlockedCompareExchange(&s_fb_running, 1, 0) != 0)
+         return;
+     th = CreateThread(NULL, 0, fb_thread, NULL, 0, NULL);
+     if (th)
+         CloseHandle(th);
+-    else
++    else {
+         InterlockedExchange(&s_fb_running, 0);
++        if (capture && *capture)
++            fb_capture_fail("cannot start the framebuffer window thread");
++    }
+ }
+ 
+ #endif /* _WIN32: POSIX hosts get the SDL2 window in fb_present_sdl.c */
+diff --git a/src/video/fb_present_sdl.c b/src/video/fb_present_sdl.c
+index 87b7ef789c6cab2bdc2c01fc0d20de4a9c6eef8f..71aa0de50fd4d6de60e90594820dacd1458b73c6 100644
+--- a/src/video/fb_present_sdl.c
++++ b/src/video/fb_present_sdl.c
+@@ -99,7 +99,14 @@ void xbox_FramebufferWindowSet(uint32_t fb_va, uint32_t pitch)
+ void xbox_FramebufferWindowSetAA(uint32_t sy) { (void)sy; }
+ 
+ /* The window is opened by xbox_HostWindowMain, on the main thread. */
+-void xbox_FramebufferWindowStart(void) {}
++void xbox_FramebufferWindowStart(void)
++{
++    const char *capture = getenv("RECOMP_PRESENTER_CAPTURE");
++    if (capture && *capture) {
++        fprintf(stderr, "[PRESCAP] presenter capture is not implemented for SDL\n");
++        abort();
++    }
++}
+ 
+ /* The back slot is filled: make it the ready one. An unshown ready frame is
+  * overwritten (dropped), never waited for. */
+@@ -282,6 +289,11 @@ int xbox_HostWindowMain(int (*guest_main)(void))
+     /* Ctrl-C and SIGTERM keep their default meaning; SDL would turn them
+      * into an SDL_QUIT that a headless run never reads. Set before the
+      * headless return: audio and input start SDL subsystems there too. */
++    e = getenv("RECOMP_PRESENTER_CAPTURE");
++    if (e && *e) {
++        fprintf(stderr, "[PRESCAP] presenter capture is not implemented for SDL\n");
++        abort();
++    }
+     SDL_SetHint(SDL_HINT_NO_SIGNAL_HANDLERS, "1");
+     if (!env_on("RECOMP_FB_WINDOW") || env_on("RECOMP_HEADLESS"))
+         return guest_main();
+diff --git a/src/video/gpu_present.c b/src/video/gpu_present.c
+index 18c932efa7bf62434654f5b6a831e97294553ee0..6aaf93224238624e59b392d3117d9c0563305e3b 100644
+--- a/src/video/gpu_present.c
++++ b/src/video/gpu_present.c
+@@ -277,7 +277,8 @@ static ID3D11ShaderResourceView *take_shared(int allow_shared, uint64_t frame_id
+ /* Returns 0 when nothing was shown: the window is occluded or the display
+  * is off, and Present does not wait for vsync then -- the caller must pace
+  * itself instead of spinning. The pixels are read before this returns. */
+-int gpu_present_frame(const uint32_t *pixels, int allow_shared, uint64_t frame_id)
++static int gpu_present_frame_impl(const uint32_t *pixels, int allow_shared,
++                                  uint64_t frame_id, GpuPresentTrace *trace)
+ {
+     static const float black[4] = {0, 0, 0, 1};
+     D3D11_VIEWPORT vp;
+@@ -287,6 +288,10 @@ int gpu_present_frame(const uint32_t *pixels, int allow_shared, uint64_t frame_i
+     float sx, sy;
+     int held;
+ 
++    if (trace) {
++        memset(trace, 0, sizeof *trace);
++        trace->stage = GPU_PRESENT_NO_SURFACE;
++    }
+     if (!s_rtv || !pixels)
+         return 0;
+     client_size(&cw, &ch);
+@@ -295,16 +300,38 @@ int gpu_present_frame(const uint32_t *pixels, int allow_shared, uint64_t frame_i
+         ID3D11DeviceContext_OMSetRenderTargets(s_ctx, 0, NULL, NULL);
+         ID3D11RenderTargetView_Release(s_rtv);
+         s_rtv = NULL;
+-        if (FAILED(IDXGISwapChain_ResizeBuffers(s_chain, 0, cw, ch, DXGI_FORMAT_UNKNOWN, 0))
+-            || !make_rtv())
++        hr = IDXGISwapChain_ResizeBuffers(s_chain, 0, cw, ch, DXGI_FORMAT_UNKNOWN, 0);
++        if (FAILED(hr)) {
++            if (trace) {
++                trace->stage = GPU_PRESENT_RESIZE_FAILED;
++                trace->result = hr;
++            }
++            return 0;
++        }
++        if (!make_rtv()) {
++            if (trace)
++                trace->stage = GPU_PRESENT_TARGET_FAILED;
+             return 0;
++        }
+         s_bw = cw; s_bh = ch;
+     }
+     frame = take_shared(allow_shared, frame_id, &held);
++    if (frame && trace) {
++        trace->route = GPU_PRESENT_SHARED_REJECTED;
++        trace->stage = GPU_PRESENT_INCOMPATIBLE;
++        ID3D11DeviceContext_PSSetShaderResources(s_ctx, 0, 1, &none);
++        ID3D11DeviceContext_Flush(s_ctx);
++        trace->shared_release = IDXGIKeyedMutex_ReleaseSync(s_shared_mutex, 0);
++        if (FAILED(trace->shared_release))
++            InterlockedExchange(&s_shared_ready, 0);
++        return 0;
++    }
+     if (!frame) {
+         ID3D11DeviceContext_UpdateSubresource(s_ctx, (ID3D11Resource *)s_frame, 0, NULL,
+                                               pixels, s_w * 4, 0);
+         frame = s_srv;
++        if (trace)
++            trace->route = GPU_PRESENT_CPU_UPLOAD;
+     }
+     ID3D11DeviceContext_OMSetRenderTargets(s_ctx, 1, &s_rtv, NULL);
+     ID3D11DeviceContext_ClearRenderTargetView(s_ctx, s_rtv, black);
+@@ -327,6 +354,10 @@ int gpu_present_frame(const uint32_t *pixels, int allow_shared, uint64_t frame_i
+     /* Paced only when Present waited for the vblank: with RECOMP_PRESENT_VSYNC=0
+      * the caller keeps its own 16 ms sleep instead of spinning a core. */
+     present_hr = IDXGISwapChain_Present(s_chain, (UINT)s_vsync, 0);
++    if (trace) {
++        trace->stage = GPU_PRESENT_CALLED;
++        trace->result = present_hr;
++    }
+     if (held) {
+         static int logged;
+         if (present_hr == S_OK && !logged++) {
+@@ -344,6 +375,19 @@ int gpu_present_frame(const uint32_t *pixels, int allow_shared, uint64_t frame_i
+     return present_hr == S_OK && s_vsync;
+ }
+ 
++int gpu_present_frame(const uint32_t *pixels, int allow_shared, uint64_t frame_id)
++{
++    return gpu_present_frame_impl(pixels, allow_shared, frame_id, NULL);
++}
++
++int gpu_present_frame_capture(const uint32_t *pixels, int allow_shared,
++                              uint64_t frame_id, GpuPresentTrace *trace)
++{
++    if (!trace)
++        return 0;
++    return gpu_present_frame_impl(pixels, allow_shared, frame_id, trace);
++}
++
+ void gpu_present_shutdown(void)
+ {
+     InterlockedExchange(&s_shared_ready, 0);
+diff --git a/src/video/gpu_present.h b/src/video/gpu_present.h
+index 2cf8893423d397435771a1d4862bfb373f7cb6ab..1a59dfa1279f20ad79e55b7fc8d124df43accd0d 100644
+--- a/src/video/gpu_present.h
++++ b/src/video/gpu_present.h
+@@ -10,6 +10,28 @@ int  gpu_present_init(HWND hwnd, uint32_t width, uint32_t height);
+ /* width*height B8G8R8A8; allow_shared must be 0 for a CPU-composited overlay
+  * or a pinned framebuffer. Returns 1 only when the present waited for vsync. */
+ int  gpu_present_frame(const uint32_t *pixels, int allow_shared, uint64_t frame_id);
++enum GpuPresentRoute {
++    GPU_PRESENT_NO_INPUT,
++    GPU_PRESENT_CPU_UPLOAD,
++    GPU_PRESENT_SHARED_REJECTED
++};
++enum GpuPresentStage {
++    GPU_PRESENT_NO_SURFACE,
++    GPU_PRESENT_RESIZE_FAILED,
++    GPU_PRESENT_TARGET_FAILED,
++    GPU_PRESENT_CALLED,
++    GPU_PRESENT_INCOMPATIBLE
++};
++typedef struct GpuPresentTrace {
++    enum GpuPresentRoute route;
++    enum GpuPresentStage stage;
++    HRESULT result;
++    HRESULT shared_release;
++} GpuPresentTrace;
++/* Diagnostic variant: shared input is rejected, never substituted with a
++ * CPU frame. Any acquired shared mutex is returned before it reports that. */
++int  gpu_present_frame_capture(const uint32_t *pixels, int allow_shared,
++                               uint64_t frame_id, GpuPresentTrace *trace);
+ /* One keyed-mutex texture may be submitted at a time. The producer owns key
+  * 0, copies the finished frame and releases key 1 before submitting. The
+  * presenter acquires key 1 and releases key 0 after using or discarding it. */
+diff --git a/src/video/present_capture.h b/src/video/present_capture.h
+new file mode 100644
+index 0000000000000000000000000000000000000000..3fb3b83c3244af2c38ada0e379a9138318418ead
+--- /dev/null
++++ b/src/video/present_capture.h
+@@ -0,0 +1,360 @@
++#ifndef XBOX_PRESENT_CAPTURE_H
++#define XBOX_PRESENT_CAPTURE_H
++
++/* Windows-only, presenter-thread diagnostic. No capture is evidence of
++ * physical scanout or window visibility. */
++#include <windows.h>
++#include <stdint.h>
++#include <stdio.h>
++#include <string.h>
++#include <limits.h>
++#include "present_provenance.h"
++
++#define RECOMP_CAPTURE_PATH 2048
++
++enum RecompCaptureOrigin {
++    RECOMP_CAPTURE_MISSING,
++    RECOMP_CAPTURE_FALLBACK,
++    RECOMP_CAPTURE_PINNED,
++    RECOMP_CAPTURE_FLIP
++};
++enum RecompCaptureRoute {
++    RECOMP_CAPTURE_NO_ROUTE,
++    RECOMP_CAPTURE_GDI,
++    RECOMP_CAPTURE_D3D_CPU,
++    RECOMP_CAPTURE_D3D_SHARED_REJECTED
++};
++enum RecompCaptureResult {
++    RECOMP_CAPTURE_NO_INPUT,
++    RECOMP_CAPTURE_GDI_NO_CLIENT,
++    RECOMP_CAPTURE_GDI_OK,
++    RECOMP_CAPTURE_GDI_FAILED,
++    RECOMP_CAPTURE_D3D_NO_SURFACE,
++    RECOMP_CAPTURE_D3D_RESIZE_FAILED,
++    RECOMP_CAPTURE_D3D_TARGET_FAILED,
++    RECOMP_CAPTURE_D3D_OK,
++    RECOMP_CAPTURE_D3D_OCCLUDED,
++    RECOMP_CAPTURE_D3D_FAILED,
++    RECOMP_CAPTURE_D3D_OTHER_STATUS,
++    RECOMP_CAPTURE_SHARED_REJECTED
++};
++
++typedef struct RecompCaptureRecord {
++    uint64_t start_ns, end_ns;
++    enum RecompCaptureOrigin origin;
++    uint64_t publication_id;
++    RecompPresentTag tag;
++    uint32_t pitch, bpp, aa_sy, overlay, pinned;
++    enum RecompCaptureRoute route;
++    enum RecompCaptureResult result;
++    uint32_t detail;
++    uint32_t width, height;
++    const uint32_t *image;
++} RecompCaptureRecord;
++
++typedef struct RecompPresenterCapture {
++    HANDLE ledger;
++    char directory[RECOMP_CAPTURE_PATH];
++    uint64_t sequence, last_end_ns;
++    int active;
++} RecompPresenterCapture;
++
++static int recomp_capture_clock(uint64_t *ns)
++{
++    LARGE_INTEGER ticks, frequency;
++    uint64_t sec, rem, freq, whole, fraction;
++
++    if (!ns || !QueryPerformanceFrequency(&frequency) ||
++        !QueryPerformanceCounter(&ticks) || frequency.QuadPart <= 0 ||
++        ticks.QuadPart < 0)
++        return 0;
++    freq = (uint64_t)frequency.QuadPart;
++    sec = (uint64_t)ticks.QuadPart / freq;
++    rem = (uint64_t)ticks.QuadPart % freq;
++    if (sec > UINT64_MAX / 1000000000ull ||
++        rem > UINT64_MAX / 1000000000ull)
++        return 0;
++    whole = sec * 1000000000ull;
++    fraction = rem * 1000000000ull / freq;
++    if (fraction > UINT64_MAX - whole)
++        return 0;
++    *ns = whole + fraction;
++    return 1;
++}
++
++static int recomp_capture_write(HANDLE file, const void *data, size_t bytes)
++{
++    const uint8_t *p = (const uint8_t *)data;
++    while (bytes) {
++        DWORD written = 0;
++        DWORD chunk = bytes > 0x7fffffffu ? 0x7fffffffu : (DWORD)bytes;
++        if (!WriteFile(file, p, chunk, &written, NULL) || !written)
++            return 0;
++        p += written;
++        bytes -= written;
++    }
++    return 1;
++}
++
++static int recomp_capture_path(char *out, size_t cap, const char *dir,
++                               const char *name)
++{
++    int n = snprintf(out, cap, "%s\\%s", dir, name);
++    return n >= 0 && (size_t)n < cap;
++}
++
++static void recomp_capture_le32(uint8_t *p, uint32_t value)
++{
++    p[0] = (uint8_t)value;
++    p[1] = (uint8_t)(value >> 8);
++    p[2] = (uint8_t)(value >> 16);
++    p[3] = (uint8_t)(value >> 24);
++}
++
++static uint64_t recomp_capture_hash(const uint8_t *data, size_t bytes)
++{
++    uint64_t hash = 14695981039346656037ull;
++    size_t i;
++    for (i = 0; i < bytes; ++i)
++        hash = (hash ^ data[i]) * 1099511628211ull;
++    return hash;
++}
++
++/* BI_RGB top-down 32-bit BMP. All four bytes of the actual CPU input are
++ * retained; both presenter routes use its RGB and ignore the fourth byte. */
++static int recomp_capture_image(RecompPresenterCapture *capture, uint64_t seq,
++                                const RecompCaptureRecord *record,
++                                char *name, size_t name_cap, uint64_t *image_hash)
++{
++    char partial_name[96], partial[RECOMP_CAPTURE_PATH], final[RECOMP_CAPTURE_PATH];
++    uint8_t header[54] = {0};
++    uint64_t bytes;
++    HANDLE file;
++    int ok, n;
++
++    if (!record->image || !image_hash || !record->width || !record->height ||
++        record->width > INT32_MAX || record->height > INT32_MAX)
++        return 0;
++    bytes = (uint64_t)record->width * record->height * 4u;
++    if (bytes > UINT32_MAX - sizeof header || bytes > SIZE_MAX)
++        return 0;
++    n = snprintf(name, name_cap, "present-%020llu.bmp", (unsigned long long)seq);
++    if (n < 0 || (size_t)n >= name_cap)
++        return 0;
++    n = snprintf(partial_name, sizeof partial_name, "%s.partial", name);
++    if (n < 0 || (size_t)n >= sizeof partial_name ||
++        !recomp_capture_path(partial, sizeof partial, capture->directory, partial_name) ||
++        !recomp_capture_path(final, sizeof final, capture->directory, name))
++        return 0;
++    file = CreateFileA(partial, GENERIC_WRITE, 0, NULL, CREATE_NEW,
++                       FILE_ATTRIBUTE_NORMAL, NULL);
++    if (file == INVALID_HANDLE_VALUE)
++        return 0;
++    header[0] = 'B'; header[1] = 'M';
++    recomp_capture_le32(header + 2, (uint32_t)bytes + (uint32_t)sizeof header);
++    recomp_capture_le32(header + 10, (uint32_t)sizeof header);
++    recomp_capture_le32(header + 14, 40);
++    recomp_capture_le32(header + 18, record->width);
++    recomp_capture_le32(header + 22, 0u - record->height);
++    header[26] = 1;
++    header[28] = 32;
++    recomp_capture_le32(header + 34, (uint32_t)bytes);
++    ok = recomp_capture_write(file, header, sizeof header) &&
++         recomp_capture_write(file, record->image, (size_t)bytes) &&
++         FlushFileBuffers(file);
++    if (!CloseHandle(file))
++        ok = 0;
++    if (ok)
++        ok = MoveFileExA(partial, final, MOVEFILE_WRITE_THROUGH) != 0;
++    if (!ok)
++        DeleteFileA(partial);
++    else
++        *image_hash = recomp_capture_hash((const uint8_t *)record->image, (size_t)bytes);
++    return ok;
++}
++
++static int recomp_capture_open(RecompPresenterCapture *capture, const char *directory)
++{
++    static const char header[] =
++        "sequence,start_ns,end_ns,origin,publication_id,flip_candidate,"
++        "stats,stats_volume,stats_file_index,pixels,format,pitch,aa_sy,"
++        "overlay,pinned,route,status,detail,width,height,image,image_fnv64\n";
++    char path[RECOMP_CAPTURE_PATH];
++    DWORD length;
++
++    if (!capture || !directory || !*directory)
++        return 0;
++    memset(capture, 0, sizeof *capture);
++    capture->ledger = INVALID_HANDLE_VALUE;
++    length = GetFullPathNameA(directory, sizeof capture->directory,
++                              capture->directory, NULL);
++    if (!length || length >= sizeof capture->directory)
++        return 0;
++    while (length > 3 && (capture->directory[length - 1] == '\\' ||
++                          capture->directory[length - 1] == '/'))
++        capture->directory[--length] = 0;
++    if (!CreateDirectoryA(capture->directory, NULL) ||
++        !recomp_capture_path(path, sizeof path, capture->directory, "submissions.csv"))
++        return 0;
++    capture->ledger = CreateFileA(path, GENERIC_WRITE, FILE_SHARE_READ, NULL,
++                                  CREATE_NEW, FILE_ATTRIBUTE_NORMAL, NULL);
++    if (capture->ledger == INVALID_HANDLE_VALUE)
++        return 0;
++    if (!recomp_capture_write(capture->ledger, header, sizeof header - 1) ||
++        !FlushFileBuffers(capture->ledger)) {
++        CloseHandle(capture->ledger);
++        capture->ledger = INVALID_HANDLE_VALUE;
++        return 0;
++    }
++    capture->active = 1;
++    return 1;
++}
++
++static int recomp_capture_record_valid(const RecompCaptureRecord *r)
++{
++    int has_input;
++    if (!r || r->origin < RECOMP_CAPTURE_MISSING || r->origin > RECOMP_CAPTURE_FLIP ||
++        r->route < RECOMP_CAPTURE_NO_ROUTE ||
++        r->route > RECOMP_CAPTURE_D3D_SHARED_REJECTED ||
++        r->result < RECOMP_CAPTURE_NO_INPUT ||
++        r->result > RECOMP_CAPTURE_SHARED_REJECTED ||
++        r->tag.stats < RECOMP_PRESENT_STATS_UNTRACKED ||
++        r->tag.stats > RECOMP_PRESENT_STATS_EXHAUSTED ||
++        r->tag.pixels < RECOMP_PRESENT_PIXELS_UNKNOWN ||
++        r->tag.pixels > RECOMP_PRESENT_PIXELS_READBACK_UNAVAILABLE ||
++        r->end_ns < r->start_ns || r->overlay > 1 || r->pinned > 1)
++        return 0;
++    if (r->origin == RECOMP_CAPTURE_PINNED && !r->pinned)
++        return 0;
++    if ((r->origin == RECOMP_CAPTURE_MISSING) != (r->route == RECOMP_CAPTURE_NO_ROUTE) ||
++        (r->pinned && r->overlay))
++        return 0;
++    if ((r->origin == RECOMP_CAPTURE_FLIP) != (r->publication_id != 0))
++        return 0;
++    if ((r->tag.stats == RECOMP_PRESENT_STATS_READY && !r->tag.stats_file_index) ||
++        (r->tag.stats != RECOMP_PRESENT_STATS_READY &&
++         (r->tag.stats_volume || r->tag.stats_file_index)))
++        return 0;
++    if (r->tag.flip_candidate &&
++        (r->origin != RECOMP_CAPTURE_FLIP || r->pinned ||
++         r->tag.stats != RECOMP_PRESENT_STATS_READY ||
++         !r->tag.stats_file_index ||
++         (r->tag.pixels != RECOMP_PRESENT_PIXELS_CPU &&
++          r->tag.pixels != RECOMP_PRESENT_PIXELS_READBACK)))
++        return 0;
++    has_input = r->result == RECOMP_CAPTURE_GDI_OK ||
++                r->result == RECOMP_CAPTURE_GDI_FAILED ||
++                r->result == RECOMP_CAPTURE_D3D_OK ||
++                r->result == RECOMP_CAPTURE_D3D_OCCLUDED ||
++                r->result == RECOMP_CAPTURE_D3D_FAILED ||
++                r->result == RECOMP_CAPTURE_D3D_OTHER_STATUS;
++    if (has_input != (r->image != NULL) ||
++        (has_input && (!r->width || !r->height)))
++        return 0;
++    switch (r->route) {
++    case RECOMP_CAPTURE_NO_ROUTE:
++        return r->result == RECOMP_CAPTURE_NO_INPUT;
++    case RECOMP_CAPTURE_GDI:
++        return r->result >= RECOMP_CAPTURE_GDI_NO_CLIENT &&
++               r->result <= RECOMP_CAPTURE_GDI_FAILED;
++    case RECOMP_CAPTURE_D3D_CPU:
++        return r->result >= RECOMP_CAPTURE_D3D_NO_SURFACE &&
++               r->result <= RECOMP_CAPTURE_D3D_OTHER_STATUS;
++    case RECOMP_CAPTURE_D3D_SHARED_REJECTED:
++        return r->result == RECOMP_CAPTURE_SHARED_REJECTED;
++    default:
++        return 0;
++    }
++}
++
++static int recomp_capture_record(RecompPresenterCapture *capture,
++                                 const RecompCaptureRecord *record)
++{
++    static const char *const origins[] = {"missing", "fallback", "pinned", "flip"};
++    static const char *const stats[] = {"untracked", "disabled", "ready", "no_identity", "exhausted"};
++    static const char *const pixels[] = {"unknown", "cpu", "readback", "readback_failed",
++                                         "readback_unavailable"};
++    static const char *const routes[] = {"none", "gdi", "d3d_cpu", "d3d_shared_rejected"};
++    static const char *const results[] = {
++        "no_input", "gdi_no_client", "gdi_ok", "gdi_failed", "d3d_no_surface",
++        "d3d_resize_failed", "d3d_target_failed", "d3d_ok", "d3d_occluded",
++        "d3d_failed", "d3d_other_status", "shared_rejected"
++    };
++    const char *format;
++    char image[96] = "", line[1024];
++    uint64_t sequence, image_hash = 0;
++    int n;
++
++    if (!capture || !capture->active || !recomp_capture_record_valid(record) ||
++        record->start_ns < capture->last_end_ns || capture->sequence == UINT64_MAX)
++        return 0;
++    sequence = capture->sequence + 1;
++    if (record->image && !recomp_capture_image(capture, sequence, record, image, sizeof image,
++                                                &image_hash))
++        return 0;
++    format = record->bpp == 2 ? "rgb565" : record->bpp == 4 ? "xrgb8888" :
++             record->bpp == 8 ? "aa2x32" : record->bpp ? "unsupported_black" : "unknown";
++    n = snprintf(line, sizeof line,
++                 "%llu,%llu,%llu,%s,%llu,%u,%s,%u,%llu,%s,%s,%u,%u,%u,%u,%s,%s,"
++                 "0x%08lX,%u,%u,%s,%016llx\n",
++                 (unsigned long long)sequence,
++                 (unsigned long long)record->start_ns,
++                 (unsigned long long)record->end_ns,
++                 origins[record->origin], (unsigned long long)record->publication_id,
++                 record->tag.flip_candidate, stats[record->tag.stats],
++                 record->tag.stats_volume, (unsigned long long)record->tag.stats_file_index,
++                 pixels[record->tag.pixels], format, record->pitch, record->aa_sy,
++                 record->overlay, record->pinned, routes[record->route], results[record->result],
++                 (unsigned long)record->detail, record->width, record->height, image,
++                 (unsigned long long)image_hash);
++    if (n < 0 || (size_t)n >= sizeof line ||
++        !recomp_capture_write(capture->ledger, line, (size_t)n) ||
++        !FlushFileBuffers(capture->ledger))
++        return 0;
++    capture->sequence = sequence;
++    capture->last_end_ns = record->end_ns;
++    return 1;
++}
++
++static void recomp_capture_abandon(RecompPresenterCapture *capture)
++{
++    if (capture && capture->ledger != INVALID_HANDLE_VALUE) {
++        CloseHandle(capture->ledger);
++        capture->ledger = INVALID_HANDLE_VALUE;
++        capture->active = 0;
++    }
++}
++
++static int recomp_capture_close(RecompPresenterCapture *capture, const char *reason)
++{
++    char path[RECOMP_CAPTURE_PATH], contents[128];
++    HANDLE marker;
++    int n, ok;
++
++    if (!capture || !capture->active || !reason ||
++        (strcmp(reason, "window_closed") && strcmp(reason, "thread_stopped")))
++        return 0;
++    ok = FlushFileBuffers(capture->ledger) != 0;
++    if (!CloseHandle(capture->ledger))
++        ok = 0;
++    capture->ledger = INVALID_HANDLE_VALUE;
++    capture->active = 0;
++    if (!ok || !recomp_capture_path(path, sizeof path, capture->directory, "complete.txt"))
++        return 0;
++    n = snprintf(contents, sizeof contents, "version=1\nlast_sequence=%llu\nreason=%s\n",
++                 (unsigned long long)capture->sequence, reason);
++    if (n < 0 || (size_t)n >= sizeof contents)
++        return 0;
++    marker = CreateFileA(path, GENERIC_WRITE, 0, NULL, CREATE_NEW,
++                         FILE_ATTRIBUTE_NORMAL, NULL);
++    if (marker == INVALID_HANDLE_VALUE)
++        return 0;
++    ok = recomp_capture_write(marker, contents, (size_t)n) && FlushFileBuffers(marker);
++    if (!CloseHandle(marker))
++        ok = 0;
++    if (!ok)
++        DeleteFileA(path);
++    return ok;
++}
++
++#endif
+diff --git a/src/video/present_provenance.h b/src/video/present_provenance.h
+new file mode 100644
+index 0000000000000000000000000000000000000000..2a3d633b649cd7e8454042b09fcf9778e6ca9035
+--- /dev/null
++++ b/src/video/present_provenance.h
+@@ -0,0 +1,53 @@
++#ifndef XBOX_PRESENT_PROVENANCE_H
++#define XBOX_PRESENT_PROVENANCE_H
++
++#include <stdint.h>
++
++enum RecompPresentStats {
++    RECOMP_PRESENT_STATS_UNTRACKED,
++    RECOMP_PRESENT_STATS_DISABLED,
++    RECOMP_PRESENT_STATS_READY,
++    RECOMP_PRESENT_STATS_NO_ID,
++    RECOMP_PRESENT_STATS_EXHAUSTED
++};
++
++enum RecompPresentPixels {
++    RECOMP_PRESENT_PIXELS_UNKNOWN,
++    RECOMP_PRESENT_PIXELS_CPU,
++    RECOMP_PRESENT_PIXELS_READBACK,
++    RECOMP_PRESENT_PIXELS_READBACK_FAILED,
++    RECOMP_PRESENT_PIXELS_READBACK_UNAVAILABLE
++};
++
++/* A candidate is not an alignment until the matching statistics row has
++ * actually been written and independently checked. */
++typedef struct RecompPresentTag {
++    uint32_t flip_candidate;
++    uint32_t stats_volume;
++    uint64_t stats_file_index;
++    enum RecompPresentStats stats;
++    enum RecompPresentPixels pixels;
++} RecompPresentTag;
++
++static inline RecompPresentTag
++recomp_present_tag(enum RecompPresentStats stats, uint32_t previous_flip,
++                   uint32_t volume, uint64_t file_index,
++                   enum RecompPresentPixels pixels)
++{
++    RecompPresentTag tag = {0, 0, 0, stats, pixels};
++
++    if (stats == RECOMP_PRESENT_STATS_READY) {
++        if (previous_flip == UINT32_MAX) {
++            tag.stats = RECOMP_PRESENT_STATS_EXHAUSTED;
++        } else {
++            tag.stats_volume = volume;
++            tag.stats_file_index = file_index;
++            if (pixels == RECOMP_PRESENT_PIXELS_CPU ||
++                pixels == RECOMP_PRESENT_PIXELS_READBACK)
++                tag.flip_candidate = previous_flip + 1;
++        }
++    }
++    return tag;
++}
++
++#endif
+diff --git a/tests/nv2a_ffp_backend/nv2a_ffp_backend_test.c b/tests/nv2a_ffp_backend/nv2a_ffp_backend_test.c
+index aced57603bcf7b91ef32d55f435815d4e41cbcc6..b3d8024c9dddae4a0b71b62db0af2c82ef9473e7 100644
+--- a/tests/nv2a_ffp_backend/nv2a_ffp_backend_test.c
++++ b/tests/nv2a_ffp_backend/nv2a_ffp_backend_test.c
+@@ -39,6 +39,12 @@ int nv2a_pb_dma_walk(void) { return 1; }             /* RECOMP_PB_WALK=dma: 0x03
+ void xbox_FramebufferWindowStart(void) {}
+ void xbox_FramebufferWindowFrameStats(uint32_t draws) { (void)draws; }
+ void xbox_FramebufferWindowPresent(uint32_t va, uint32_t pitch) { (void)va; (void)pitch; }
++#if defined(_WIN32)
++struct RecompPresentTag;
++void xbox_FramebufferWindowPresentTagged(uint32_t va, uint32_t pitch,
++                                         const struct RecompPresentTag *tag)
++{ (void)va; (void)pitch; (void)tag; }
++#endif
+ void xbox_Nv2aFrameCounterFlip(void) {}
+ int xbox_Nv2aGraphSoftwareTrap(uint32_t subch, uint32_t method, uint32_t data)
+ { (void)subch; (void)method; (void)data; return 0; }
+diff --git a/tests/nv2a_raster_batch/nv2a_raster_batch_test.c b/tests/nv2a_raster_batch/nv2a_raster_batch_test.c
+index f713de8605c91604f7136ffe79f3d3612c7b14aa..eef4dddaaa221adae5025a13b3344fae620464d1 100644
+--- a/tests/nv2a_raster_batch/nv2a_raster_batch_test.c
++++ b/tests/nv2a_raster_batch/nv2a_raster_batch_test.c
+@@ -43,6 +43,12 @@ int nv2a_pb_dma_walk(void) { return 1; }
+ void xbox_FramebufferWindowStart(void) {}
+ void xbox_FramebufferWindowFrameStats(uint32_t draws) { (void)draws; }
+ void xbox_FramebufferWindowPresent(uint32_t va, uint32_t pitch) { (void)va; (void)pitch; }
++#if defined(_WIN32)
++struct RecompPresentTag;
++void xbox_FramebufferWindowPresentTagged(uint32_t va, uint32_t pitch,
++                                         const struct RecompPresentTag *tag)
++{ (void)va; (void)pitch; (void)tag; }
++#endif
+ void xbox_Nv2aFrameCounterFlip(void) {}
+ int xbox_Nv2aGraphSoftwareTrap(uint32_t subch, uint32_t method, uint32_t data)
+ { (void)subch; (void)method; (void)data; return 0; }
+diff --git a/tests/presenter_capture/executor_capture_test.c b/tests/presenter_capture/executor_capture_test.c
+new file mode 100644
+index 0000000000000000000000000000000000000000..a83f3f414d64ecda405c871c4ebba207d50fdfe4
+--- /dev/null
++++ b/tests/presenter_capture/executor_capture_test.c
+@@ -0,0 +1,124 @@
++#include <stddef.h>
++#include <stdint.h>
++#include <stdio.h>
++#include <stdlib.h>
++#include <string.h>
++#include <crtdbg.h>
++#include "nv2a_backend.h"
++#include "nv2a_backend_ext.h"
++#include "video/present_provenance.h"
++
++#define REQUIRE(c) do { if (!(c)) { fprintf(stderr, "FAIL %d: %s\n", __LINE__, #c); return 1; } } while (0)
++
++static uint8_t memory[0x10000];
++static RecompPresentTag seen[8];
++static int tagged, legacy, readback_ok;
++
++ptrdiff_t xbox_GetMemoryOffset(void) { return (ptrdiff_t)memory; }
++uint32_t g_xbox_image_lo, g_xbox_image_hi, g_xbox_stack_base, g_xbox_stack_size;
++uint32_t xbox_ContiguousAllocatedBytes(void) { return 0; }
++void xbox_FramebufferWindowSet(uint32_t va, uint32_t pitch) { (void)va; (void)pitch; }
++void xbox_FramebufferWindowSetAA(uint32_t sy) { (void)sy; }
++void xbox_FramebufferWindowStart(void) {}
++void xbox_FramebufferWindowFrameStats(uint32_t draws) { (void)draws; }
++void xbox_FramebufferWindowPresent(uint32_t va, uint32_t pitch)
++{ (void)va; (void)pitch; ++legacy; }
++void xbox_FramebufferWindowPresentTagged(uint32_t va, uint32_t pitch,
++                                         const RecompPresentTag *tag)
++{
++    (void)va; (void)pitch;
++    if (tagged < 8)
++        seen[tagged] = *tag;
++    ++tagged;
++}
++void xbox_Nv2aFrameCounterFlip(void) {}
++uint32_t xbox_Nv2aFenceWordVa(void) { return 0; }
++int nv2a_pb_dma_walk(void) { return 1; }
++int xbox_Nv2aGraphSoftwareTrap(uint32_t c, uint32_t m, uint32_t d)
++{ (void)c; (void)m; (void)d; return 0; }
++int nv2a_pb_scan_in_call(void) { return 0; }
++uint32_t xbox_VblankCount(void) { return 0; }
++uint64_t xbox_HostNowNs(void) { static uint64_t n; return n += 1000000; }
++uint32_t xbox_Nv2aFrameCountersOwned(void) { return 0; }
++volatile uint32_t *xbox_Nv2aRegPtr(uint32_t offset) { (void)offset; return NULL; }
++
++static void draw(const Nv2aSurface *s, const Nv2aBatch *b) { (void)s; (void)b; }
++static int readback(uint32_t va) { (void)va; return readback_ok; }
++static const Nv2aBackend backend = {NULL, draw, NULL};
++static Nv2aBackendExt extended;
++extern void nv2a_pb_exec_method(uint32_t subch, uint32_t method, uint32_t param);
++extern void nv2a_pb_exec_report(void);
++
++static void method(uint32_t m, uint32_t p) { nv2a_pb_exec_method(0, m, p); }
++static void flip(void) { method(0x0130, 0); }
++
++int main(int argc, char **argv)
++{
++    const char *mode;
++    unsigned i;
++    _set_abort_behavior(0, _WRITE_ABORT_MSG | _CALL_REPORTFAULT);
++    if (argc != 3)
++        return 2;
++    mode = argv[1];
++    {
++        RecompPresentTag overflow = recomp_present_tag(RECOMP_PRESENT_STATS_READY, UINT32_MAX,
++                                                        12, 34, RECOMP_PRESENT_PIXELS_CPU);
++        REQUIRE(overflow.stats == RECOMP_PRESENT_STATS_EXHAUSTED &&
++                !overflow.flip_candidate && !overflow.stats_volume && !overflow.stats_file_index);
++    }
++    REQUIRE(_putenv_s("RECOMP_PRESENTER_CAPTURE", strcmp(mode, "disabled") ? "fixture" : "") == 0);
++    REQUIRE(_putenv_s("RECOMP_FRAME_STATS", strcmp(argv[2], "-") ? argv[2] : "") == 0);
++    REQUIRE(_putenv_s("RECOMP_FB_DUMP_FLIP_ID", "") == 0);
++    if (!strcmp(mode, "readback") || !strcmp(mode, "readback_failed") ||
++        !strcmp(mode, "readback_unavailable")) {
++        nv2a_backend_register(&backend);
++        if (strcmp(mode, "readback_unavailable")) {
++            extended.readback = readback;
++            nv2a_backend_ext_register(&extended);
++        }
++        readback_ok = !strcmp(mode, "readback");
++    }
++    memset(memory + 0x1000, 0x5a, 64);
++    method(0x0208, 8);
++    method(0x0200, 2u << 16);
++    method(0x0204, 2u << 16);
++    method(0x020C, 8);
++    method(0x0210, !strcmp(mode, "missing") ? 0 : 0x1000);
++    if (!strcmp(mode, "missing")) {
++        flip();
++        REQUIRE(tagged == 0 && legacy == 0);
++        method(0x0210, 0x1000);
++    }
++    for (i = 0; i < 5; ++i)
++        flip();
++    nv2a_pb_exec_report();
++    if (!strcmp(mode, "disabled")) {
++        REQUIRE(legacy == 5 && tagged == 0);
++    } else {
++        REQUIRE(tagged == 5 && legacy == 0);
++        for (i = 0; i < 5; ++i) {
++            if (!strcmp(mode, "nostats")) {
++                REQUIRE(seen[i].stats == RECOMP_PRESENT_STATS_DISABLED);
++                REQUIRE(seen[i].flip_candidate == 0);
++            } else {
++                REQUIRE(seen[i].stats == RECOMP_PRESENT_STATS_READY);
++                REQUIRE(seen[i].stats_file_index != 0);
++                if (!strcmp(mode, "readback_failed")) {
++                    REQUIRE(seen[i].pixels == RECOMP_PRESENT_PIXELS_READBACK_FAILED);
++                    REQUIRE(seen[i].flip_candidate == 0);
++                } else if (!strcmp(mode, "readback_unavailable")) {
++                    REQUIRE(seen[i].pixels == RECOMP_PRESENT_PIXELS_READBACK_UNAVAILABLE);
++                    REQUIRE(seen[i].flip_candidate == 0);
++                } else {
++                    REQUIRE(seen[i].flip_candidate == i + 1 + !strcmp(mode, "missing"));
++                    REQUIRE(seen[i].pixels == (!strcmp(mode, "readback")
++                            ? RECOMP_PRESENT_PIXELS_READBACK : RECOMP_PRESENT_PIXELS_CPU));
++                }
++                REQUIRE(seen[i].stats_file_index == seen[0].stats_file_index);
++                REQUIRE(seen[i].stats_volume == seen[0].stats_volume);
++            }
++        }
++    }
++    puts("executor provenance passed");
++    return 0;
++}
+diff --git a/tests/presenter_capture/legacy_stubs.c b/tests/presenter_capture/legacy_stubs.c
+new file mode 100644
+index 0000000000000000000000000000000000000000..c5af9d4921f9e325043aeefb428eed6632565a9d
+--- /dev/null
++++ b/tests/presenter_capture/legacy_stubs.c
+@@ -0,0 +1,21 @@
++#include <stdbool.h>
++#include <stdint.h>
++#include <windows.h>
++#include "video/gpu_present.h"
++
++void xbox_InputKeySet(int vk, int down) { (void)vk; (void)down; }
++void xbox_InputKeysClear(void) {}
++int xbox_InputWin32SideVk(int vk, uint32_t l) { (void)vk; (void)l; return 0; }
++int xbox_InputWin32MouseVk(unsigned m, uint32_t w, int *d)
++{ (void)m; (void)w; (void)d; return 0; }
++void recomp_exit_hook_run(const char *why) { (void)why; }
++bool nv2a_hook_pvideo_snapshot(uint32_t *regs) { (void)regs; return false; }
++void nv2a_hook_pvideo_consume(unsigned bank) { (void)bank; }
++int gpu_present_enabled(void) { return 0; }
++int gpu_present_init(HWND h, uint32_t w, uint32_t v) { (void)h; (void)w; (void)v; return 0; }
++int gpu_present_active(void) { return 0; }
++void gpu_present_shutdown(void) {}
++int gpu_present_frame(const uint32_t *p, int allow, uint64_t id)
++{ (void)p; (void)allow; (void)id; return 0; }
++int gpu_present_frame_capture(const uint32_t *p, int allow, uint64_t id, GpuPresentTrace *trace)
++{ (void)p; (void)allow; (void)id; (void)trace; return 0; }
+diff --git a/tests/presenter_capture/presenter_capture_test.c b/tests/presenter_capture/presenter_capture_test.c
+new file mode 100644
+index 0000000000000000000000000000000000000000..002fd06bf5db814892b157c5c5116e6d1e9456cd
+--- /dev/null
++++ b/tests/presenter_capture/presenter_capture_test.c
+@@ -0,0 +1,430 @@
++#include <windows.h>
++#include <stdint.h>
++#include <stdio.h>
++#include <stdlib.h>
++#include <string.h>
++
++#include "video/fb_present.c"
++
++#define REQUIRE(c) do { if (!(c)) { fprintf(stderr, "FAIL %d: %s\n", __LINE__, #c); return 1; } } while (0)
++#define FRAME_VA 0x80001000u
++#define OVERLAY_AT 0x2000u
++#define W 4u
++#define H 3u
++
++static uint8_t *guest;
++static uint32_t regs[0x1000 / 4];
++static int fake_gpu, fake_shared, fake_allow, fake_legacy_calls, fake_traced_calls;
++static HRESULT fake_result = S_OK;
++static enum GpuPresentStage fake_stage = GPU_PRESENT_CALLED;
++static volatile LONG stress_done, stress_failed, aa_done;
++
++ptrdiff_t xbox_GetMemoryOffset(void) { return (ptrdiff_t)((uintptr_t)guest - 0x80000000u); }
++void xbox_InputKeySet(int vk, int down) { (void)vk; (void)down; }
++void xbox_InputKeysClear(void) {}
++int xbox_InputWin32SideVk(int vk, uint32_t l) { (void)vk; (void)l; return 0; }
++int xbox_InputWin32MouseVk(unsigned m, uint32_t w, int *d)
++{ (void)m; (void)w; (void)d; return 0; }
++void recomp_exit_hook_run(const char *why) { (void)why; }
++bool nv2a_hook_pvideo_snapshot(uint32_t *out) { memcpy(out, regs, sizeof regs); return true; }
++void nv2a_hook_pvideo_consume(unsigned bank) { regs[NV_PVIDEO_BUFFER / 4] &= ~(1u << (bank * 4)); }
++
++int gpu_present_enabled(void) { return 0; }
++int gpu_present_init(HWND hwnd, uint32_t w, uint32_t h) { (void)hwnd; (void)w; (void)h; return 0; }
++int gpu_present_active(void) { return fake_gpu; }
++void gpu_present_shutdown(void) {}
++int gpu_present_frame(const uint32_t *p, int allow, uint64_t id)
++{ (void)p; (void)allow; (void)id; ++fake_legacy_calls; return 1; }
++int gpu_present_frame_capture(const uint32_t *p, int allow, uint64_t id, GpuPresentTrace *trace)
++{
++    (void)p; (void)id;
++    ++fake_traced_calls;
++    fake_allow = allow;
++    memset(trace, 0, sizeof *trace);
++    if (fake_shared) {
++        trace->route = GPU_PRESENT_SHARED_REJECTED;
++        trace->stage = GPU_PRESENT_INCOMPATIBLE;
++        trace->shared_release = S_OK;
++    } else {
++        trace->route = fake_stage == GPU_PRESENT_CALLED ? GPU_PRESENT_CPU_UPLOAD
++                                                       : GPU_PRESENT_NO_INPUT;
++        trace->stage = fake_stage;
++        trace->result = fake_result;
++    }
++    return fake_result == S_OK;
++}
++
++static int stats_identity(const char *path, uint32_t *volume, uint64_t *index)
++{
++    BY_HANDLE_FILE_INFORMATION info;
++    HANDLE f = CreateFileA(path, GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE,
++                           NULL, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL);
++    int ok;
++    if (f == INVALID_HANDLE_VALUE)
++        return 0;
++    ok = GetFileInformationByHandle(f, &info) != 0;
++    CloseHandle(f);
++    if (!ok)
++        return 0;
++    *volume = info.dwVolumeSerialNumber;
++    *index = ((uint64_t)info.nFileIndexHigh << 32) | info.nFileIndexLow;
++    return *index != 0;
++}
++
++static RecompPresentTag tag_for(uint32_t id, uint32_t volume, uint64_t index,
++                                enum RecompPresentPixels pixels)
++{
++    return recomp_present_tag(RECOMP_PRESENT_STATS_READY, id - 1, volume, index, pixels);
++}
++
++static void fill(uint32_t value)
++{
++    uint32_t *p = (uint32_t *)(guest + 0x1000);
++    unsigned i;
++    for (i = 0; i < W * H; ++i)
++        p[i] = value;
++}
++
++static void overlay(uint8_t luma)
++{
++    memset(regs, 0, sizeof regs);
++    regs[NV_PVIDEO_BUFFER / 4] = 1;
++    regs[NV_PVIDEO_OFFSET / 4] = OVERLAY_AT;
++    regs[NV_PVIDEO_LIMIT / 4] = OVERLAY_AT + 4;
++    regs[NV_PVIDEO_FORMAT / 4] = (1u << 16) | 4u;
++    regs[NV_PVIDEO_SIZE_IN / 4] = (1u << 16) | 2u;
++    regs[NV_PVIDEO_SIZE_OUT / 4] = (1u << 16) | 2u;
++    regs[NV_PVIDEO_DS_DX / 4] = 1u << 20;
++    regs[NV_PVIDEO_DT_DY / 4] = 1u << 20;
++    guest[OVERLAY_AT] = luma;
++    guest[OVERLAY_AT + 1] = 128;
++    guest[OVERLAY_AT + 2] = luma;
++    guest[OVERLAY_AT + 3] = 128;
++}
++
++static DWORD WINAPI stress_writer(LPVOID unused)
++{
++    unsigned i;
++    (void)unused;
++    for (i = 1; i <= 2000; ++i) {
++        RecompPresentTag tag = tag_for(i, 1, 1, RECOMP_PRESENT_PIXELS_CPU);
++        fill(i & 1 ? 0x00112233u : 0x00445566u);
++        xbox_FramebufferWindowPresentTagged(FRAME_VA, W * 4, &tag);
++    }
++    InterlockedExchange(&stress_done, 1);
++    return 0;
++}
++
++static int stress(void)
++{
++    HANDLE writer;
++    uint32_t out[W * H];
++    FbPresentInfo info;
++    unsigned i;
++    writer = CreateThread(NULL, 0, stress_writer, NULL, 0, NULL);
++    REQUIRE(writer != NULL);
++    do {
++        if (fb_copy_presented_frame_info(out, &info)) {
++            uint32_t expected = info.tag.flip_candidate & 1 ? 0x00112233u : 0x00445566u;
++            if (info.id != info.tag.flip_candidate)
++                InterlockedExchange(&stress_failed, 1);
++            for (i = 0; i < W * H; ++i)
++                if (out[i] != expected)
++                    InterlockedExchange(&stress_failed, 1);
++        }
++    } while (!InterlockedCompareExchange(&stress_done, 0, 0));
++    REQUIRE(WaitForSingleObject(writer, 5000) == WAIT_OBJECT_0);
++    CloseHandle(writer);
++    REQUIRE(!stress_failed);
++    puts("snapshot and provenance stress passed");
++    return 0;
++}
++
++static DWORD WINAPI stress_aa_writer(LPVOID unused)
++{
++    unsigned n = 0;
++    (void)unused;
++    while (!InterlockedCompareExchange(&aa_done, 0, 0))
++        xbox_FramebufferWindowSetAA((n++ & 1u) + 1u);
++    return 0;
++}
++
++static int stress_aa_snapshot(void)
++{
++    HANDLE writer;
++    uint32_t out[W * H];
++    FbPresentInfo info;
++    unsigned i, x, y;
++    REQUIRE(_putenv_s("RECOMP_PRESENTER_CAPTURE", "fixture") == 0);
++    for (y = 0; y < H * 2; ++y)
++        for (x = 0; x < W * 2; ++x)
++            ((uint32_t *)(guest + 0x1000))[y * W * 2 + x] = 0xff000000u | y;
++    writer = CreateThread(NULL, 0, stress_aa_writer, NULL, 0, NULL);
++    REQUIRE(writer != NULL);
++    for (i = 1; i <= 2000; ++i) {
++        RecompPresentTag tag = tag_for(i, 1, 1, RECOMP_PRESENT_PIXELS_CPU);
++        xbox_FramebufferWindowPresentTagged(FRAME_VA, W * 8, &tag);
++        REQUIRE(fb_copy_presented_frame_info(out, &info));
++        REQUIRE(info.aa_sy == 1 || info.aa_sy == 2);
++        for (y = 0; y < H; ++y)
++            for (x = 0; x < W; ++x)
++                REQUIRE(out[y * W + x] == (0xff000000u | y * info.aa_sy));
++    }
++    InterlockedExchange(&aa_done, 1);
++    REQUIRE(WaitForSingleObject(writer, 5000) == WAIT_OBJECT_0);
++    CloseHandle(writer);
++    puts("concurrent AA metadata and pixels remained coherent");
++    return 0;
++}
++
++static int setup(uint32_t **pixels, HWND *window, HDC *dc, HBITMAP *bitmap, BITMAPINFO *bi)
++{
++    BITMAPINFO target;
++    void *bits;
++    guest = (uint8_t *)VirtualAlloc(NULL, 0x10000, MEM_RESERVE | MEM_COMMIT, PAGE_READWRITE);
++    s_fb_width = W; s_fb_height = H;
++    s_rgb = (uint32_t *)calloc(W * H, 4);
++    if (!guest || !s_rgb)
++        return 0;
++    InterlockedExchange(&s_fb_running, 1);
++    _putenv_s("RECOMP_FB_VA", "");
++    memset(bi, 0, sizeof *bi);
++    bi->bmiHeader.biSize = sizeof bi->bmiHeader;
++    bi->bmiHeader.biWidth = W;
++    bi->bmiHeader.biHeight = -(LONG)H;
++    bi->bmiHeader.biPlanes = 1;
++    bi->bmiHeader.biBitCount = 32;
++    bi->bmiHeader.biCompression = BI_RGB;
++    *window = CreateWindowA("STATIC", "synthetic presenter", WS_OVERLAPPEDWINDOW,
++                            0, 0, 200, 200, NULL, NULL, GetModuleHandleA(NULL), NULL);
++    *dc = CreateCompatibleDC(NULL);
++    memset(&target, 0, sizeof target);
++    target.bmiHeader.biSize = sizeof target.bmiHeader;
++    target.bmiHeader.biWidth = 256;
++    target.bmiHeader.biHeight = -256;
++    target.bmiHeader.biPlanes = 1;
++    target.bmiHeader.biBitCount = 32;
++    *bitmap = CreateDIBSection(*dc, &target, DIB_RGB_COLORS, &bits, NULL, 0);
++    if (!*window || !*dc || !*bitmap || !bits)
++        return 0;
++    SelectObject(*dc, *bitmap);
++    *pixels = (uint32_t *)(guest + 0x1000);
++    return 1;
++}
++
++int main(int argc, char **argv)
++{
++    HWND window;
++    HDC dc;
++    HBITMAP bitmap;
++    BITMAPINFO bi;
++    uint32_t *pixels, volume = 0;
++    uint64_t index = 0;
++    RecompPresentTag tag;
++    FbPresentInfo info;
++    unsigned i, y;
++    int overlay_ok;
++
++    if (argc < 2 || !setup(&pixels, &window, &dc, &bitmap, &bi))
++        return 2;
++    if (!strcmp(argv[1], "stress"))
++        return stress();
++    if (!strcmp(argv[1], "stress_aa"))
++        return stress_aa_snapshot();
++    if (argc != 4 || !stats_identity(argv[3], &volume, &index))
++        return 2;
++    if (!strcmp(argv[1], "collision"))
++        return recomp_capture_open(&s_capture, argv[2]) ? 1 : 0;
++    if (!strcmp(argv[1], "config_direct") || !strcmp(argv[1], "config_no_window")) {
++        REQUIRE(_putenv_s("RECOMP_PRESENTER_CAPTURE", argv[2]) == 0);
++        REQUIRE(_putenv_s("RECOMP_FB_WINDOW", !strcmp(argv[1], "config_direct") ? "1" : "") == 0);
++        REQUIRE(_putenv_s("RECOMP_GPU_DIRECT_PRESENT", "1") == 0);
++        xbox_FramebufferWindowStart();
++        return 1;
++    }
++    REQUIRE(recomp_capture_open(&s_capture, argv[2]));
++    tag = tag_for(1, volume, index, RECOMP_PRESENT_PIXELS_CPU);
++    if (!strcmp(argv[1], "occupied") || !strcmp(argv[1], "invalid_record") ||
++        !strcmp(argv[1], "close_collision")) {
++        RecompCaptureRecord record;
++        char path[RECOMP_CAPTURE_PATH];
++        HANDLE file;
++        DWORD written, got;
++        char sentinel[4] = {0};
++        memset(&record, 0, sizeof record);
++        record.start_ns = 1; record.end_ns = 2;
++        record.origin = RECOMP_CAPTURE_FLIP;
++        record.publication_id = 1;
++        record.tag = tag;
++        record.pitch = W * 4; record.bpp = 4; record.aa_sy = 1;
++        record.route = RECOMP_CAPTURE_GDI;
++        record.result = RECOMP_CAPTURE_GDI_OK;
++        record.width = W; record.height = H; record.image = s_rgb;
++        if (!strcmp(argv[1], "close_collision")) {
++            REQUIRE(recomp_capture_path(path, sizeof path, s_capture.directory, "complete.txt"));
++            file = CreateFileA(path, GENERIC_WRITE, 0, NULL, CREATE_NEW, FILE_ATTRIBUTE_NORMAL, NULL);
++            REQUIRE(file != INVALID_HANDLE_VALUE);
++            REQUIRE(WriteFile(file, "keep", 4, &written, NULL) && written == 4 && CloseHandle(file));
++            REQUIRE(!recomp_capture_close(&s_capture, "thread_stopped"));
++            file = CreateFileA(path, GENERIC_READ, FILE_SHARE_READ, NULL, OPEN_EXISTING,
++                               FILE_ATTRIBUTE_NORMAL, NULL);
++            REQUIRE(file != INVALID_HANDLE_VALUE);
++            REQUIRE(ReadFile(file, sentinel, 4, &got, NULL) && got == 4 && CloseHandle(file));
++            REQUIRE(!memcmp(sentinel, "keep", 4));
++            return 0;
++        }
++        if (!strcmp(argv[1], "invalid_record")) {
++            record.pinned = 1;
++            REQUIRE(!recomp_capture_record(&s_capture, &record));
++            record.pinned = 0;
++            record.tag.pixels = RECOMP_PRESENT_PIXELS_READBACK_FAILED;
++            REQUIRE(!recomp_capture_record(&s_capture, &record));
++            record.tag = tag;
++            record.tag.stats = RECOMP_PRESENT_STATS_DISABLED;
++            REQUIRE(!recomp_capture_record(&s_capture, &record));
++            recomp_capture_abandon(&s_capture);
++            return 0;
++        }
++        REQUIRE(recomp_capture_path(path, sizeof path, s_capture.directory,
++                                    "present-00000000000000000001.bmp"));
++        file = CreateFileA(path, GENERIC_WRITE, 0, NULL, CREATE_NEW, FILE_ATTRIBUTE_NORMAL, NULL);
++        REQUIRE(file != INVALID_HANDLE_VALUE);
++        REQUIRE(WriteFile(file, "keep", 4, &written, NULL) && written == 4 && CloseHandle(file));
++        REQUIRE(!recomp_capture_record(&s_capture, &record));
++        file = CreateFileA(path, GENERIC_READ, FILE_SHARE_READ, NULL, OPEN_EXISTING,
++                           FILE_ATTRIBUTE_NORMAL, NULL);
++        REQUIRE(file != INVALID_HANDLE_VALUE);
++        REQUIRE(ReadFile(file, sentinel, 4, &got, NULL) && got == 4 && CloseHandle(file));
++        REQUIRE(!memcmp(sentinel, "keep", 4));
++        recomp_capture_abandon(&s_capture);
++        return 0;
++    }
++    if (!strcmp(argv[1], "invalid_input")) {
++        DWORD old;
++        REQUIRE(VirtualProtect(guest + 0x1000, 0x1000, PAGE_NOACCESS, &old));
++        xbox_FramebufferWindowPresentTagged(FRAME_VA, W * 4, &tag);
++        return 1;
++    }
++    if (!strcmp(argv[1], "invalid_range")) {
++        xbox_FramebufferWindowPresentTagged(0x83ffffffu, W * 4, &tag);
++        return 1;
++    }
++    fill(0xff112233u);
++    xbox_FramebufferWindowPresentTagged(FRAME_VA, W * 4, &tag);
++    REQUIRE(fb_copy_presented_frame_info(s_rgb, &info));
++    if (!strcmp(argv[1], "shared")) {
++        fake_gpu = fake_shared = 1;
++        fb_show(window, dc, &bi, info.id, &info, RECOMP_CAPTURE_FLIP, 0, 0);
++        return 1;
++    }
++    if (!strcmp(argv[1], "no_client") || !strcmp(argv[1], "no_surface") ||
++        !strcmp(argv[1], "resize_failed") || !strcmp(argv[1], "target_failed") ||
++        !strcmp(argv[1], "other_status")) {
++        if (strcmp(argv[1], "no_client")) {
++            fake_gpu = 1;
++            if (!strcmp(argv[1], "no_surface"))
++                fake_stage = GPU_PRESENT_NO_SURFACE;
++            else if (!strcmp(argv[1], "resize_failed")) {
++                fake_stage = GPU_PRESENT_RESIZE_FAILED;
++                fake_result = E_FAIL;
++            } else if (!strcmp(argv[1], "target_failed"))
++                fake_stage = GPU_PRESENT_TARGET_FAILED;
++            else
++                fake_result = S_FALSE;
++        }
++        fb_show(!strcmp(argv[1], "no_client") ? NULL : window, dc, &bi, info.id, &info,
++                RECOMP_CAPTURE_FLIP, 0, 0);
++        REQUIRE(recomp_capture_close(&s_capture, "thread_stopped"));
++        return 0;
++    }
++    REQUIRE(!strcmp(argv[1], "record"));
++    REQUIRE(info.id == 1 && info.tag.flip_candidate == 1);
++    REQUIRE(fb_show(window, dc, &bi, info.id, &info, RECOMP_CAPTURE_FLIP, 0, 0) == 0);
++
++    fake_gpu = 1;
++    overlay(235);
++    REQUIRE(fb_copy_presented_frame_info(s_rgb, &info));
++    overlay_ok = fb_overlay();
++    REQUIRE(overlay_ok && s_rgb[0] == 0xffffffffu);
++    fb_show(window, dc, &bi, info.id, &info, RECOMP_CAPTURE_FLIP, 0, overlay_ok);
++    REQUIRE(!fake_allow);
++    overlay(16);
++    REQUIRE(fb_copy_presented_frame_info(s_rgb, &info));
++    overlay_ok = fb_overlay();
++    REQUIRE(overlay_ok && s_rgb[0] == 0xff000000u);
++    fb_show(window, dc, &bi, info.id, &info, RECOMP_CAPTURE_FLIP, 0, overlay_ok);
++    REQUIRE(!fake_allow);
++
++    regs[NV_PVIDEO_STOP / 4] = 1;
++    tag = tag_for(2, volume, index, RECOMP_PRESENT_PIXELS_CPU);
++    fill(0xff222222u);
++    xbox_FramebufferWindowPresentTagged(FRAME_VA, W * 4, &tag);
++    tag = tag_for(3, volume, index, RECOMP_PRESENT_PIXELS_CPU);
++    fill(0xff333333u);
++    xbox_FramebufferWindowPresentTagged(FRAME_VA, W * 4, &tag);
++    REQUIRE(fb_copy_presented_frame_info(s_rgb, &info));
++    REQUIRE(info.id == 3 && info.tag.flip_candidate == 3 && !fb_overlay());
++    fb_show(window, dc, &bi, info.id, &info, RECOMP_CAPTURE_FLIP, 0, 0);
++    REQUIRE(fake_allow);
++
++    tag = tag_for(4, volume, index, RECOMP_PRESENT_PIXELS_READBACK);
++    for (i = 0; i < W * H; ++i)
++        ((uint16_t *)pixels)[i] = 0xf800;
++    xbox_FramebufferWindowPresentTagged(FRAME_VA, W * 2, &tag);
++    REQUIRE(fb_copy_presented_frame_info(s_rgb, &info));
++    REQUIRE(info.bpp == 2 && s_rgb[0] == 0x00ff0000u);
++    fb_show(window, dc, &bi, info.id, &info, RECOMP_CAPTURE_FLIP, 0, 0);
++
++    tag = tag_for(5, volume, index, RECOMP_PRESENT_PIXELS_CPU);
++    xbox_FramebufferWindowSetAA(2);
++    for (y = 0; y < H * 2; ++y)
++        for (i = 0; i < W * 2; ++i)
++            pixels[y * W * 2 + i] = !(y & 1) && !(i & 1) ? 0x00123456u : 0x00abcdefu;
++    xbox_FramebufferWindowPresentTagged(FRAME_VA, W * 8, &tag);
++    REQUIRE(fb_copy_presented_frame_info(s_rgb, &info));
++    REQUIRE(info.bpp == 8 && info.aa_sy == 2 && s_rgb[0] == 0x00123456u);
++    fb_show(window, dc, &bi, info.id, &info, RECOMP_CAPTURE_FLIP, 0, 0);
++    fake_result = DXGI_STATUS_OCCLUDED;
++    fb_show(window, dc, &bi, info.id, &info, RECOMP_CAPTURE_FLIP, 0, 0);
++    fake_result = E_FAIL;
++    fb_show(window, dc, &bi, info.id, &info, RECOMP_CAPTURE_FLIP, 0, 0);
++    fake_result = S_OK;
++    fake_gpu = 0;
++    fb_show(window, NULL, &bi, info.id, &info, RECOMP_CAPTURE_FLIP, 0, 0);
++
++    xbox_FramebufferWindowSetAA(1);
++    xbox_FramebufferWindowPresentTagged(FRAME_VA, W * 3, &tag);
++    REQUIRE(fb_copy_presented_frame_info(s_rgb, &info));
++    REQUIRE(info.bpp == 3 && s_rgb[0] == 0);
++    fb_show(window, dc, &bi, info.id, &info, RECOMP_CAPTURE_FLIP, 0, 0);
++    tag = recomp_present_tag(RECOMP_PRESENT_STATS_DISABLED, 0, 0, 0, RECOMP_PRESENT_PIXELS_CPU);
++    fill(0xff777777u);
++    xbox_FramebufferWindowPresentTagged(FRAME_VA, W * 4, &tag);
++    REQUIRE(fb_copy_presented_frame_info(s_rgb, &info));
++    fb_show(window, dc, &bi, info.id, &info, RECOMP_CAPTURE_FLIP, 0, 0);
++    tag = tag_for(6, volume, index, RECOMP_PRESENT_PIXELS_READBACK_FAILED);
++    xbox_FramebufferWindowPresentTagged(FRAME_VA, W * 4, &tag);
++    REQUIRE(fb_copy_presented_frame_info(s_rgb, &info));
++    fb_show(window, dc, &bi, info.id, &info, RECOMP_CAPTURE_FLIP, 0, 0);
++    tag = tag_for(7, volume, index, RECOMP_PRESENT_PIXELS_READBACK_UNAVAILABLE);
++    xbox_FramebufferWindowPresentTagged(FRAME_VA, W * 4, &tag);
++    REQUIRE(fb_copy_presented_frame_info(s_rgb, &info));
++    fb_show(window, dc, &bi, info.id, &info, RECOMP_CAPTURE_FLIP, 0, 0);
++    tag = recomp_present_tag(RECOMP_PRESENT_STATS_NO_ID, 4, 0, 0, RECOMP_PRESENT_PIXELS_CPU);
++    xbox_FramebufferWindowPresentTagged(FRAME_VA, W * 4, &tag);
++    REQUIRE(fb_copy_presented_frame_info(s_rgb, &info));
++    fb_show(window, dc, &bi, info.id, &info, RECOMP_CAPTURE_FLIP, 0, 0);
++    memset(&info, 0, sizeof info);
++    info.pitch = W * 4; info.bpp = 4; info.aa_sy = 1;
++    REQUIRE(_putenv_s("RECOMP_FB_VA", "1") == 0);
++    fb_show(window, dc, &bi, 0, &info, RECOMP_CAPTURE_PINNED, 1, 0);
++    REQUIRE(_putenv_s("RECOMP_FB_VA", "") == 0);
++    fb_show(window, dc, &bi, 0, &info, RECOMP_CAPTURE_FALLBACK, 0, 0);
++    fb_capture_missing_input(0);
++    REQUIRE(recomp_capture_close(&s_capture, "thread_stopped"));
++    fake_gpu = 1;
++    REQUIRE(fb_show(window, dc, &bi, 0, &info, RECOMP_CAPTURE_FALLBACK, 0, 0) == 1);
++    REQUIRE(fake_legacy_calls == 1 && fake_traced_calls > 0);
++    puts("presenter input capture passed");
++    return 0;
++}
+diff --git a/tests/presenter_capture/real_presenter_test.c b/tests/presenter_capture/real_presenter_test.c
+new file mode 100644
+index 0000000000000000000000000000000000000000..644f3e0a63ae04aebf58b71032943e9245b26e0a
+--- /dev/null
++++ b/tests/presenter_capture/real_presenter_test.c
+@@ -0,0 +1,96 @@
++#define COBJMACROS
++#include <windows.h>
++#include <d3d11.h>
++#include <dxgi.h>
++#include <stdint.h>
++#include <stdio.h>
++#include <stdlib.h>
++#include <string.h>
++
++#include "video/gpu_present.c"
++#include "video/fb_present.c"
++
++#define REQUIRE(c) do { if (!(c)) { fprintf(stderr, "FAIL %d: %s\n", __LINE__, #c); return 1; } } while (0)
++
++static uint8_t *guest;
++ptrdiff_t xbox_GetMemoryOffset(void) { return (ptrdiff_t)((uintptr_t)guest - 0x80000000u); }
++void xbox_InputKeySet(int vk, int down) { (void)vk; (void)down; }
++void xbox_InputKeysClear(void) {}
++int xbox_InputWin32SideVk(int vk, uint32_t l) { (void)vk; (void)l; return 0; }
++int xbox_InputWin32MouseVk(unsigned m, uint32_t w, int *d)
++{ (void)m; (void)w; (void)d; return 0; }
++void recomp_exit_hook_run(const char *why) { (void)why; }
++bool nv2a_hook_pvideo_snapshot(uint32_t *regs) { (void)regs; return false; }
++void nv2a_hook_pvideo_consume(unsigned bank) { (void)bank; }
++
++int main(int argc, char **argv)
++{
++    HWND window;
++    HDC dc;
++    HANDLE stats;
++    BY_HANDLE_FILE_INFORMATION id;
++    BITMAPINFO bi;
++    uint32_t source[64], x, y;
++    uint64_t index;
++    RecompPresentTag tag;
++    FbPresentInfo info;
++    ID3D11Texture2D *staging = NULL;
++    D3D11_TEXTURE2D_DESC td;
++    D3D11_MAPPED_SUBRESOURCE mapped;
++
++    if (argc != 3)
++        return 2;
++    _putenv_s("RECOMP_FB_VA", "");
++    _putenv_s("RECOMP_PRESENT_VSYNC", "0");
++    stats = CreateFileA(argv[2], GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE, NULL,
++                        OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL);
++    REQUIRE(stats != INVALID_HANDLE_VALUE && GetFileInformationByHandle(stats, &id));
++    REQUIRE(CloseHandle(stats));
++    index = ((uint64_t)id.nFileIndexHigh << 32) | id.nFileIndexLow;
++    REQUIRE(index != 0);
++    window = CreateWindowA("STATIC", "synthetic D3D presenter", WS_OVERLAPPEDWINDOW,
++                           0, 0, 200, 200, NULL, NULL, GetModuleHandleA(NULL), NULL);
++    REQUIRE(window != NULL);
++    dc = GetDC(window);
++    REQUIRE(dc != NULL);
++    guest = (uint8_t *)VirtualAlloc(NULL, 0x10000, MEM_RESERVE | MEM_COMMIT, PAGE_READWRITE);
++    REQUIRE(guest != NULL);
++    s_fb_width = s_fb_height = 8;
++    s_rgb = (uint32_t *)calloc(64, 4);
++    REQUIRE(s_rgb != NULL);
++    InterlockedExchange(&s_fb_running, 1);
++    memset(&bi, 0, sizeof bi);
++    bi.bmiHeader.biSize = sizeof bi.bmiHeader;
++    bi.bmiHeader.biWidth = 8; bi.bmiHeader.biHeight = -8;
++    bi.bmiHeader.biPlanes = 1; bi.bmiHeader.biBitCount = 32;
++    REQUIRE(gpu_present_init(window, 8, 8));
++    REQUIRE(recomp_capture_open(&s_capture, argv[1]));
++    for (x = 0; x < 64; ++x)
++        source[x] = 0xff000000u | x * 0x00010203u;
++    memcpy(guest + 0x1000, source, sizeof source);
++    tag = recomp_present_tag(RECOMP_PRESENT_STATS_READY, 0, id.dwVolumeSerialNumber, index,
++                             RECOMP_PRESENT_PIXELS_CPU);
++    xbox_FramebufferWindowPresentTagged(0x80001000u, 8 * 4, &tag);
++    REQUIRE(fb_copy_presented_frame_info(s_rgb, &info));
++    fb_show(window, dc, &bi, info.id, &info, RECOMP_CAPTURE_FLIP, 0, 0);
++    memset(&td, 0, sizeof td);
++    td.Width = td.Height = 8; td.MipLevels = td.ArraySize = 1;
++    td.Format = DXGI_FORMAT_B8G8R8A8_UNORM; td.SampleDesc.Count = 1;
++    td.Usage = D3D11_USAGE_STAGING; td.CPUAccessFlags = D3D11_CPU_ACCESS_READ;
++    REQUIRE(SUCCEEDED(ID3D11Device_CreateTexture2D(s_dev, &td, NULL, &staging)));
++    ID3D11DeviceContext_CopyResource(s_ctx, (ID3D11Resource *)staging, (ID3D11Resource *)s_frame);
++    REQUIRE(SUCCEEDED(ID3D11DeviceContext_Map(s_ctx, (ID3D11Resource *)staging, 0,
++                                             D3D11_MAP_READ, 0, &mapped)));
++    for (y = 0; y < 8; ++y)
++        for (x = 0; x < 8; ++x)
++            REQUIRE(((const uint32_t *)((const uint8_t *)mapped.pData + y * mapped.RowPitch))[x]
++                    == source[y * 8 + x]);
++    ID3D11DeviceContext_Unmap(s_ctx, (ID3D11Resource *)staging, 0);
++    ID3D11Texture2D_Release(staging);
++    REQUIRE(recomp_capture_close(&s_capture, "thread_stopped"));
++    gpu_present_shutdown();
++    ReleaseDC(window, dc);
++    DestroyWindow(window);
++    puts("real D3D presenter input matches captured CPU bytes");
++    return 0;
++}
+diff --git a/tests/presenter_capture/run_windows.ps1 b/tests/presenter_capture/run_windows.ps1
+new file mode 100644
+index 0000000000000000000000000000000000000000..305c6baf2d4233863ae023ab690538a6e5e97fb4
+--- /dev/null
++++ b/tests/presenter_capture/run_windows.ps1
+@@ -0,0 +1,85 @@
++param(
++    [string] $BuildDirectory = "",
++    [string] $ProjectTests = "",
++    [switch] $SkipHardware
++)
++
++$ErrorActionPreference = "Stop"
++$root = (Resolve-Path (Join-Path $PSScriptRoot "..\..")).Path
++if (-not $BuildDirectory) {
++    $BuildDirectory = Join-Path $root "build-presenter-capture"
++}
++$BuildDirectory = [IO.Path]::GetFullPath($BuildDirectory)
++if (-not $BuildDirectory.StartsWith($root + "\", [StringComparison]::OrdinalIgnoreCase)) {
++    throw "BuildDirectory must be inside the exported toolkit tree."
++}
++foreach ($tool in @("cl.exe", "link.exe", "python.exe")) {
++    if (-not (Get-Command $tool -ErrorAction SilentlyContinue)) {
++        throw "$tool is missing; run from a VS 2022 x64 developer environment with Python 3."
++    }
++}
++New-Item -ItemType Directory -Force -Path $BuildDirectory | Out-Null
++$includes = @(
++    "/I$(Join-Path $root 'src')",
++    "/I$(Join-Path $root 'src\kernel')",
++    "/I$(Join-Path $root 'src\input')",
++    "/I$(Join-Path $root 'src\nv2a')",
++    "/I$(Join-Path $root 'src\platform')"
++)
++$compile = @("/nologo", "/O2", "/std:c11") + $includes
++$gpuLibs = @("user32.lib", "d3d11.lib", "dxgi.lib", "dxguid.lib", "d3dcompiler.lib")
++
++function Invoke-Checked([string] $exe, [string[]] $arguments) {
++    & $exe @arguments
++    if ($LASTEXITCODE -ne 0) { throw "$exe failed with exit code $LASTEXITCODE" }
++}
++
++$oldBin = $env:PRESCAP_TEST_BIN_DIR
++$oldLegacy = $env:PRESCAP_TEST_HAVE_LEGACY
++$oldSkip = $env:PRESCAP_TEST_SKIP_HARDWARE
++Push-Location $BuildDirectory
++try {
++    Invoke-Checked "cl.exe" ($compile + @(
++        (Join-Path $PSScriptRoot "presenter_capture_test.c"),
++        "/Fe:presenter_capture_test.exe", "user32.lib", "gdi32.lib"))
++    Invoke-Checked "cl.exe" ($compile + @(
++        (Join-Path $PSScriptRoot "shared_gpu_capture_test.c"),
++        "/Fe:shared_gpu_capture_test.exe") + $gpuLibs)
++    Invoke-Checked "cl.exe" ($compile + @(
++        (Join-Path $PSScriptRoot "real_presenter_test.c"),
++        "/Fe:real_presenter_test.exe", "gdi32.lib") + $gpuLibs)
++    $executorSources = @((Join-Path $PSScriptRoot "executor_capture_test.c"))
++    foreach ($name in @("nv2a_pb_exec", "nv2a_census", "nv2a_combiner", "nv2a_flip_hold",
++                        "nv2a_frame_stats", "nv2a_gpu_audit", "nv2a_vsh_interp")) {
++        $executorSources += Join-Path $root "src\kernel\$name.c"
++    }
++    Invoke-Checked "cl.exe" ($compile + @("/Gy", "/c") + $executorSources)
++    Invoke-Checked "link.exe" @(
++        "/nologo", "/opt:ref", "/out:executor_capture_test.exe",
++        "executor_capture_test.obj", "nv2a_pb_exec.obj", "nv2a_census.obj",
++        "nv2a_combiner.obj", "nv2a_flip_hold.obj", "nv2a_frame_stats.obj",
++        "nv2a_gpu_audit.obj", "nv2a_vsh_interp.obj")
++    $env:PRESCAP_TEST_HAVE_LEGACY = ""
++    if ($ProjectTests) {
++        $present = Join-Path $ProjectTests "present_test.c"
++        $shared = Join-Path $ProjectTests "gpu_shared_present_test.c"
++        if (-not (Test-Path $present -PathType Leaf) -or -not (Test-Path $shared -PathType Leaf)) {
++            throw "ProjectTests must contain present_test.c and gpu_shared_present_test.c."
++        }
++        Invoke-Checked "cl.exe" ($compile + @(
++            $present, (Join-Path $PSScriptRoot "legacy_stubs.c"),
++            "/Fe:legacy_present_test.exe", "user32.lib", "gdi32.lib"))
++        Invoke-Checked "cl.exe" ($compile + @(
++            $shared, "/Fe:legacy_shared_test.exe") + $gpuLibs)
++        $env:PRESCAP_TEST_HAVE_LEGACY = "1"
++    }
++    $env:PRESCAP_TEST_BIN_DIR = $BuildDirectory
++    $env:PRESCAP_TEST_SKIP_HARDWARE = if ($SkipHardware) { "1" } else { "" }
++    Invoke-Checked "python.exe" @("-B", (Join-Path $PSScriptRoot "test_present_capture.py"))
++}
++finally {
++    $env:PRESCAP_TEST_BIN_DIR = $oldBin
++    $env:PRESCAP_TEST_HAVE_LEGACY = $oldLegacy
++    $env:PRESCAP_TEST_SKIP_HARDWARE = $oldSkip
++    Pop-Location
++}
+diff --git a/tests/presenter_capture/shared_gpu_capture_test.c b/tests/presenter_capture/shared_gpu_capture_test.c
+new file mode 100644
+index 0000000000000000000000000000000000000000..71f1ff88a91e748ac6e919f481d04030e0814567
+--- /dev/null
++++ b/tests/presenter_capture/shared_gpu_capture_test.c
+@@ -0,0 +1,162 @@
++#define COBJMACROS
++#include <windows.h>
++#include <d3d11.h>
++#include <dxgi.h>
++#include <stdint.h>
++#include <stdio.h>
++#include <string.h>
++
++#include "video/gpu_present.c"
++
++#define REQUIRE(c) do { if (!(c)) { fprintf(stderr, "FAIL %d: %s\n", __LINE__, #c); return 1; } } while (0)
++
++static int shared_test(HWND window, D3D_DRIVER_TYPE driver)
++{
++    D3D_FEATURE_LEVEL feature = D3D_FEATURE_LEVEL_11_0, obtained;
++    ID3D11Device *producer = NULL;
++    ID3D11DeviceContext *producer_ctx = NULL;
++    ID3D11Texture2D *texture = NULL, *target = NULL, *staging = NULL;
++    IDXGIResource *resource = NULL;
++    IDXGIKeyedMutex *mutex = NULL;
++    ID3D11ShaderResourceView *view;
++    D3D11_TEXTURE2D_DESC td;
++    D3D11_MAPPED_SUBRESOURCE mapped;
++    GpuPresentTrace trace;
++    HANDLE handle = NULL;
++    uint32_t source[64], cpu[64], x, y;
++    int held;
++    HRESULT hr;
++
++    REQUIRE(SUCCEEDED(D3D11CreateDevice(NULL, driver, NULL, 0, &feature, 1,
++                                       D3D11_SDK_VERSION, &producer, &obtained, &producer_ctx)));
++    REQUIRE(SUCCEEDED(D3D11CreateDevice(NULL, driver, NULL, 0, &feature, 1,
++                                       D3D11_SDK_VERSION, &s_dev, &obtained, &s_ctx)));
++    memset(&td, 0, sizeof td);
++    td.Width = td.Height = 8;
++    td.MipLevels = td.ArraySize = 1;
++    td.Format = DXGI_FORMAT_B8G8R8A8_UNORM;
++    td.SampleDesc.Count = 1;
++    td.Usage = D3D11_USAGE_DEFAULT;
++    td.BindFlags = D3D11_BIND_SHADER_RESOURCE | D3D11_BIND_RENDER_TARGET;
++    td.MiscFlags = D3D11_RESOURCE_MISC_SHARED_KEYEDMUTEX;
++    REQUIRE(SUCCEEDED(ID3D11Device_CreateTexture2D(producer, &td, NULL, &texture)));
++    REQUIRE(SUCCEEDED(ID3D11Texture2D_QueryInterface(texture, &IID_IDXGIResource, (void **)&resource)));
++    REQUIRE(SUCCEEDED(IDXGIResource_GetSharedHandle(resource, &handle)) && handle);
++    REQUIRE(SUCCEEDED(ID3D11Texture2D_QueryInterface(texture, &IID_IDXGIKeyedMutex, (void **)&mutex)));
++    td.MiscFlags = 0;
++    REQUIRE(SUCCEEDED(ID3D11Device_CreateTexture2D(s_dev, &td, NULL, &target)));
++    REQUIRE(SUCCEEDED(ID3D11Device_CreateRenderTargetView(s_dev, (ID3D11Resource *)target, NULL, &s_rtv)));
++    s_hwnd = window;
++    s_w = s_h = 8;
++    client_size(&s_bw, &s_bh);
++    InterlockedExchange(&s_shared_ready, 1);
++    for (x = 0; x < 64; ++x) {
++        source[x] = 0xff000000u | x * 0x00010203u;
++        cpu[x] = 0xffeeeeeeu;
++    }
++    REQUIRE(IDXGIKeyedMutex_AcquireSync(mutex, 0, 0) == S_OK);
++    ID3D11DeviceContext_UpdateSubresource(producer_ctx, (ID3D11Resource *)texture, 0, NULL,
++                                         source, 8 * 4, 0);
++    ID3D11DeviceContext_Flush(producer_ctx);
++    REQUIRE(SUCCEEDED(IDXGIKeyedMutex_ReleaseSync(mutex, 1)));
++    REQUIRE(IDXGIKeyedMutex_AcquireSync(mutex, 1, 5000) == S_OK);
++    REQUIRE(SUCCEEDED(IDXGIKeyedMutex_ReleaseSync(mutex, 1)));
++    REQUIRE(gpu_present_submit_shared(handle, 8, 8, 42));
++    REQUIRE(!gpu_present_frame_capture(cpu, 1, 42, &trace));
++    REQUIRE(trace.route == GPU_PRESENT_SHARED_REJECTED &&
++            trace.stage == GPU_PRESENT_INCOMPATIBLE && trace.shared_release == S_OK);
++    REQUIRE(IDXGIKeyedMutex_AcquireSync(mutex, 0, 5000) == S_OK);
++    REQUIRE(SUCCEEDED(IDXGIKeyedMutex_ReleaseSync(mutex, 1)));
++
++    /* With capture off, the same protocol still selects the shared texture. */
++    REQUIRE(gpu_present_submit_shared(handle, 8, 8, 43));
++    view = take_shared(1, 43, &held);
++    REQUIRE(view && held);
++    memset(&td, 0, sizeof td);
++    td.Width = td.Height = 8;
++    td.MipLevels = td.ArraySize = 1;
++    td.Format = DXGI_FORMAT_B8G8R8A8_UNORM;
++    td.SampleDesc.Count = 1;
++    td.Usage = D3D11_USAGE_STAGING;
++    td.CPUAccessFlags = D3D11_CPU_ACCESS_READ;
++    REQUIRE(SUCCEEDED(ID3D11Device_CreateTexture2D(s_dev, &td, NULL, &staging)));
++    ID3D11DeviceContext_CopyResource(s_ctx, (ID3D11Resource *)staging,
++                                     (ID3D11Resource *)s_shared_texture);
++    hr = ID3D11DeviceContext_Map(s_ctx, (ID3D11Resource *)staging, 0, D3D11_MAP_READ, 0, &mapped);
++    REQUIRE(SUCCEEDED(hr));
++    for (y = 0; y < 8; ++y)
++        for (x = 0; x < 8; ++x)
++            REQUIRE(((const uint32_t *)((const uint8_t *)mapped.pData + y * mapped.RowPitch))[x]
++                    == source[y * 8 + x]);
++    ID3D11DeviceContext_Unmap(s_ctx, (ID3D11Resource *)staging, 0);
++    ID3D11DeviceContext_Flush(s_ctx);
++    REQUIRE(SUCCEEDED(IDXGIKeyedMutex_ReleaseSync(s_shared_mutex, 0)));
++    ID3D11Texture2D_Release(staging);
++    ID3D11Texture2D_Release(target);
++    IDXGIKeyedMutex_Release(mutex);
++    IDXGIResource_Release(resource);
++    ID3D11Texture2D_Release(texture);
++    ID3D11DeviceContext_Release(producer_ctx);
++    ID3D11Device_Release(producer);
++    gpu_present_shutdown();
++    puts("shared route rejection and default ownership passed");
++    return 0;
++}
++
++static int cpu_test(HWND window)
++{
++    uint32_t source[64], x, y;
++    ID3D11Texture2D *staging = NULL;
++    D3D11_TEXTURE2D_DESC td;
++    D3D11_MAPPED_SUBRESOURCE mapped;
++    GpuPresentTrace trace;
++
++    _putenv_s("RECOMP_PRESENT_VSYNC", "0");
++    REQUIRE(gpu_present_init(window, 8, 8));
++    for (x = 0; x < 64; ++x)
++        source[x] = 0xff000000u | x * 0x00010203u;
++    gpu_present_frame_capture(source, 0, 1, &trace);
++    REQUIRE(trace.route == GPU_PRESENT_CPU_UPLOAD && trace.stage == GPU_PRESENT_CALLED);
++    memset(&td, 0, sizeof td);
++    td.Width = td.Height = 8;
++    td.MipLevels = td.ArraySize = 1;
++    td.Format = DXGI_FORMAT_B8G8R8A8_UNORM;
++    td.SampleDesc.Count = 1;
++    td.Usage = D3D11_USAGE_STAGING;
++    td.CPUAccessFlags = D3D11_CPU_ACCESS_READ;
++    REQUIRE(SUCCEEDED(ID3D11Device_CreateTexture2D(s_dev, &td, NULL, &staging)));
++    ID3D11DeviceContext_CopyResource(s_ctx, (ID3D11Resource *)staging, (ID3D11Resource *)s_frame);
++    REQUIRE(SUCCEEDED(ID3D11DeviceContext_Map(s_ctx, (ID3D11Resource *)staging, 0,
++                                             D3D11_MAP_READ, 0, &mapped)));
++    for (y = 0; y < 8; ++y)
++        for (x = 0; x < 8; ++x)
++            REQUIRE(((const uint32_t *)((const uint8_t *)mapped.pData + y * mapped.RowPitch))[x]
++                    == source[y * 8 + x]);
++    ID3D11DeviceContext_Unmap(s_ctx, (ID3D11Resource *)staging, 0);
++    ID3D11Texture2D_Release(staging);
++    printf("D3D CPU upload passed; Present HRESULT=0x%08lX\n", (unsigned long)trace.result);
++    gpu_present_shutdown();
++    return 0;
++}
++
++int main(int argc, char **argv)
++{
++    HWND window;
++    int result;
++    if (argc != 2)
++        return 2;
++    _putenv_s("RECOMP_FB_VA", "");
++    window = CreateWindowA("STATIC", "synthetic GPU presenter", WS_OVERLAPPEDWINDOW,
++                           0, 0, 200, 200, NULL, NULL, GetModuleHandleA(NULL), NULL);
++    if (!window)
++        return 2;
++    if (!strcmp(argv[1], "cpu"))
++        result = cpu_test(window);
++    else if (!strcmp(argv[1], "warp") || !strcmp(argv[1], "hardware"))
++        result = shared_test(window, !strcmp(argv[1], "warp") ? D3D_DRIVER_TYPE_WARP
++                                                               : D3D_DRIVER_TYPE_HARDWARE);
++    else
++        result = 2;
++    DestroyWindow(window);
++    return result;
++}
+diff --git a/tests/presenter_capture/test_present_capture.py b/tests/presenter_capture/test_present_capture.py
+new file mode 100644
+index 0000000000000000000000000000000000000000..241f99b45c3496d72509bf4910bc3ccaebae57c4
+--- /dev/null
++++ b/tests/presenter_capture/test_present_capture.py
+@@ -0,0 +1,328 @@
++"""Windows synthetic coverage; all generated files stay in the supplied build directory."""
++
++import csv
++import importlib.util
++import os
++from pathlib import Path
++import shutil
++import struct
++import subprocess
++import unittest
++import uuid
++
++
++ROOT = Path(__file__).resolve().parents[2]
++SPEC = importlib.util.spec_from_file_location(
++    "validate_present_capture", ROOT / "tools" / "validate_present_capture.py"
++)
++VERIFIER = importlib.util.module_from_spec(SPEC)
++SPEC.loader.exec_module(VERIFIER)
++
++
++class PresenterCaptureTests(unittest.TestCase):
++    @classmethod
++    def setUpClass(cls):
++        if os.name != "nt":
++            raise unittest.SkipTest("the prototype requires Windows")
++        cls.bin = Path(os.environ["PRESCAP_TEST_BIN_DIR"]).resolve(strict=True)
++        cls.work = cls.bin / ("run-" + uuid.uuid4().hex[:8])
++        cls.work.mkdir()
++        cls.env = {k: v for k, v in os.environ.items() if not k.upper().startswith("RECOMP_")}
++        cls.env["PYTHONDONTWRITEBYTECODE"] = "1"
++        try:
++            cls.stats = cls.work / "stats.csv"
++            cls.capture = cls.work / "capture"
++            cls.run_exe("executor_capture_test", "cpu", cls.stats)
++            cls.run_exe("presenter_capture_test", "record", cls.capture, cls.stats)
++        except Exception:
++            shutil.rmtree(cls.work)
++            raise
++
++    @classmethod
++    def tearDownClass(cls):
++        shutil.rmtree(cls.work)
++
++    @classmethod
++    def run_exe(cls, exe, *args, succeeds=True):
++        result = subprocess.run(
++            [str(cls.bin / (exe + ".exe")), *(str(arg) for arg in args)],
++            cwd=cls.work, env=cls.env, capture_output=True, text=True,
++            encoding="utf-8", errors="replace", timeout=45,
++        )
++        if (result.returncode == 0) != succeeds:
++            raise AssertionError(
++                f"{exe} {args} exited {result.returncode}\n{result.stdout}\n{result.stderr}"
++            )
++        return result
++
++    def copy_capture(self):
++        destination = self.work / ("c" + uuid.uuid4().hex[:8])
++        shutil.copytree(self.capture, destination)
++        return destination
++
++    def new_stats_and_capture(self):
++        name = uuid.uuid4().hex[:8]
++        stats = self.work / ("s" + name + ".csv")
++        capture = self.work / ("c" + name)
++        self.run_exe("executor_capture_test", "cpu", stats)
++        self.run_exe("presenter_capture_test", "record", capture, stats)
++        return stats, capture
++
++    @staticmethod
++    def update_csv(path, change):
++        with path.open(encoding="ascii", newline="") as file:
++            reader = csv.DictReader(file)
++            fields, rows = reader.fieldnames, list(reader)
++        change(rows)
++        with path.open("w", encoding="ascii", newline="") as file:
++            writer = csv.DictWriter(file, fieldnames=fields, lineterminator="\n")
++            writer.writeheader()
++            writer.writerows(rows)
++
++    @staticmethod
++    def first_pixel(directory, sequence):
++        data = (directory / f"present-{sequence:020d}.bmp").read_bytes()
++        if data[:2] != b"BM" or struct.unpack_from("<ii", data, 18) != (4, -3):
++            raise AssertionError("wrong synthetic BMP dimensions")
++        return tuple(data[54:58])
++
++    def test_flip_mapping_repeat_skip_formats_and_overlay_pixels(self):
++        result = VERIFIER.validate(self.capture, self.stats)["records"]
++        linked = [row for row in result if row["flip_link_verified"]]
++        self.assertEqual(len(result), 17)
++        self.assertEqual([row["flip_candidate"] for row in linked], [1, 1, 1, 3, 4, 5])
++        self.assertEqual([row["publication_id"] for row in linked], [1, 1, 1, 3, 4, 5])
++        self.assertEqual([row["route"] for row in linked], ["gdi"] + ["d3d_cpu"] * 5)
++        self.assertEqual([row["overlay"] for row in linked], [False, True, True, False, False, False])
++        self.assertEqual(
++            [self.first_pixel(self.capture, n) for n in range(1, 7)],
++            [(0x33, 0x22, 0x11, 0xff), (0xff, 0xff, 0xff, 0xff),
++             (0, 0, 0, 0xff), (0x33, 0x33, 0x33, 0xff),
++             (0, 0, 0xff, 0), (0x56, 0x34, 0x12, 0)],
++        )
++        ledger = VERIFIER._csv((self.capture / "submissions.csv").read_bytes(), VERIFIER.FIELDS)
++        self.assertEqual([row["format"] for row in ledger[:6]],
++                         ["xrgb8888"] * 4 + ["rgb565", "aa2x32"])
++        self.assertEqual(ledger[4]["pixels"], "readback")
++        self.assertEqual(ledger[5]["aa_sy"], "2")
++
++    def test_failed_or_untrackable_cases_are_not_aligned(self):
++        rows = VERIFIER.validate(self.capture, self.stats)["records"]
++        expected = {
++            7: "d3d_occluded", 8: "d3d_failed", 9: "gdi_failed",
++            10: "unsupported_format", 11: "statistics_disabled",
++            12: "pixels_readback_failed", 13: "pixels_readback_unavailable",
++            14: "statistics_no_identity", 15: "pinned",
++            16: "no_flip_snapshot", 17: "no_input",
++        }
++        for sequence, reason in expected.items():
++            with self.subTest(sequence=sequence):
++                row = rows[sequence - 1]
++                self.assertFalse(row["flip_link_verified"])
++                self.assertIn(reason, row["reasons"])
++
++    def test_statistics_are_required_and_must_be_the_same_file(self):
++        without = VERIFIER.validate(self.capture)["records"]
++        self.assertTrue(all(not row["flip_link_verified"] for row in without))
++        self.assertIn("statistics_not_provided", without[0]["reasons"])
++        other = self.work / ("o" + uuid.uuid4().hex[:8] + ".csv")
++        self.run_exe("executor_capture_test", "cpu", other)
++        wrong = VERIFIER.validate(self.capture, other)["records"]
++        self.assertTrue(all(not row["flip_link_verified"] for row in wrong))
++        self.assertIn("statistics_identity_mismatch", wrong[0]["reasons"])
++        with self.stats.open("ab"):
++            with self.assertRaises(OSError):
++                VERIFIER.validate(self.capture, self.stats)
++
++    def test_missing_and_unknown_statistics_are_not_aligned(self):
++        stats, capture = self.new_stats_and_capture()
++        self.update_csv(stats, lambda rows: rows.__delitem__(slice(3, None)))
++        rows = VERIFIER.validate(capture, stats)["records"]
++        self.assertTrue(rows[3]["flip_link_verified"])
++        self.assertIn("statistics_row_missing", rows[4]["reasons"])
++        stats, capture = self.new_stats_and_capture()
++        def make_unknown(rows):
++            rows[0]["hash"] = "0000000000000000"
++            rows[0]["distinct"] = "-1"
++        self.update_csv(stats, make_unknown)
++        rows = VERIFIER.validate(capture, stats)["records"]
++        self.assertIn("statistics_hash_unknown", rows[0]["reasons"])
++        self.assertFalse(rows[0]["flip_link_verified"])
++
++    def test_corrupt_missing_or_orphaned_files_reject_whole_capture(self):
++        for kind in ("marker", "marker_truncated", "image", "checksum", "partial", "orphan",
++                     "marker_count"):
++            with self.subTest(kind=kind):
++                directory = self.copy_capture()
++                image = directory / "present-00000000000000000001.bmp"
++                if kind == "marker":
++                    (directory / "complete.txt").unlink()
++                elif kind == "marker_truncated":
++                    marker = directory / "complete.txt"
++                    marker.write_bytes(marker.read_bytes()[:-1])
++                elif kind == "image":
++                    image.unlink()
++                elif kind == "checksum":
++                    data = bytearray(image.read_bytes())
++                    data[54] ^= 1
++                    image.write_bytes(data)
++                elif kind == "partial":
++                    (directory / "present-00000000000000000099.bmp.partial").write_bytes(b"partial")
++                elif kind == "orphan":
++                    (directory / "present-00000000000000000099.bmp").write_bytes(b"orphan")
++                else:
++                    marker = directory / "complete.txt"
++                    marker.write_text("version=1\nlast_sequence=16\nreason=thread_stopped\n")
++                with self.assertRaises((OSError, ValueError)):
++                    VERIFIER.validate(directory, self.stats)
++
++    def test_inconsistent_chronology_provenance_and_api_results_rejected(self):
++        def change_sequence(rows):
++            rows[1]["sequence"] = "1"
++        def change_clock(rows):
++            rows[1]["start_ns"] = "0"
++        def change_candidate_order(rows):
++            rows[4]["flip_candidate"] = "2"
++        def change_pin(rows):
++            rows[0]["pinned"] = "1"
++        def change_readback(rows):
++            rows[0]["pixels"] = "readback_failed"
++        def change_stats(rows):
++            rows[0]["stats"] = "disabled"
++        def change_hresult(rows):
++            rows[1]["detail"] = "0x80004005"
++        def change_gdi(rows):
++            rows[0]["detail"] = "0x00000000"
++        def change_filename(rows):
++            rows[0]["image"] = "..\\elsewhere.bmp"
++        for mutate in (change_sequence, change_clock, change_candidate_order, change_pin,
++                       change_readback, change_stats, change_hresult, change_gdi, change_filename):
++            with self.subTest(mutation=mutate.__name__):
++                directory = self.copy_capture()
++                self.update_csv(directory / "submissions.csv", mutate)
++                with self.assertRaises(ValueError):
++                    VERIFIER.validate(directory, self.stats)
++
++    def test_existing_paths_and_invalid_records_never_overwrite(self):
++        before = (self.capture / "submissions.csv").read_bytes()
++        image = (self.capture / "present-00000000000000000001.bmp").read_bytes()
++        self.run_exe("presenter_capture_test", "collision", self.capture, self.stats)
++        self.assertEqual((self.capture / "submissions.csv").read_bytes(), before)
++        self.assertEqual((self.capture / "present-00000000000000000001.bmp").read_bytes(), image)
++        directory = self.work / ("occupied-" + uuid.uuid4().hex[:8])
++        self.run_exe("presenter_capture_test", "occupied", directory, self.stats)
++        self.assertEqual((directory / "present-00000000000000000001.bmp").read_bytes(), b"keep")
++        self.assertFalse((directory / "complete.txt").exists())
++        directory = self.work / ("invalid-record-" + uuid.uuid4().hex[:8])
++        self.run_exe("presenter_capture_test", "invalid_record", directory, self.stats)
++        self.assertEqual(len(VERIFIER._csv((directory / "submissions.csv").read_bytes(),
++                                           VERIFIER.FIELDS)), 0)
++        self.assertFalse((directory / "complete.txt").exists())
++        directory = self.work / ("close-collision-" + uuid.uuid4().hex[:8])
++        self.run_exe("presenter_capture_test", "close_collision", directory, self.stats)
++        self.assertEqual((directory / "complete.txt").read_bytes(), b"keep")
++        with self.assertRaises((OSError, ValueError)):
++            VERIFIER.validate(directory, self.stats)
++
++    def test_shared_input_and_unreadable_input_abort_without_complete_capture(self):
++        for mode, message in (("shared", "shared GPU presenter input is unsupported"),
++                              ("invalid_input", "published framebuffer input is not readable"),
++                              ("invalid_range", "published framebuffer input is not readable")):
++            with self.subTest(mode=mode):
++                directory = self.work / (mode + "-" + uuid.uuid4().hex[:8])
++                result = self.run_exe("presenter_capture_test", mode, directory, self.stats,
++                                      succeeds=False)
++                self.assertEqual(result.returncode, 3)
++                self.assertIn(message, result.stderr)
++                self.assertFalse((directory / "complete.txt").exists())
++                self.assertEqual(list(directory.glob("*.bmp")), [])
++                if mode == "shared":
++                    rows = VERIFIER._csv((directory / "submissions.csv").read_bytes(),
++                                         VERIFIER.FIELDS)
++                    self.assertEqual([(row["route"], row["status"], row["image"]) for row in rows],
++                                     [("d3d_shared_rejected", "shared_rejected", "")])
++                with self.assertRaises((OSError, ValueError)):
++                    VERIFIER.validate(directory, self.stats)
++
++    def test_api_unavailable_and_other_statuses_are_not_aligned(self):
++        for mode, status in (("no_client", "gdi_no_client"), ("no_surface", "d3d_no_surface"),
++                             ("resize_failed", "d3d_resize_failed"),
++                             ("target_failed", "d3d_target_failed"),
++                             ("other_status", "d3d_other_status")):
++            with self.subTest(mode=mode):
++                directory = self.work / (mode + "-" + uuid.uuid4().hex[:8])
++                self.run_exe("presenter_capture_test", mode, directory, self.stats)
++                rows = VERIFIER.validate(directory, self.stats)["records"]
++                self.assertEqual(len(rows), 1)
++                self.assertEqual(rows[0]["status"], status)
++                self.assertFalse(rows[0]["flip_link_verified"])
++                self.assertIn(status, rows[0]["reasons"])
++                self.assertEqual(bool(rows[0]["image"]), mode == "other_status")
++
++    def test_incompatible_configuration_is_rejected(self):
++        for mode, message in (("config_direct", "RECOMP_GPU_DIRECT_PRESENT is incompatible"),
++                              ("config_no_window", "requires RECOMP_FB_WINDOW")):
++            with self.subTest(mode=mode):
++                directory = self.work / (mode + "-" + uuid.uuid4().hex[:8])
++                result = self.run_exe("presenter_capture_test", mode, directory, self.stats,
++                                      succeeds=False)
++                self.assertEqual(result.returncode, 3)
++                self.assertIn(message, result.stderr)
++                self.assertFalse(directory.exists())
++
++    def test_executor_provenance_and_no_statistics_overwrite(self):
++        for mode in ("cpu", "readback", "readback_failed", "readback_unavailable",
++                     "missing", "nostats", "disabled"):
++            with self.subTest(mode=mode):
++                stats = "-" if mode in {"nostats", "disabled"} else (
++                    self.work / (mode + "-" + uuid.uuid4().hex[:8] + ".csv"))
++                self.run_exe("executor_capture_test", mode, stats)
++        old = self.work / ("existing-" + uuid.uuid4().hex[:8] + ".csv")
++        old.write_bytes(b"do not replace")
++        self.run_exe("executor_capture_test", "cpu", old, succeeds=False)
++        self.assertEqual(old.read_bytes(), b"do not replace")
++
++    def test_concurrent_publication_and_snapshot(self):
++        self.run_exe("presenter_capture_test", "stress")
++        self.run_exe("presenter_capture_test", "stress_aa")
++
++    @unittest.skipIf(os.environ.get("PRESCAP_TEST_SKIP_HARDWARE") == "1",
++                     "hardware D3D11 testing explicitly disabled")
++    def test_real_d3d_cpu_input_matches_upload(self):
++        directory = self.work / ("real-" + uuid.uuid4().hex[:8])
++        self.run_exe("real_presenter_test", directory, self.stats)
++        rows = VERIFIER.validate(directory, self.stats)["records"]
++        self.assertEqual(len(rows), 1)
++        self.assertEqual(rows[0]["route"], "d3d_cpu")
++        self.assertIn(rows[0]["status"], {"d3d_ok", "d3d_occluded"})
++        self.assertEqual(rows[0]["flip_link_verified"], rows[0]["status"] == "d3d_ok")
++        data = (directory / rows[0]["image"]).read_bytes()[54:]
++        expected = b"".join(struct.pack("<I", 0xff000000 | i * 0x00010203) for i in range(64))
++        self.assertEqual(data, expected)
++
++    def test_real_shared_texture_rejection_warp(self):
++        self.run_exe("shared_gpu_capture_test", "warp")
++
++    @unittest.skipIf(os.environ.get("PRESCAP_TEST_SKIP_HARDWARE") == "1",
++                     "hardware D3D11 testing explicitly disabled")
++    def test_real_shared_texture_rejection_hardware_and_cpu(self):
++        for mode in ("hardware", "cpu"):
++            with self.subTest(mode=mode):
++                self.run_exe("shared_gpu_capture_test", mode)
++
++    @unittest.skipUnless(os.environ.get("PRESCAP_TEST_HAVE_LEGACY") == "1",
++                         "project's separate existing fixtures were not supplied")
++    def test_existing_project_fixtures_capture_off(self):
++        self.run_exe("legacy_present_test")
++        self.run_exe("legacy_shared_test", "warp")
++
++    @unittest.skipUnless(os.environ.get("PRESCAP_TEST_HAVE_LEGACY") == "1",
++                         "project's separate existing fixtures were not supplied")
++    @unittest.skipIf(os.environ.get("PRESCAP_TEST_SKIP_HARDWARE") == "1",
++                     "hardware D3D11 testing explicitly disabled")
++    def test_existing_project_shared_hardware_capture_off(self):
++        self.run_exe("legacy_shared_test", "hardware")
++
++
++if __name__ == "__main__":
++    unittest.main(verbosity=2)
+diff --git a/tools/validate_present_capture.py b/tools/validate_present_capture.py
+new file mode 100644
+index 0000000000000000000000000000000000000000..7fe3b51999bc4eec39e907230b5ec8ca1bc5052e
+--- /dev/null
++++ b/tools/validate_present_capture.py
+@@ -0,0 +1,299 @@
++#!/usr/bin/env python3
++"""Verify presenter-to-flip links, not visibility, scanout, or world FPS."""
++
++import argparse
++import csv
++import ctypes
++import io
++import json
++import os
++from pathlib import Path
++import re
++import struct
++import sys
++
++
++FIELDS = (
++    "sequence,start_ns,end_ns,origin,publication_id,flip_candidate,stats,"
++    "stats_volume,stats_file_index,pixels,format,pitch,aa_sy,overlay,pinned,"
++    "route,status,detail,width,height,image,image_fnv64"
++).split(",")
++STATS_FIELDS = "flip,t_us,draws,program_vertices,hash,distinct,constants".split(",")
++ROUTES = {
++    "none": {"no_input"},
++    "gdi": {"gdi_no_client", "gdi_ok", "gdi_failed"},
++    "d3d_cpu": {
++        "d3d_no_surface", "d3d_resize_failed", "d3d_target_failed",
++        "d3d_ok", "d3d_occluded", "d3d_failed", "d3d_other_status",
++    },
++    "d3d_shared_rejected": {"shared_rejected"},
++}
++WITH_IMAGE = {"gdi_ok", "gdi_failed", "d3d_ok", "d3d_occluded",
++              "d3d_failed", "d3d_other_status"}
++U64_MAX = (1 << 64) - 1
++
++
++def _read_locked(path):
++    """Open a disk file while denying other writers and delete/rename."""
++    if os.name != "nt":
++        raise ValueError("the capture verifier currently requires Windows")
++    import msvcrt
++    from ctypes import wintypes
++
++    kernel = ctypes.WinDLL("kernel32", use_last_error=True)
++    create = kernel.CreateFileW
++    create.argtypes = (wintypes.LPCWSTR, wintypes.DWORD, wintypes.DWORD,
++                       ctypes.c_void_p, wintypes.DWORD, wintypes.DWORD, wintypes.HANDLE)
++    create.restype = wintypes.HANDLE
++    handle = create(os.fspath(path), 0x80000000, 1, None, 3, 0x80, None)
++    if handle == ctypes.c_void_p(-1).value:
++        raise OSError(ctypes.get_last_error(), "cannot exclusively read", str(path))
++    try:
++        fd = msvcrt.open_osfhandle(handle, os.O_RDONLY | os.O_BINARY)
++    except Exception:
++        kernel.CloseHandle(wintypes.HANDLE(handle))
++        raise
++    return os.fdopen(fd, "rb")
++
++
++def _file_identity(file):
++    import msvcrt
++    from ctypes import wintypes
++
++    class FileTime(ctypes.Structure):
++        _fields_ = [("low", wintypes.DWORD), ("high", wintypes.DWORD)]
++
++    class Info(ctypes.Structure):
++        _fields_ = [
++            ("attributes", wintypes.DWORD), ("created", FileTime),
++            ("accessed", FileTime), ("written", FileTime),
++            ("volume", wintypes.DWORD), ("size_high", wintypes.DWORD),
++            ("size_low", wintypes.DWORD), ("links", wintypes.DWORD),
++            ("index_high", wintypes.DWORD), ("index_low", wintypes.DWORD),
++        ]
++
++    get_info = ctypes.WinDLL("kernel32", use_last_error=True).GetFileInformationByHandle
++    get_info.argtypes = (wintypes.HANDLE, ctypes.POINTER(Info))
++    get_info.restype = wintypes.BOOL
++    info = Info()
++    if not get_info(msvcrt.get_osfhandle(file.fileno()), ctypes.byref(info)):
++        raise OSError(ctypes.get_last_error(), "cannot identify statistics file")
++    index = (info.index_high << 32) | info.index_low
++    if not index or info.attributes & 0x10:
++        raise ValueError("statistics file has no usable file identity")
++    return info.volume, index
++
++
++def _read(path):
++    with _read_locked(path) as file:
++        return file.read()
++
++
++def _uint(value, name, maximum=U64_MAX):
++    if not isinstance(value, str) or not re.fullmatch(r"0|[1-9][0-9]*", value):
++        raise ValueError(f"invalid {name}")
++    number = int(value)
++    if number > maximum:
++        raise ValueError(f"{name} is out of range")
++    return number
++
++
++def _csv(data, header):
++    try:
++        text = data.decode("ascii")
++        rows = list(csv.reader(io.StringIO(text, newline=""), strict=True))
++    except (UnicodeDecodeError, csv.Error) as exc:
++        raise ValueError("invalid CSV") from exc
++    if not text.endswith("\n") or not rows or rows[0] != header:
++        raise ValueError("missing or invalid CSV header or final newline")
++    if any(len(row) != len(header) for row in rows[1:]):
++        raise ValueError("malformed CSV row")
++    return [dict(zip(header, row)) for row in rows[1:]]
++
++
++def _stats(path):
++    with _read_locked(path) as file:
++        identity = _file_identity(file)
++        rows = _csv(file.read(), STATS_FIELDS)
++    entries = {}
++    last_time = 0
++    for expected, row in enumerate(rows, 1):
++        flip = _uint(row["flip"], "statistics flip", (1 << 32) - 1)
++        when = _uint(row["t_us"], "statistics time")
++        _uint(row["draws"], "statistics draws", (1 << 32) - 1)
++        _uint(row["program_vertices"], "statistics vertices", (1 << 32) - 1)
++        if (flip != expected or when < last_time or
++                not re.fullmatch(r"[0-9a-f]{16}", row["hash"]) or
++                not re.fullmatch(r"[0-9a-f]{16}", row["constants"]) or
++                row["distinct"] not in {"-1", "0", "1"} or
++                ((row["hash"] == "0000000000000000") != (row["distinct"] == "-1"))):
++            raise ValueError("statistics rows are incomplete, duplicated, or inconsistent")
++        entries[flip] = row
++        last_time = when
++    return identity, entries
++
++
++def _image(path, width, height, expected_hash):
++    if path.is_symlink() or not path.is_file():
++        raise ValueError(f"missing or unsafe image: {path.name}")
++    with _read_locked(path) as file:
++        header = file.read(54)
++        if len(header) != 54 or header[:2] != b"BM":
++            raise ValueError(f"invalid BMP: {path.name}")
++        size = width * height * 4
++        if (struct.unpack_from("<I", header, 2)[0] != size + 54 or
++                struct.unpack_from("<I", header, 10)[0] != 54 or
++                struct.unpack_from("<I", header, 14)[0] != 40 or
++                struct.unpack_from("<ii", header, 18) != (width, -height) or
++                struct.unpack_from("<HH", header, 26) != (1, 32) or
++                struct.unpack_from("<I", header, 30)[0] != 0 or
++                struct.unpack_from("<I", header, 34)[0] != size):
++            raise ValueError(f"invalid BMP dimensions or format: {path.name}")
++        digest, left = 14695981039346656037, size
++        while left:
++            block = file.read(min(left, 1024 * 1024))
++            if not block:
++                raise ValueError(f"truncated BMP: {path.name}")
++            for byte in block:
++                digest = ((digest ^ byte) * 1099511628211) & U64_MAX
++            left -= len(block)
++        if file.read(1) or f"{digest:016x}" != expected_hash:
++            raise ValueError(f"BMP length or checksum mismatch: {path.name}")
++
++
++def validate(directory, stats_path=None):
++    directory = Path(directory)
++    marker = _read(directory / "complete.txt").decode("ascii").split("\n")
++    if (len(marker) != 4 or marker[3] or marker[0] != "version=1" or
++            not marker[1].startswith("last_sequence=") or
++            marker[2] not in {"reason=window_closed", "reason=thread_stopped"}):
++        raise ValueError("capture has no valid completion marker")
++    final_sequence = _uint(marker[1].split("=", 1)[1], "final sequence")
++    records = _csv(_read(directory / "submissions.csv"), FIELDS)
++    if len(records) != final_sequence:
++        raise ValueError("capture sequence does not match completion marker")
++    identity, stats = _stats(stats_path) if stats_path is not None else (None, {})
++    results, expected_images = [], set()
++    last_end = last_publication = last_candidate = 0
++    for sequence, row in enumerate(records, 1):
++        numbers = {name: _uint(row[name], name) for name in (
++            "sequence", "start_ns", "end_ns", "publication_id", "flip_candidate",
++            "stats_volume", "stats_file_index", "pitch", "aa_sy", "overlay",
++            "pinned", "width", "height",
++        )}
++        if (numbers["sequence"] != sequence or numbers["start_ns"] < last_end or
++                numbers["end_ns"] < numbers["start_ns"] or
++                (numbers["publication_id"] and numbers["publication_id"] < last_publication) or
++                (numbers["flip_candidate"] and numbers["flip_candidate"] < last_candidate) or
++                numbers["flip_candidate"] > (1 << 32) - 1 or
++                numbers["stats_volume"] > (1 << 32) - 1 or
++                any(numbers[name] > (1 << 32) - 1 for name in ("pitch", "aa_sy", "width", "height")) or
++                numbers["overlay"] > 1 or numbers["pinned"] > 1 or
++                row["origin"] not in {"missing", "fallback", "pinned", "flip"} or
++                row["stats"] not in {"untracked", "disabled", "ready", "no_identity", "exhausted"} or
++                row["pixels"] not in {"unknown", "cpu", "readback", "readback_failed",
++                                      "readback_unavailable"} or
++                row["route"] not in ROUTES or row["status"] not in ROUTES[row["route"]] or
++                not re.fullmatch(r"0x[0-9A-F]{8}", row["detail"]) or
++                not re.fullmatch(r"[0-9a-f]{16}", row["image_fnv64"])):
++            raise ValueError(f"invalid metadata at sequence {sequence}")
++        is_flip = row["origin"] == "flip"
++        candidate = numbers["flip_candidate"]
++        if (is_flip != bool(numbers["publication_id"]) or
++                ((row["origin"] == "missing") != (row["route"] == "none")) or
++                (row["origin"] == "pinned" and not numbers["pinned"]) or
++                (numbers["pinned"] and numbers["overlay"]) or
++                (candidate and (not is_flip or numbers["pinned"] or row["stats"] != "ready" or
++                                not numbers["stats_file_index"] or
++                                row["pixels"] not in {"cpu", "readback"})) or
++                (row["stats"] == "ready" and not numbers["stats_file_index"]) or
++                (row["stats"] != "ready" and
++                 (numbers["stats_volume"] or numbers["stats_file_index"]))):
++            raise ValueError(f"inconsistent provenance at sequence {sequence}")
++        detail = int(row["detail"], 16)
++        if ((row["status"] == "no_input" and detail != 0) or
++                (row["status"] == "gdi_ok" and detail in {0, 0xffffffff}) or
++                (row["status"] == "gdi_failed" and detail not in {0, 0xffffffff}) or
++                (row["status"] in {"d3d_no_surface", "d3d_target_failed"} and detail != 0) or
++                (row["status"] == "d3d_resize_failed" and not detail & 0x80000000) or
++                (row["status"] == "d3d_ok" and detail != 0) or
++                (row["status"] == "d3d_occluded" and detail != 0x087a0001) or
++                (row["status"] == "d3d_failed" and not detail & 0x80000000) or
++                (row["status"] == "d3d_other_status" and
++                 (detail in {0, 0x087a0001} or detail & 0x80000000))):
++            raise ValueError(f"inconsistent API result at sequence {sequence}")
++        width, height = numbers["width"], numbers["height"]
++        has_image = row["status"] in WITH_IMAGE
++        if has_image:
++            expected_name = f"present-{sequence:020d}.bmp"
++            if (not width or not height or width > 0x7fffffff or height > 0x7fffffff or
++                    width * height * 4 > 0xffffffff - 54 or row["image"] != expected_name):
++                raise ValueError(f"invalid image reference at sequence {sequence}")
++            _image(directory / expected_name, width, height, row["image_fnv64"])
++            expected_images.add(expected_name)
++        elif row["image"] or row["image_fnv64"] != "0000000000000000":
++            raise ValueError(f"unexpected image at sequence {sequence}")
++        bpp = numbers["pitch"] // width if width else 0
++        expected_format = {2: "rgb565", 4: "xrgb8888", 8: "aa2x32"}.get(
++            bpp, "unsupported_black" if bpp else "unknown")
++        if row["format"] != expected_format:
++            raise ValueError(f"inconsistent format at sequence {sequence}")
++        reasons = []
++        if not is_flip:
++            reasons.append("no_flip_snapshot" if row["origin"] != "missing" else "no_input")
++        if numbers["pinned"]:
++            reasons.append("pinned")
++        if row["stats"] != "ready":
++            reasons.append("statistics_" + row["stats"])
++        if row["pixels"] not in {"cpu", "readback"}:
++            reasons.append("pixels_" + row["pixels"])
++        if row["format"] not in {"rgb565", "xrgb8888", "aa2x32"}:
++            reasons.append("unsupported_format")
++        if row["status"] not in {"gdi_ok", "d3d_ok"}:
++            reasons.append(row["status"])
++        if not has_image:
++            reasons.append("no_image")
++        if not candidate:
++            reasons.append("no_flip_candidate")
++        elif identity is None:
++            reasons.append("statistics_not_provided")
++        elif identity != (numbers["stats_volume"], numbers["stats_file_index"]):
++            reasons.append("statistics_identity_mismatch")
++        elif candidate not in stats:
++            reasons.append("statistics_row_missing")
++        elif stats[candidate]["hash"] == "0000000000000000":
++            reasons.append("statistics_hash_unknown")
++        results.append({"sequence": sequence, "publication_id": numbers["publication_id"],
++                        "flip_candidate": candidate, "flip_link_verified": not reasons,
++                        "reasons": reasons, "route": row["route"], "status": row["status"],
++                        "overlay": bool(numbers["overlay"]), "image": row["image"] or None})
++        last_end = numbers["end_ns"]
++        if numbers["publication_id"]:
++            last_publication = numbers["publication_id"]
++        if candidate:
++            last_candidate = candidate
++    actual_images = {p.name for p in directory.glob("present-*.bmp")}
++    if actual_images != expected_images or list(directory.glob("*.partial")):
++        raise ValueError("capture has orphaned or partial image files")
++    return {
++        "scope": "presenter submission to guest flip only; not scanout, visibility, or world FPS",
++        "records": results,
++    }
++
++
++def main(argv=None):
++    parser = argparse.ArgumentParser(description=__doc__)
++    parser.add_argument("directory", help="completed presenter capture directory")
++    parser.add_argument("--stats", help="the same run's exclusive RECOMP_FRAME_STATS file")
++    args = parser.parse_args(argv)
++    try:
++        result = validate(args.directory, args.stats)
++    except (OSError, ValueError, UnicodeError) as exc:
++        print(f"presenter capture verification failed: {exc}", file=sys.stderr)
++        return 2
++    print(json.dumps(result, indent=2))
++    return 0
++
++
++if __name__ == "__main__":
++    raise SystemExit(main())

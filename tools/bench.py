@@ -1,13 +1,14 @@
 #!/usr/bin/env python3
 """Scripted tutorial benchmark for the performance plan (docs/PERFPLAN.md).
 
-Each run boots the verified build with isolated saves, drives the menus with
-a fixed pad script, and follows the per-flip statistics the executor writes
-(RECOMP_FRAME_STATS) to find the scenes:
+Each run boots the verified build with isolated saves. The default legacy menu
+script and draw-count threshold are heuristics, not verified state signals.
+For matched audio experiments use --readiness manual: an operator navigates
+to the requested visible state and acknowledges each attempt. Timeouts still
+apply. The executor's RECOMP_FRAME_STATS then helps find the measured windows:
 
-* world: the first WORLD_RUN consecutive flips that each carry at least
-  WORLD_DRAWS draws, which menus and loading screens never do (draws are
-  counted before any renderer or probe handles them);
+* world: in legacy mode, the first WORLD_RUN consecutive flips with at least
+  WORLD_DRAWS draws; manual mode starts after the operator's assertion;
 * stationary: the tutorial's static hold after the world appears, found as
   HOLD_DETECT consecutive flips whose picture did not change. The hold is
   measured over STATIONARY_FRAMES rendered frames. Its length is a frame
@@ -17,11 +18,20 @@ a fixed pad script, and follows the per-flip statistics the executor writes
   camera; MOVEMENT_SECONDS from the first stick input are measured. Input
   starts then because the hold does not always end by itself.
 
-A frame "changed" when the presented picture's hash differs from the
-previous flip's. Runs without pictures (a registered back end) fall back to
-the vertex-constant signature, a renderer-independent hint, and say so.
-The benchmark also reports matches to the known 640x480 solid-black hashes;
-these do not identify every black frame or distinguish intentional fades.
+Whole-picture hash changes and the vertex-constant fallback are diagnostics,
+not distinct world frames. Known-black hashes identify only specific surfaces;
+without reviewed images all other movement frames remain unknown. Use
+--analyze-world on a separately reviewed local manifest (see bench_world.py)
+to classify images and exclude HUD regions; raw ROI changes alone are not
+world-frame FPS.
+
+--capture-audio reserves a unique WAV for each audio-enabled attempt. A console
+control event requests the runtime's WAV close handler; a killed process, an
+absent close marker, or a stale/truncated WAV is a failed run. Mixed audio
+variants require manual readiness and deterministic input. Their separately
+reported results are not a comparison until content and input are matched.
+--compare-matched checks a separately reviewed local manifest; its result
+remains an operator assertion, not an automatically identified title state.
 
 The profiler (BRUTEFORCE_PROFILE) and the GPU census (RECOMP_GPU_CENSUS) are
 gated to the measured window of the chosen scene with flag files.
@@ -43,6 +53,9 @@ import sys
 import time
 
 import build
+import bench_control
+import bench_match
+import bench_world
 
 MENU_SCRIPT = "20000:a:200,23000:a:200,26000:down:100,28000:a:200"
 WORLD_DRAWS = 700
@@ -50,6 +63,9 @@ WORLD_RUN = 5
 HOLD_DETECT = 20
 STATIONARY_FRAMES = 120
 MOVEMENT_SECONDS = 40.0
+# Frame CSV flushes at least every 0.5 s of flipping. Drain it after an
+# operator assertion so buffered pre-acknowledgement rows cannot start a hold.
+READY_DRAIN_SECONDS = 1.0
 # Live input after the hold, as (seconds after input starts, line).
 MOVEMENT_INPUT = (
     (4.0, "a:200"), (7.0, "a:200"), (10.0, "a:200"), (13.0, "a:200"),
@@ -77,11 +93,17 @@ DEFAULT_WATCHDOG = 900
 STALL_SECONDS = 60
 
 # nv2a_frame_hash of a 640x480 four-byte black surface, with alpha 0 or 255.
-KNOWN_BLACK_FRAME_HASHES = frozenset(("f22163d4abcd6aa4", "c1b9dd37072f3e56"))
+KNOWN_BLACK_FRAME_HASHES = bench_world.KNOWN_BLACK_FRAME_HASHES
 
 
 class BenchError(Exception):
     pass
+
+
+def clean_environment(parent):
+    """Do not inherit title/framework switches, including a present audio-on flag."""
+    return {key: value for key, value in parent.items()
+            if not key.upper().startswith(("RECOMP_", "BRUTEFORCE_"))}
 
 
 def parse_env(spec):
@@ -170,6 +192,7 @@ def frame_metrics(rows):
     p99 = percentile(intervals, 0.99)
     return {
         "frames": len(rows) - 1,
+        "unit": "flips",
         "seconds": round(duration, 3),
         "fps": round((len(rows) - 1) / duration, 3) if duration > 0 else None,
         "frame_ms_p50": round(percentile(intervals, 0.5), 2),
@@ -194,11 +217,12 @@ def known_black_metrics(rows):
 
 
 def distinct_metrics(rows, start, end):
-    """Distinct frames among rows[start:end], by pixels or the constants hint."""
+    """Whole-picture changes or constant hints, never classified world FPS."""
     picked = []
-    source = None
+    sources = set()
     for i in range(max(start, 1), end):
         is_changed, source = changed(rows, i)
+        sources.add(source)
         if is_changed:
             picked.append(rows[i])
     window = rows[start:end]
@@ -206,7 +230,9 @@ def distinct_metrics(rows, start, end):
         return None
     duration = window[-1]["t"] - window[0]["t"]
     result = {
-        "source": source,
+        "source": next(iter(sources)) if len(sources) == 1 else "mixed",
+        "scope": "whole-frame pixel changes or vertex-constant hints, not world frames",
+        "establishes_world_fps": False,
         "distinct_frames": len(picked),
         "distinct_fps": round(len(picked) / duration, 3) if duration > 0 else None,
     }
@@ -343,7 +369,7 @@ class FlipCapture:
         self.flag.unlink(missing_ok=True)
 
 
-def configure_flip_capture(env, out_dir, census):
+def configure_flip_capture(env, out_dir, census, tagged=False):
     capture_dir = out_dir / "capture"
     capture_dir.mkdir()
     prefix = capture_dir / "hold"
@@ -351,6 +377,8 @@ def configure_flip_capture(env, out_dir, census):
     env["RECOMP_FB_DUMP"] = str(prefix)
     env["RECOMP_FB_DUMP_FLIPS"] = str(flag)
     env["RECOMP_FB_DUMP_FLIPS_ONLY"] = "1"
+    if tagged:
+        env["RECOMP_FB_DUMP_FLIP_ID"] = "1"
     if not census:
         # Census snapshots are written by the periodic report.
         env["RECOMP_PB_REPORT_MS"] = "600000"
@@ -359,7 +387,22 @@ def configure_flip_capture(env, out_dir, census):
 
 def run_once(out_dir, label, scene, env_overrides, threads, watchdog, profile, census,
              config, dump=False, trace_frame=False, capture=False, capture_movement=False,
-             trace_after=TRACE_AFTER):
+             trace_after=TRACE_AFTER, readiness="legacy", ready_timeout=600.0,
+             ready_state=None, no_auto_panels=False, capture_audio=False, phase_timeout=240.0,
+             capture_world=False):
+    overridden = {key.upper() for key in env_overrides}
+    if "RECOMP_AUDIO_WAV" in overridden:
+        raise BenchError("RECOMP_AUDIO_WAV cannot be supplied by a variant; use --capture-audio")
+    if capture_audio and "RECOMP_AUDIO_WAV_SECS" in overridden:
+        raise BenchError("--capture-audio cannot be combined with RECOMP_AUDIO_WAV_SECS")
+    if readiness == "manual" and overridden.intersection({
+            "RECOMP_PAD_SCRIPT", "RECOMP_PAD_LIVE", "RECOMP_FRAME_STATS",
+            "RECOMP_WATCHDOG_SECS"}):
+        raise BenchError("manual readiness owns pad input, frame statistics, and watchdog paths")
+    if (capture or capture_movement or capture_world) and overridden.intersection({
+            "RECOMP_FB_DUMP", "RECOMP_FB_DUMP_FLIPS", "RECOMP_FB_DUMP_FLIPS_ONLY",
+            "RECOMP_FB_DUMP_FLIP_ID"}):
+        raise BenchError("flip capture owns the framebuffer dump paths and gate")
     out_dir = Path(out_dir).resolve()
     out_dir.mkdir(parents=True, exist_ok=False)
     save = out_dir / "save"
@@ -369,9 +412,7 @@ def run_once(out_dir, label, scene, env_overrides, threads, watchdog, profile, c
     live_path.write_text("", encoding="ascii")
     profile_gate = Gate(out_dir / "profile.gate")
     census_gate = Gate(out_dir / "census.gate")
-    env = dict(os.environ)
-    for key in [k for k in env if k.startswith(("RECOMP_", "BRUTEFORCE_"))]:
-        del env[key]
+    env = clean_environment(os.environ)
     env.update({
         "RECOMP_PAD_SCRIPT": MENU_SCRIPT,
         "RECOMP_PAD_LIVE": str(live_path),
@@ -387,21 +428,26 @@ def run_once(out_dir, label, scene, env_overrides, threads, watchdog, profile, c
     if census:
         env["RECOMP_GPU_CENSUS"] = str(out_dir / "census.csv")
         env["RECOMP_GPU_CENSUS_GATE"] = str(census_gate.path)
-    if dump and not (capture or capture_movement):
+    if dump and not (capture or capture_movement or capture_world):
         (out_dir / "dumps").mkdir()
         env["RECOMP_FB_DUMP"] = str(out_dir / "dumps" / "f")
     trace_flag = out_dir / "trace.flag"
     capture_control = None
-    if capture or capture_movement:
+    if capture or capture_movement or capture_world:
         # RECOMP_FB_DUMP_FLIPS dumps every flip while the flag exists; it is
         # created for CAPTURE_FLIPS flips once the hold is being measured, so
         # renderers can be compared on the same static picture (G4).
-        capture_control = configure_flip_capture(env, out_dir, census)
+        capture_control = configure_flip_capture(env, out_dir, census, tagged=capture_world)
     if trace_frame:
         # RECOMP_FRAME_TRACE logs every batch of one frame once the flag
         # exists; it is created TRACE_AFTER seconds into the movement window.
         env["RECOMP_FRAME_TRACE"] = str(trace_flag)
     env.update(env_overrides)
+    if readiness == "manual":
+        env.pop("RECOMP_PAD_SCRIPT", None)
+    wav_path = bench_control.reserve_audio_capture(out_dir, env) if capture_audio else None
+    ready = (bench_control.ManualReadiness(out_dir, ready_state, ready_timeout)
+             if readiness == "manual" else None)
     command, cwd, env = build.prepare_game_run(
         config, experimental_tutorial=True, isolated_saves=save, base_env=env
     )
@@ -409,10 +455,20 @@ def run_once(out_dir, label, scene, env_overrides, threads, watchdog, profile, c
     stderr_path = out_dir / "stderr.txt"
     stderr = stderr_path.open("w", encoding="utf-8")
     started = time.monotonic()
-    process = subprocess.Popen(command, cwd=cwd, env=env, stdout=stdout, stderr=stderr,
-                               stdin=subprocess.DEVNULL)
+    if ready:
+        print(f"[bench] {ready.instruction()}", flush=True)
+    creationflags = subprocess.CREATE_NEW_PROCESS_GROUP if sys.platform == "win32" else 0
+    try:
+        process = subprocess.Popen(command, cwd=cwd, env=env, stdout=stdout, stderr=stderr,
+                                   stdin=subprocess.DEVNULL, creationflags=creationflags)
+    except OSError:
+        stdout.close()
+        stderr.close()
+        raise
     log = FrameLog(frames_path)
-    state = "world"
+    state = "manual_ready" if ready else "world"
+    phase = state
+    phase_started = 0.0
     marks = {}
     rows = log.rows
     world_run = hold_run = 0
@@ -420,13 +476,47 @@ def run_once(out_dir, label, scene, env_overrides, threads, watchdog, profile, c
     last_panel_press = -1e9
     panel_presses = 0
     sent = 0
+    input_events = []
     movement_captures = []
     movement_capture_start = None
+    world_capture_start = None
+    ready_drain_until = None
     result = {
         "label": label, "scene": scene, "env": env_overrides, "threads": threads,
         "generation": cwd.parents[1].name, "toolkit_tree": build.TOOLKIT_TREE,
         "boot_dir": str(cwd), "out_dir": str(out_dir),
+        "options": {
+            "config": config, "watchdog_seconds": watchdog,
+            "profile": bool(profile), "census": bool(census),
+            "periodic_dump": bool(dump), "trace_frame": bool(trace_frame),
+            "trace_after_seconds": trace_after if trace_frame else None,
+            "capture_stationary": bool(capture), "capture_movement": bool(capture_movement),
+            "capture_world": bool(capture_world), "capture_audio": bool(capture_audio),
+            "readiness": readiness, "ready_timeout_seconds": ready_timeout if ready else None,
+            "phase_timeout_seconds": phase_timeout if ready else None,
+            "automatic_panel_presses": not no_auto_panels,
+        },
+        "readiness": {"mode": readiness, "state": ready_state,
+                      "verification": "operator assertion" if ready else "legacy heuristic"},
+        "audio": {"mode": "on" if bench_control.audio_enabled(env) else "off",
+                  "capture_requested": bool(wav_path),
+                  "wav_path": str(wav_path) if wav_path else None},
+        "automatic_panel_presses": not no_auto_panels,
     }
+
+    def send_script_inputs(elapsed, flip):
+        nonlocal sent
+        while sent < len(MOVEMENT_INPUT) and elapsed >= MOVEMENT_INPUT[sent][0]:
+            with live_path.open("a", encoding="ascii") as stream:
+                stream.write(MOVEMENT_INPUT[sent][1] + "\n")
+            input_events.append({
+                "kind": "script", "input": MOVEMENT_INPUT[sent][1],
+                "scheduled_seconds": MOVEMENT_INPUT[sent][0],
+                "dispatch_seconds": round(elapsed, 3),
+                "dispatch_wall_seconds": round(time.monotonic() - started, 3), "flip": flip,
+            })
+            sent += 1
+
     try:
         while True:
             exited = process.poll() is not None
@@ -435,7 +525,10 @@ def run_once(out_dir, label, scene, env_overrides, threads, watchdog, profile, c
             base = len(rows) - len(new)
             for offset, row in enumerate(new):
                 i = base + offset
-                if state == "world":
+                if state == "ready_frames":
+                    marks["world"] = i
+                    state = "hold"
+                elif state == "world":
                     world_run = world_run + 1 if row["draws"] >= WORLD_DRAWS else 0
                     if world_run >= WORLD_RUN:
                         marks["world"] = i - WORLD_RUN + 1
@@ -457,6 +550,10 @@ def run_once(out_dir, label, scene, env_overrides, threads, watchdog, profile, c
                                 profile_gate.open(now)
                                 census_gate.open(now)
                 elif state == "capture":
+                    if ready and changed(rows, i)[0]:
+                        result["error"] = "operator-confirmed hold changed during capture"
+                        state = "failed"
+                        break
                     if capture_control.poll():
                         marks["capture_end"] = len(rows) - 1
                         state = "capture-settle"
@@ -465,6 +562,10 @@ def run_once(out_dir, label, scene, env_overrides, threads, watchdog, profile, c
                         state = "failed"
                         break
                 elif state == "capture-settle":
+                    if ready and changed(rows, i)[0]:
+                        result["error"] = "operator-confirmed hold changed during capture settling"
+                        state = "failed"
+                        break
                     if i - marks["capture_end"] >= CAPTURE_SETTLE_FLIPS:
                         marks["stationary_start"] = i
                         state = "stationary"
@@ -474,6 +575,10 @@ def run_once(out_dir, label, scene, env_overrides, threads, watchdog, profile, c
                 elif state == "stationary":
                     is_changed, _source = changed(rows, i)
                     done = i - marks["stationary_start"] >= STATIONARY_FRAMES
+                    if ready and is_changed:
+                        result["error"] = "operator-confirmed hold changed before stationary measurement completed"
+                        state = "failed"
+                        break
                     if is_changed or done:
                         marks["stationary_end"] = i if done else i - 1
                         marks["stationary_complete"] = done
@@ -489,10 +594,15 @@ def run_once(out_dir, label, scene, env_overrides, threads, watchdog, profile, c
                             marks["input_start_t"] = rows[i]["t"]
                 elif state == "moving":
                     elapsed = row["t"] - marks["input_start_t"]
+                    if ready:
+                        send_script_inputs(elapsed, row["flip"])
                     if elapsed >= MOVEMENT_START and "movement_start" not in marks:
                         marks["movement_start"] = i
                         profile_gate.open(now)
                         census_gate.open(now)
+                        if capture_world:
+                            world_capture_start = len(capture_control.files())
+                            capture_control.open()
                     if capture_movement and len(movement_captures) < len(MOVEMENT_CAPTURE_OFFSETS):
                         if (movement_capture_start is None and
                                 elapsed >= MOVEMENT_START + MOVEMENT_CAPTURE_OFFSETS[len(movement_captures)]):
@@ -514,26 +624,46 @@ def run_once(out_dir, label, scene, env_overrides, threads, watchdog, profile, c
                         marks["movement_end"] = i
                         profile_gate.close(now)
                         census_gate.close(now)
+                        if capture_world:
+                            capture_control.close()
                         state = "finishing"
             if state == "failed":
                 break
+            if state == "manual_ready" and ready.poll(now):
+                result["readiness"].update({"acknowledged": True, "wall_seconds": round(now, 3),
+                                             "last_observed_flip": rows[-1]["flip"] if rows else None,
+                                             "csv_drain_seconds": READY_DRAIN_SECONDS})
+                ready_drain_until = now + READY_DRAIN_SECONDS
+                state = "ready_drain"
+            elif state == "ready_drain" and now >= ready_drain_until:
+                state = "ready_frames"
             if state == "moving" and rows:
                 elapsed = rows[-1]["t"] - marks["input_start_t"]
-                while sent < len(MOVEMENT_INPUT) and elapsed >= MOVEMENT_INPUT[sent][0]:
-                    with live_path.open("a", encoding="ascii") as stream:
-                        stream.write(MOVEMENT_INPUT[sent][1] + "\n")
-                    sent += 1
-                if (len(rows) > PANEL_FRAMES
+                if not ready:
+                    send_script_inputs(elapsed, rows[-1]["flip"])
+                if (not no_auto_panels and len(rows) > PANEL_FRAMES
                         and rows[-1]["t"] - last_panel_press >= PANEL_SECONDS
                         and not any(changed(rows, k)[0]
                                     for k in range(len(rows) - PANEL_FRAMES, len(rows)))):
                     with live_path.open("a", encoding="ascii") as stream:
                         stream.write("a:200\n")
+                    input_events.append({
+                        "kind": "automatic_panel", "input": "a:200",
+                        "dispatch_seconds": round(elapsed, 3),
+                        "dispatch_wall_seconds": round(time.monotonic() - started, 3),
+                        "flip": rows[-1]["flip"],
+                    })
                     last_panel_press = rows[-1]["t"]
                     panel_presses += 1
             if state == "finishing":
+                if process.poll() is not None:
+                    result["error"] = f"process exited with code {process.returncode} during finishing"
+                    break
                 if capture_movement and len(movement_captures) != len(MOVEMENT_CAPTURE_OFFSETS):
                     result["error"] = "movement flip captures did not produce two images per window"
+                    break
+                if ready and scene == "movement" and sent != len(MOVEMENT_INPUT):
+                    result["error"] = "fixed movement input script did not finish"
                     break
                 if wait_for_outputs(out_dir, stderr_path, profile, census, process):
                     break
@@ -543,35 +673,74 @@ def run_once(out_dir, label, scene, env_overrides, threads, watchdog, profile, c
                 result["exit_code"] = process.returncode
                 result["error"] = f"process exited with code {process.returncode} during {state}"
                 break
-            if now > 90 and not frames_path.is_file():
+            if state != phase:
+                phase, phase_started = state, now
+            elif ready and state not in ("manual_ready", "finishing") and now - phase_started > phase_timeout:
+                result["error"] = f"timed out after {phase_timeout:g} s during {state}"
+                break
+            if (not frames_path.is_file() and state != "manual_ready" and
+                    now - (phase_started if ready else 0.0) > 90):
                 result["error"] = "no frame statistics after 90 s"
                 break
             if new:
                 last_flip_at = now
-            elif rows and now - last_flip_at > STALL_SECONDS:
+            elif state != "manual_ready" and rows and now - last_flip_at > STALL_SECONDS:
                 result["error"] = f"stalled: no flip for {STALL_SECONDS} s after flip {len(rows)}"
                 break
             time.sleep(0.1)
+    except bench_control.BenchControlError as exc:
+        result["error"] = str(exc)
     finally:
-        if process.poll() is None:
-            process.kill()
-            process.wait()
-        stdout.close()
-        stderr.close()
         profile_gate.close(time.monotonic() - started)
         census_gate.close(time.monotonic() - started)
         if capture_control:
             capture_control.close()
+        shutdown = bench_control.shutdown_process(process)
+        result["shutdown"] = shutdown
+        if shutdown["error"] or shutdown["forced"]:
+            result["error"] = result.get("error") or shutdown["error"] or "process was forcibly terminated"
+        stdout.close()
+        stderr.close()
         log.poll()
     result["state"] = state
     result["panel_presses"] = panel_presses
+    result["input_events"] = input_events
     result["marks"] = marks
     result["wall_seconds"] = round(time.monotonic() - started, 1)
     result["flips"] = len(rows)
+    if ready and scene == "movement" and state == "finishing":
+        log_text = stderr_path.read_text(encoding="utf-8", errors="replace")
+        queued = [{"input": name, "pad_time_ms": int(when)} for name, when in re.findall(
+            r'PAD: live "([^"]+)" at t=(\d+) ms', log_text)]
+        result["input_runtime"] = {
+            "queued": queued,
+            "scope": "runtime queue acknowledgements, not proof of guest response or matched state",
+        }
+        expected = [event["input"] for event in input_events]
+        if [event["input"] for event in queued] != expected:
+            result["error"] = result.get("error") or (
+                "runtime did not acknowledge the complete live-input sequence; inspect stderr.txt")
+    if wav_path:
+        try:
+            result["audio"]["wav"] = bench_control.validate_wav_capture(wav_path, stderr_path)
+        except bench_control.BenchControlError as exc:
+            result["audio"]["error"] = str(exc)
+            result["error"] = result.get("error") or str(exc)
     if capture_control:
         result["captures"] = [path.name for path in capture_control.files()]
     if capture_movement:
         result["movement_captures"] = movement_captures
+    if capture_world:
+        files = (capture_control.files()[world_capture_start:]
+                 if world_capture_start is not None else [])
+        result["world_capture"] = {
+            "files": [path.name for path in files],
+            "alignment": bench_world.FLIP_ID_ALIGNMENT,
+            "source": "guest framebuffer at flip, not a verified presented image",
+            "performance": "continuous framebuffer dumping perturbs the measured run",
+        }
+        if len(files) < 2:
+            result["error"] = result.get("error") or "continuous movement capture produced fewer than two images"
     if trace_frame:
         trace_log = stderr_path.read_text(encoding="utf-8", errors="replace")
         if "[FTRACE] frame begins" not in trace_log or "[FTRACE] end of frame" not in trace_log:
@@ -597,6 +766,7 @@ def run_once(out_dir, label, scene, env_overrides, threads, watchdog, profile, c
         result["movement_distinct"] = distinct_metrics(rows, a, b)
         result["movement_known_black"] = known_black_metrics(rows[a:b])
         result["movement_agreement"] = pixel_constant_agreement(rows, a, b)
+        result["movement_world"] = bench_world.unreviewed_metrics(rows[a:b])
     if profile:
         result["profile"] = parse_profile(out_dir / "profile.txt")
     if census:
@@ -610,6 +780,8 @@ def wait_for_outputs(out_dir, stderr_path, profile, census, process, timeout=120
     deadline = time.monotonic() + timeout
     closed = time.time()
     while time.monotonic() < deadline:
+        if process.poll() is not None:
+            return False
         ok = True
         if profile:
             text = stderr_path.read_text(encoding="utf-8", errors="replace")
@@ -619,8 +791,6 @@ def wait_for_outputs(out_dir, stderr_path, profile, census, process, timeout=120
             ok &= path.is_file() and path.stat().st_mtime > closed
         if ok:
             return True
-        if process.poll() is not None:
-            return False
         time.sleep(0.5)
     return False
 
@@ -674,6 +844,8 @@ def summarize(results):
 
 
 def print_table(table):
+    print("\n[bench] fps fields below count flips or whole-frame/constant changes; "
+          "none establishes distinct world FPS.")
     for label, row in table.items():
         print(f"\n{label}  ({row['runs']} completed, {row['failed']} failed runs, "
               f"{row['failed_attempts']} failed attempts)")
@@ -705,6 +877,26 @@ def main(argv=None):
                              "renderers (tools/compare_frames.py)")
     parser.add_argument("--capture-movement", action="store_true",
                         help="dump flips at two scripted movement points (diagnostic; may affect fps)")
+    parser.add_argument("--capture-world", action="store_true",
+                        help="dump movement flips with frame-statistics IDs for later review "
+                             "(large, affects timing, and does not prove presented content)")
+    parser.add_argument("--analyze-world", type=Path, metavar="LABELS.json",
+                        help="analyze a local reviewed image manifest without starting the game; "
+                             "schema in tools\\bench_world.py")
+    parser.add_argument("--compare-matched", type=Path, metavar="MATCHES.json",
+                        help="compare only reviewer-matched, fully labeled captured intervals; "
+                             "schema in tools\\bench_match.py")
+    parser.add_argument("--readiness", choices=("legacy", "manual"), default="legacy",
+                        help="legacy timed menu script, or operator-confirmed visible state")
+    parser.add_argument("--ready-state", help="precise visible state the operator must confirm")
+    parser.add_argument("--ready-timeout", type=float, default=600.0,
+                        help="seconds allowed for manual readiness (default: 600)")
+    parser.add_argument("--phase-timeout", type=float, default=240.0,
+                        help="seconds per subsequent manual-run phase (default: 240)")
+    parser.add_argument("--no-auto-panels", action="store_true",
+                        help="disable adaptive A presses; retain only the fixed movement script")
+    parser.add_argument("--capture-audio", action="store_true",
+                        help="reserve and validate a unique WAV for each audio-on attempt")
     parser.add_argument("--trace-frame", action="store_true",
                         help="log every batch of one frame during movement (RECOMP_FRAME_TRACE)")
     parser.add_argument("--trace-after", type=float, default=TRACE_AFTER,
@@ -713,19 +905,78 @@ def main(argv=None):
     parser.add_argument("--out", type=Path, help="results directory (default analysis/bench/<time>)")
     args = parser.parse_args(argv)
     try:
+        if args.analyze_world and args.compare_matched:
+            raise BenchError("--analyze-world and --compare-matched are separate offline modes")
+        if args.analyze_world:
+            print(json.dumps(bench_world.analyze_manifest(args.analyze_world), indent=2))
+            return 0
+        if args.compare_matched:
+            comparison = bench_match.compare_manifest(args.compare_matched, MOVEMENT_INPUT)
+            print(json.dumps(comparison, indent=2))
+            return 0 if comparison["status"] == "reviewer_asserted" else 1
         variants = [parse_env(spec) for spec in (args.variant or ["cpu:"])]
         if args.capture_movement and args.scene != "movement":
             raise BenchError("--capture-movement requires --scene movement")
+        if args.capture_world and args.scene != "movement":
+            raise BenchError("--capture-world requires --scene movement")
+        if args.capture_world and args.capture_movement:
+            raise BenchError("--capture-world and --capture-movement cannot share the flip gate")
         if args.trace_frame and args.scene != "movement":
             raise BenchError("--trace-frame requires --scene movement")
         if not math.isfinite(args.trace_after) or not 0 <= args.trace_after < MOVEMENT_SECONDS:
             raise BenchError("--trace-after must be within the movement window")
+        if (not math.isfinite(args.ready_timeout) or args.ready_timeout <= 0 or
+                not math.isfinite(args.phase_timeout) or args.phase_timeout <= 0):
+            raise BenchError("--ready-timeout and --phase-timeout must be finite and positive")
+        if args.runs < 1 or args.retries < 0 or args.threads < 1 or args.watchdog < 1:
+            raise BenchError("--runs, --threads and --watchdog must be positive; --retries cannot be negative")
+        if args.readiness == "manual" and not (args.ready_state and args.ready_state.strip()):
+            raise BenchError("--readiness manual requires a precise --ready-state")
+        if args.capture_audio and args.readiness != "manual":
+            raise BenchError("--capture-audio requires --readiness manual")
         if len({name for name, _ in variants}) != len(variants):
             raise BenchError("Variant names must be distinct")
+        for _, env in variants:
+            for key, value in env.items():
+                if key.upper() == "RECOMP_AC97_READY" and value.strip() in ("", "0"):
+                    message = ("RECOMP_AC97_READY is enabled by presence, even for 0; "
+                               "omit it for audio off")
+                    if args.readiness == "manual":
+                        raise BenchError(message)
+                    print(f"[bench] warning: {message}", file=sys.stderr, flush=True)
+                if key.upper() == "RECOMP_AUDIO_WAV":
+                    raise BenchError("RECOMP_AUDIO_WAV cannot be supplied by a variant; use --capture-audio")
+        audio_modes = {name: "on" if bench_control.audio_enabled(env) else "off"
+                       for name, env in variants}
+        mixed_audio = len(set(audio_modes.values())) > 1
+        if args.capture_audio and "on" not in audio_modes.values():
+            raise BenchError("--capture-audio needs an audio-on variant (RECOMP_AC97_READY=1)")
+        if mixed_audio:
+            if args.readiness != "manual" or not args.no_auto_panels:
+                raise BenchError("audio-on/off runs require --readiness manual and --no-auto-panels")
+            if not args.capture_audio:
+                raise BenchError("audio-on/off runs require --capture-audio for each audio-on attempt")
+            if args.runs < 3:
+                raise BenchError("audio-on/off runs require at least three runs per variant")
+            other_options = {
+                tuple(sorted((key.upper(), value) for key, value in env.items()
+                             if key.upper() != "RECOMP_AC97_READY"))
+                for _, env in variants
+            }
+            if len(other_options) != 1:
+                raise BenchError("audio-on/off variants must otherwise use identical environment options")
+            if args.scene == "movement" and not (args.capture_movement or args.capture_world):
+                raise BenchError("audio-on/off movement runs require --capture-movement or --capture-world "
+                                 "for later state review")
         out = args.out or build.ANALYSIS_DIR / "bench" / time.strftime("%Y%m%d-%H%M%S")
         out.mkdir(parents=True, exist_ok=False)
         results = []
+        generation = None
         sequence = [v for _ in range(args.runs) for v in variants]
+        if mixed_audio:
+            print("[bench] audio-on/off runs are collection only; do not compare rates until "
+                  "the complete movement states and actual input are independently matched.",
+                  flush=True)
         for number, (name, env) in enumerate(sequence, 1):
             run_dir = out / f"run{number:02d}-{re.sub(r'[^A-Za-z0-9_.-]', '_', name)}"
             print(f"[bench] run {number}/{len(sequence)}: {name} -> {run_dir}", flush=True)
@@ -736,7 +987,15 @@ def main(argv=None):
                 result = run_once(attempt_dir, name, args.scene, env, args.threads,
                                   args.watchdog, not args.no_profile, args.census, args.config,
                                   args.dump, args.trace_frame, args.capture, args.capture_movement,
-                                  args.trace_after)
+                                  args.trace_after, args.readiness, args.ready_timeout,
+                                  args.ready_state, args.no_auto_panels, args.capture_audio,
+                                  args.phase_timeout, args.capture_world)
+                run_generation = result.get("generation")
+                if not result.get("error") and run_generation:
+                    if generation is not None and run_generation != generation:
+                        result["error"] = "game generation changed during the benchmark campaign"
+                    else:
+                        generation = run_generation
                 if not result.get("error"):
                     break
                 attempt_errors.append({"attempt": attempt + 1, "error": result["error"],
@@ -749,8 +1008,14 @@ def main(argv=None):
             stationary = result.get("stationary") or {}
             movement = result.get("movement_distinct") or {}
             print(f"[bench]   state {result['state']}, world at {result.get('world_t')} s, "
-                  f"stationary {stationary.get('fps')} fps, "
-                  f"movement distinct {movement.get('distinct_fps')} fps", flush=True)
+                  f"stationary {stationary.get('fps')} flips/s, "
+                  f"movement whole-frame/constant changes {movement.get('distinct_fps')}/s",
+                  flush=True)
+            world = result.get("movement_world")
+            if world:
+                print(f"[bench]   world-frame rate inconclusive: {world['known_black_frames']} "
+                      f"known black, {world['unknown_frames']} unknown; no reviewed labels",
+                      flush=True)
             black = result.get("movement_known_black")
             if black and black["matched_frames"]:
                 print(f"[bench]   warning: {black['percent']}% of hashed movement frames match "
@@ -760,13 +1025,27 @@ def main(argv=None):
             build.write_json(out / "summary.json", {
                 "scene": args.scene, "runs_per_variant": args.runs, "threads": args.threads,
                 "sequence": [name for name, _ in sequence], "table": table,
+                "generation": generation, "audio_modes": audio_modes,
+                "options": result.get("options"),
+                "variant_options": {name: env for name, env in variants},
+                "metric_definitions": {
+                    "stationary_fps": "flip rate",
+                    "movement_fps": "flip rate, not world FPS",
+                    "movement_distinct_fps": "whole-frame pixel-change rate or constant hint, not world FPS",
+                },
+                "audio_comparison": {
+                    "status": "not_performed",
+                    "reason": "visible states and actual input must be content-matched before comparison",
+                    "review_mode": "python tools\\bench.py --compare-matched MATCHES.json",
+                } if mixed_audio else None,
             })
             if result.get("error"):
                 print(f"[bench] stopping after failed run: {result['error']}", file=sys.stderr)
                 return 1
         print_table(summarize(results))
         print(f"\n[bench] results: {out}")
-    except (BenchError, build.BuildError, OSError) as exc:
+    except (BenchError, build.BuildError, bench_control.BenchControlError,
+            bench_world.WorldLabelError, OSError) as exc:
         print(f"Error: {exc}", file=sys.stderr)
         return 1
     return 0

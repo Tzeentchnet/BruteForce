@@ -22,18 +22,29 @@ Generic code adapted from bloodwake-recomp at commit
 - `src/gpu/d3d11_backend.c`, from the generic parts of `src/gpu/bw_d3d11.c`
   (surfaces, depth buffers, texture cache, state objects, vertex ring,
   vertex-program shaders, their verification readback, and stale texture-pitch
-  normalization). The GPU texture decoder in `src/gpu/texture_decode.c`
+  normalization; later physical-resolution surface sizing, scaled scissor and
+  readback integration also follow that backend). The GPU texture decoder in
+  `src/gpu/texture_decode.c`
   follows the framework's swizzle and colour-conversion semantics; Blood
   Wake's `fast_texture` is prior art for bypassing per-texel CPU decoding.
+- `src/gpu/render_scale.c` and `render_scale.h`, from the generic render-scale,
+  surface-size and full-screen resolve portions of `src/gpu/bw_vfx.c` and
+  `src/gpu/bw_vfx_post.c` (bilinear seed, box downsample and Catmull-Rom
+  upscale). Blood Wake-specific visual effects, hooks and assets are not used.
 - `src/gpu/rc_hlsl.c` and `rc_hlsl.h`, from `src/gpu/bw_rc_hlsl.c` and `.h`
   (pixel shaders from register-combiner state).
 - `src/gpu/vsh_hlsl.c` and `vsh_hlsl.h`, from `src/gpu/bw_vsh_hlsl.c` and `.h`
   (vertex shaders from NV2A vertex programs).
+- `src/gpu/shader_cache.c`, whose persistent combiner pixel-shader caching
+  design follows `src/gpu/bw_pscache.c`.
 - In the local framework patches `0016-extended-render-backend.patch` and
   `0017-gpu-vertex-programs.patch`: the extended back-end interface (from
   `src/toolkit_patches/kernel/bw_backend_ext.h`) and the executor's GPU
   vertex-program hand-off and verification (from the carried
   `nv2a_pb_exec.c`).
+- In `patches/xboxrecomp/0025-gpu-audit.patch`: generic bounded method and
+  request accounting adapted from `src/gpu/bw_gpu_audit.c` and `.h`. The
+  framework observer contains no Blood Wake-specific hooks or assets.
 
 ## bloodwake-recomp MIT license
 

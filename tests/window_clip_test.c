@@ -560,7 +560,7 @@ static void program_triangle(float *vertices, const float depths[3], const float
     method(0x17FC, 0);
 }
 
-static int test_program_near_plane(int zero, int no_near, int clip, int cull, int trace)
+static int test_program_near_plane(int zero, int hud, int no_near, int clip, int cull, int trace)
 {
     static const float white[4] = {1, 1, 1, 1};
     static const float positive_w[3] = {1, 1, 1};
@@ -606,6 +606,30 @@ static int test_program_near_plane(int zero, int no_near, int clip, int cull, in
     program_triangle(vertices, screen_quad_z, screen_quad_w);
     REQUIRE((pixels[3 * 16 + 3] != 0) == (zero || no_near),
             "zero-depth screen output remains visible with large positive W");
+    if (hud) {
+        method_float(0x0A28, -0.5f);
+        method(0x0304, 1);
+        method(0x0344, 1);
+        method(0x0348, 1);
+        clear_color(0);
+        array_triangle(vertices, 0, 16);
+        REQUIRE(!pixels[3 * 16 + 3],
+                "HUD-safe clipping suppresses zero-depth additive geometry");
+        method(0x0344, 0x0302);
+        method(0x0348, 0x0303);
+        clear_color(0);
+        array_triangle(vertices, 0, 16);
+        REQUIRE(pixels[3 * 16 + 3],
+                "HUD-safe clipping retains alpha-blended UI geometry");
+        method(0x0344, 1);
+        method(0x0348, 1);
+        clear_color(0);
+        array_triangle(vertices, 0.25f, 16);
+        REQUIRE(pixels[3 * 16 + 3],
+                "HUD-safe clipping retains positive-depth additive geometry");
+        method(0x0304, 0);
+        method_float(0x0A28, 0.5f);
+    }
     clear_color(0);
     array_triangle(vertices, 0.25f, 16);
     REQUIRE((pixels[3 * 16 + 3] != 0) == (zero || no_near),
@@ -735,6 +759,7 @@ int main(int argc, char **argv)
     if (strncmp(mode, "near-", 5) == 0) {
         int zero = strcmp(mode, "near-off") != 0 && strcmp(mode, "near-unset") != 0 &&
                    strcmp(mode, "near-no-z") != 0 && strcmp(mode, "near-trace-off") != 0;
+        int hud = strcmp(mode, "near-hud") == 0;
         int no_near = strcmp(mode, "near-no-z") == 0 || strcmp(mode, "near-conflict") == 0;
         int clip = strcmp(mode, "near-clip") == 0;
         int cull = strcmp(mode, "near-cull") == 0;
@@ -742,7 +767,7 @@ int main(int argc, char **argv)
 
         if (_putenv_s("RECOMP_PROGRAM_NEAR_ZERO", strcmp(mode, "near-invalid") == 0
                                                    ? "invalid" : strcmp(mode, "near-unset") == 0
-                                                   ? "" : zero ? "1" : "0") != 0 ||
+                                                   ? "" : hud ? "hud" : zero ? "1" : "0") != 0 ||
             _putenv_s("RECOMP_CLIP_NEAR_Z", no_near ? "0" : "1") != 0 ||
             _putenv_s("RECOMP_WINDOW_CLIP", clip ? "1" : "0") != 0 ||
             _putenv_s("RECOMP_CULL_FACE", cull ? "1" : "0") != 0 ||
@@ -757,7 +782,8 @@ int main(int argc, char **argv)
             return 1;
         if (strcmp(mode, "near-backend-after") == 0)
             nv2a_backend_register(&fake_backend);
-        if (!initialize(argv[1]) || !test_program_near_plane(zero, no_near, clip, cull, trace))
+        if (!initialize(argv[1]) ||
+            !test_program_near_plane(zero, hud, no_near, clip, cull, trace))
             return 1;
         puts("programmable near-plane tests passed");
         return 0;

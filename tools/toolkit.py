@@ -13,7 +13,7 @@ ROOT = Path(__file__).resolve().parents[1]
 TOOLKIT_DIR = ROOT / ".deps" / "xboxrecomp"
 TOOLKIT_URL = "https://github.com/sp00nznet/xboxrecomp.git"
 TOOLKIT_BASE = "f0f8a461496a4f23d9b0aeaa284b8d70ba7ab82b"
-TOOLKIT_TREE = "a4489cd69600a1489edea98ac19cf20db242b6d2"
+TOOLKIT_TREE = "9bec55267a19bf1fa54320274cb073d785a8d411"
 LOCAL_PATCHES = (
     ROOT / "patches" / "xboxrecomp" / "0001-bound-extra-thunks.patch",
     ROOT / "patches" / "xboxrecomp" / "0002-model-wbinvd.patch",
@@ -39,6 +39,11 @@ LOCAL_PATCHES = (
     ROOT / "patches" / "xboxrecomp" / "0022-gpu-depth-clear-offload.patch",
     ROOT / "patches" / "xboxrecomp" / "0023-flip-only-frame-captures.patch",
     ROOT / "patches" / "xboxrecomp" / "0024-gpu-shared-presentation.patch",
+    ROOT / "patches" / "xboxrecomp" / "0025-gpu-audit.patch",
+    ROOT / "patches" / "xboxrecomp" / "0026-flip-id-frame-captures.patch",
+    ROOT / "patches" / "xboxrecomp" / "0027-presenter-source-captures.patch",
+    ROOT / "patches" / "xboxrecomp" / "0028-scaled-gpu-presentation.patch",
+    ROOT / "patches" / "xboxrecomp" / "0029-hud-safe-near-plane.patch",
 )
 
 # PRs #262, #280, #277, and #278, in their tested application order.

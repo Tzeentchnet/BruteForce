@@ -1,0 +1,127 @@
+diff --git a/src/kernel/nv2a_pb_exec.c b/src/kernel/nv2a_pb_exec.c
+index 50e7def..57d4de3 100644
+--- a/src/kernel/nv2a_pb_exec.c
++++ b/src/kernel/nv2a_pb_exec.c
+@@ -193,6 +193,12 @@ static int surface_write_refused(uint32_t base, uint32_t bytes, const char *what
+ #define NV097_SET_BLEND_COLOR             0x034C
+ #define NV097_SET_BLEND_EQUATION          0x0350
+ 
++enum {
++    NV_PROGRAM_NEAR_LEGACY,
++    NV_PROGRAM_NEAR_ZERO,
++    NV_PROGRAM_NEAR_HUD,
++};
++
+ #define NV097_SET_SURFACE_CLIP_HORIZONTAL 0x0200
+ #define NV097_SET_SURFACE_CLIP_VERTICAL   0x0204
+ #define NV097_SET_SURFACE_FORMAT          0x0208
+@@ -337,7 +343,7 @@ static struct {
+         uint32_t enabled, face, front, programmed;
+     } cull;
+     int software_cull_enabled;
+-    int program_near_zero_enabled;
++    int program_near_mode;
+     float    aa_sx, aa_sy;              /* anti-aliasing scale of the surface */
+     uint32_t clear_color;
+     uint32_t clears, unhandled_total;
+@@ -930,9 +936,10 @@ static void check_software_backend(const Nv2aBackend *backend)
+                         " registered render back ends are unsupported\n");
+         abort();
+     }
+-    if (s_gpu.program_near_zero_enabled && backend && backend->draw && !extended) {
+-        fprintf(stderr, "[GPU] RECOMP_PROGRAM_NEAR_ZERO requires the software rasterizer;"
+-                        " registered render back ends are unsupported\n");
++    if (s_gpu.program_near_mode != NV_PROGRAM_NEAR_LEGACY
++            && backend && backend->draw && !extended) {
++        fprintf(stderr, "[GPU] RECOMP_PROGRAM_NEAR_ZERO requires the software rasterizer"
++                        " or a capable extended render back end\n");
+         abort();
+     }
+ }
+@@ -3100,8 +3107,10 @@ static void raster_xf_triangle(const Nv2aVshOutput *va, const Nv2aVshOutput *vb,
+  * The polygon is clipped against w = NV_CLIP_W and then the near plane
+  * z = 0 (Sutherland-Hodgman), divided back by w, and fanned. The legacy near
+  * plane is screen z = c[59].z. RECOMP_PROGRAM_NEAR_ZERO=1 instead uses screen
+- * z = 0 for programmable vertices, while leaving fixed-function behavior
+- * unchanged. RECOMP_CLIP_NEAR_Z=0 clips at w only.
++ * z = 0 for programmable vertices. The "hud" mode does that for ordinary and
++ * alpha-blended UI draws, but keeps zero-depth additive draws behind a small
++ * positive plane. Fixed-function behavior is unchanged.
++ * RECOMP_CLIP_NEAR_Z=0 clips at w only.
+  * ponytail: near planes only; x/y/far fall to the rasteriser's bounds
+  * check, which is correct, just slower for huge off-screen triangles. */
+ #define NV_CLIP_W 1e-3f
+@@ -3257,13 +3266,27 @@ static int transform_vertex(uint32_t index, Nv2aVshOutput *out)
+     return 1;
+ }
+ 
++static int additive_blend(void)
++{
++    return s_gpu.blend_enable && s_gpu.blend_dfactor == 1
++        && s_gpu.blend_sfactor != 0;
++}
++
+ static void xf_set_viewport(void)
+ {
+     const float *of = nv2a_vsh_constant(59);
+ 
+     s_xf_o[0] = of[0] * s_gpu.aa_sx;
+     s_xf_o[1] = of[1] * s_gpu.aa_sy;
+-    s_xf_o[2] = s_gpu.program_near_zero_enabled && batch_uses_program() ? 0.0f : of[2];
++    s_xf_o[2] = of[2];
++    if (batch_uses_program()) {
++        if (s_gpu.program_near_mode == NV_PROGRAM_NEAR_ZERO)
++            s_xf_o[2] = 0.0f;
++        else if (s_gpu.program_near_mode == NV_PROGRAM_NEAR_HUD)
++            s_xf_o[2] = additive_blend()
++                ? (of[2] > 1e-6f ? of[2] : 1e-6f)
++                : 0.0f;
++    }
+ }
+ 
+ /* Vertex programs on the GPU (nv2a_backend_ext.h, draw_vsh). With a back end
+@@ -4865,11 +4888,14 @@ void nv2a_pb_exec_method(uint32_t subch, uint32_t method, uint32_t param)
+             abort();
+         }
+         if (program_near_zero && *program_near_zero &&
+-            strcmp(program_near_zero, "0") != 0 && strcmp(program_near_zero, "1") != 0) {
+-            fprintf(stderr, "[GPU] RECOMP_PROGRAM_NEAR_ZERO must be 0 or 1\n");
++            strcmp(program_near_zero, "0") != 0 && strcmp(program_near_zero, "1") != 0 &&
++            strcmp(program_near_zero, "hud") != 0) {
++            fprintf(stderr, "[GPU] RECOMP_PROGRAM_NEAR_ZERO must be 0, 1, or hud\n");
+             abort();
+         }
+-        if (program_near_zero && strcmp(program_near_zero, "1") == 0 &&
++        if (program_near_zero &&
++            (strcmp(program_near_zero, "1") == 0 ||
++             strcmp(program_near_zero, "hud") == 0) &&
+             near_z && near_z[0] == '0') {
+             fprintf(stderr, "[GPU] RECOMP_PROGRAM_NEAR_ZERO requires RECOMP_CLIP_NEAR_Z"
+                             " to remain enabled\n");
+@@ -4879,7 +4905,10 @@ void nv2a_pb_exec_method(uint32_t subch, uint32_t method, uint32_t param)
+         (void)frame_stats_on();      /* before the first constant upload */
+         s_gpu.window_clip_enabled = window_clip && strcmp(window_clip, "1") == 0;
+         s_gpu.software_cull_enabled = software_cull && strcmp(software_cull, "1") == 0;
+-        s_gpu.program_near_zero_enabled = program_near_zero && strcmp(program_near_zero, "1") == 0;
++        s_gpu.program_near_mode =
++            program_near_zero && strcmp(program_near_zero, "1") == 0 ? NV_PROGRAM_NEAR_ZERO :
++            program_near_zero && strcmp(program_near_zero, "hud") == 0 ? NV_PROGRAM_NEAR_HUD :
++            NV_PROGRAM_NEAR_LEGACY;
+         check_software_backend(s_backend);
+         if (s_gpu.window_clip_enabled)
+             fprintf(stderr, "[GPU] experimental window clipping enabled"
+@@ -4887,9 +4916,12 @@ void nv2a_pb_exec_method(uint32_t subch, uint32_t method, uint32_t param)
+         if (s_gpu.software_cull_enabled)
+             fprintf(stderr, "[GPU] experimental face culling enabled"
+                             " (software rasterizer only)\n");
+-        if (s_gpu.program_near_zero_enabled)
++        if (s_gpu.program_near_mode == NV_PROGRAM_NEAR_ZERO)
+             fprintf(stderr, "[GPU] experimental programmable screen-zero near plane enabled"
+-                            " (software rasterizer only)\n");
++                            " (software rasterizer or capable back end)\n");
++        else if (s_gpu.program_near_mode == NV_PROGRAM_NEAR_HUD)
++            fprintf(stderr, "[GPU] HUD-safe programmable near plane enabled;"
++                            " zero-depth additive draws remain clipped\n");
+         s_gpu.aa_sx = s_gpu.aa_sy = 1.0f;
+         /* Stencil state as the hardware resets it: GL_ALWAYS, masks 0xFF,
+          * GL_KEEP, until the title says otherwise. */

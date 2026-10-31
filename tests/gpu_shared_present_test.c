@@ -15,15 +15,15 @@
 
 static int publish(ID3D11DeviceContext *ctx, ID3D11Texture2D *texture,
                    IDXGIKeyedMutex *mutex, HANDLE handle, uint64_t frame_id,
-                   const uint32_t *pixels)
+                   uint32_t width, uint32_t height, const uint32_t *pixels)
 {
     HRESULT hr = IDXGIKeyedMutex_AcquireSync(mutex, 0, 0);
     REQUIRE(hr == S_OK, "producer acquires shared frame");
     ID3D11DeviceContext_UpdateSubresource(ctx, (ID3D11Resource *)texture, 0, NULL,
-                                         pixels, 8 * 4, 0);
+                                         pixels, width * 4, 0);
     ID3D11DeviceContext_Flush(ctx);
     REQUIRE(SUCCEEDED(IDXGIKeyedMutex_ReleaseSync(mutex, 1)), "producer releases shared frame");
-    REQUIRE(gpu_present_submit_shared(handle, 8, 8, frame_id), "submit shared frame");
+    REQUIRE(gpu_present_submit_shared(handle, width, height, frame_id), "submit shared frame");
     return 1;
 }
 
@@ -32,8 +32,9 @@ static int wait_for_discard(IDXGIKeyedMutex *producer, int allow_shared, uint64_
     unsigned i;
     for (i = 0; i < 5000; ++i) {
         int held;
+        uint32_t width = 8, height = 8;
         HRESULT hr;
-        REQUIRE(!take_shared(allow_shared, frame_id, &held) && !held,
+        REQUIRE(!take_shared(allow_shared, frame_id, &held, &width, &height) && !held,
                 "fallback does not use a shared frame");
         hr = IDXGIKeyedMutex_AcquireSync(producer, 0, 0);
         if (hr == S_OK) {
@@ -61,10 +62,18 @@ static int run_shared_test(int hardware)
     D3D11_MAPPED_SUBRESOURCE mapped;
     ID3D11ShaderResourceView *view = NULL;
     HANDLE handle = NULL;
-    uint32_t pixels[64], x, y;
+    uint32_t pixels[128], x, y;
     unsigned i;
     int held = 0;
+    uint32_t shared_width = 8, shared_height = 8;
     HRESULT hr;
+
+    REQUIRE(picture_size(1920, 1080, &shared_width, &shared_height) &&
+            shared_width == 1440 && shared_height == 1080,
+            "fit a 4:3 picture inside a wide output");
+    REQUIRE(picture_size(1280, 1024, &shared_width, &shared_height) &&
+            shared_width == 1280 && shared_height == 960,
+            "fit a 4:3 picture inside a tall output");
 
     REQUIRE(SUCCEEDED(D3D11CreateDevice(NULL, driver, NULL, 0, &feature, 1,
                                         D3D11_SDK_VERSION, &producer, &obtained, &producer_ctx)),
@@ -73,7 +82,8 @@ static int run_shared_test(int hardware)
                                         D3D11_SDK_VERSION, &s_dev, &obtained, &s_ctx)),
             "create presenter device");
     memset(&td, 0, sizeof td);
-    td.Width = td.Height = 8;
+    td.Width = 16;
+    td.Height = 8;
     td.MipLevels = td.ArraySize = 1;
     td.Format = DXGI_FORMAT_B8G8R8A8_UNORM;
     td.SampleDesc.Count = 1;
@@ -93,25 +103,31 @@ static int run_shared_test(int hardware)
     s_w = s_h = 8;
     InterlockedExchange(&s_shared_ready, 1);
     REQUIRE(gpu_present_shared_ready(8, 8), "shared presenter is ready");
-    REQUIRE(!gpu_present_shared_ready(16, 8), "reject incompatible frame size");
+    REQUIRE(gpu_present_shared_ready(16, 8), "independent source dimensions are accepted");
+    REQUIRE(!gpu_present_shared_ready(0, 8) && !gpu_present_shared_ready(16385, 8),
+            "reject invalid shared dimensions");
     REQUIRE(_putenv_s("RECOMP_FB_VA", "1") == 0 &&
             !gpu_present_shared_ready(8, 8) &&
             _putenv_s("RECOMP_FB_VA", "") == 0, "pinned frames use CPU presentation");
-    for (i = 0; i < 64; ++i)
+    for (i = 0; i < 128; ++i)
         pixels[i] = 0xFF000000u | (i * 0x00010203u);
-    REQUIRE(publish(producer_ctx, texture, mutex, handle, 42, pixels), "publish first frame");
-    REQUIRE(!gpu_present_submit_shared(handle, 8, 8, 42), "bound the pending queue");
-    REQUIRE(!take_shared(1, 41, &held) && !held, "do not show a frame before its CPU snapshot");
+    REQUIRE(publish(producer_ctx, texture, mutex, handle, 42, 16, 8, pixels),
+            "publish first frame");
+    REQUIRE(!gpu_present_submit_shared(handle, 16, 8, 42), "bound the pending queue");
+    REQUIRE(!take_shared(1, 41, &held, &shared_width, &shared_height) && !held,
+            "do not show a frame before its CPU snapshot");
     REQUIRE(IDXGIKeyedMutex_AcquireSync(mutex, 0, 0) == WAIT_TIMEOUT,
             "future frame remains owned by the presenter");
     for (i = 0; i < 5000 && !held; ++i) {
-        view = take_shared(1, 42, &held);
+        view = take_shared(1, 42, &held, &shared_width, &shared_height);
         if (!held)
             Sleep(1);
     }
     REQUIRE(view && held, "take matching shared frame");
+    REQUIRE(shared_width == 16 && shared_height == 8, "preserve shared source dimensions");
     memset(&td, 0, sizeof td);
-    td.Width = td.Height = 8;
+    td.Width = 16;
+    td.Height = 8;
     td.MipLevels = td.ArraySize = 1;
     td.Format = DXGI_FORMAT_B8G8R8A8_UNORM;
     td.SampleDesc.Count = 1;
@@ -124,18 +140,21 @@ static int run_shared_test(int hardware)
     hr = ID3D11DeviceContext_Map(s_ctx, (ID3D11Resource *)staging, 0, D3D11_MAP_READ, 0, &mapped);
     REQUIRE(SUCCEEDED(hr), "map shared frame");
     for (y = 0; y < 8; ++y)
-        for (x = 0; x < 8; ++x)
+        for (x = 0; x < 16; ++x)
             REQUIRE(((const uint32_t *)((const uint8_t *)mapped.pData + y * mapped.RowPitch))[x]
-                    == pixels[y * 8 + x], "shared frame pixels match the producer");
+                    == pixels[y * 16 + x], "shared frame pixels match the producer");
     ID3D11DeviceContext_Unmap(s_ctx, (ID3D11Resource *)staging, 0);
     REQUIRE(SUCCEEDED(IDXGIKeyedMutex_ReleaseSync(s_shared_mutex, 0)),
             "return the presented frame to the producer");
 
-    REQUIRE(publish(producer_ctx, texture, mutex, handle, 43, pixels), "publish overlay frame");
+    REQUIRE(publish(producer_ctx, texture, mutex, handle, 43, 16, 8, pixels),
+            "publish overlay frame");
     REQUIRE(wait_for_discard(mutex, 0, 42), "CPU overlay discards a pending shared frame");
-    REQUIRE(publish(producer_ctx, texture, mutex, handle, 44, pixels), "publish stale frame");
+    REQUIRE(publish(producer_ctx, texture, mutex, handle, 44, 16, 8, pixels),
+            "publish stale frame");
     REQUIRE(wait_for_discard(mutex, 1, 45), "stale frame is not displayed");
-    REQUIRE(!take_shared(1, 45, &held) && !held, "empty queue falls back to CPU pixels");
+    REQUIRE(!take_shared(1, 45, &held, &shared_width, &shared_height) && !held,
+            "empty queue falls back to CPU pixels");
 
     ID3D11Texture2D_Release(staging);
     IDXGIKeyedMutex_Release(mutex);

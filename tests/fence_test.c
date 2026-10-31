@@ -19,6 +19,8 @@
 #define INTERRUPT 0x0037D400u
 #define MINIPORT (DEVICE_A + 0x17C8u)
 #define FENCE_EVENT (DEVICE_A + 0x196Cu)
+#define DAC_RAMP 0x0037F000u
+#define DAC_RAMP_BYTES (256u * 3u)
 #define THREADS 8
 #define ITERATIONS 200
 
@@ -33,6 +35,7 @@ static uint32_t connected_interrupt;
 static int acknowledge_result;
 
 void sub_00371AB0_enter(void);
+void sub_0037834E_enter(void);
 void sub_00377F80(void);
 void recomp_icall_fail_log(uint32_t va);
 
@@ -129,6 +132,98 @@ static DWORD WINAPI register_many(LPVOID unused)
     return 0;
 }
 
+static DWORD WINAPI trace_gamma(LPVOID unused)
+{
+    (void)unused;
+    g_eax = MINIPORT;
+    g_edx = DAC_RAMP;
+    sub_0037834E_enter();
+    return g_eax != MINIPORT || g_edx != DAC_RAMP;
+}
+
+static int gamma_test(const char *mode)
+{
+    uint8_t expected[DAC_RAMP_BYTES];
+    HANDLE threads[THREADS];
+    uint32_t eax, edx;
+    unsigned i;
+
+    if (_putenv_s("BRUTEFORCE_DAC_TRACE",
+                  strcmp(mode, "gamma-unset") == 0 ? "" :
+                  (strcmp(mode, "gamma-disabled") == 0 ||
+                   strcmp(mode, "gamma-disabled-guard") == 0) ? "0" :
+                  strcmp(mode, "gamma-invalid-switch") == 0 ? "invalid" : "1") != 0)
+        return 2;
+    put32(MINIPORT, 0xFD000000u);
+    for (i = 0; i < 256u; ++i) {
+        expected[i] = (uint8_t)i;
+        expected[256u + i] = (uint8_t)(255u - i);
+        expected[512u + i] = (uint8_t)(i * 17u + 3u);
+    }
+    memcpy(guest + DAC_RAMP, expected, sizeof(expected));
+    g_eax = MINIPORT;
+    g_edx = DAC_RAMP;
+    g_ecx = 0x11223344u;
+    g_ebx = 0x55667788u;
+    g_ebp = 0x10203040u;
+    g_esp = 0x50607080u;
+    g_esi = 0x90A0B0C0u;
+    g_edi = 0xD0E0F000u;
+    g_eflags = 0x246u;
+    if (strcmp(mode, "gamma-unset") == 0 || strcmp(mode, "gamma-disabled") == 0 ||
+        strcmp(mode, "gamma-invalid-miniport") == 0)
+        g_eax = 0;
+    if (strcmp(mode, "gamma-unset") == 0 || strcmp(mode, "gamma-disabled") == 0)
+        g_edx = 0;
+    if (strcmp(mode, "gamma-unmapped-ramp") == 0)
+        g_edx = 0x00500000u;
+    if (strcmp(mode, "gamma-partial-ramp") == 0)
+        g_edx = 0x0037FF00u;
+    if (strcmp(mode, "gamma-outside-ramp") == 0)
+        g_edx = 0x83FFFF00u;
+    if (strcmp(mode, "gamma-guarded-ramp") == 0 ||
+        strcmp(mode, "gamma-disabled-guard") == 0) {
+        DWORD old_protection;
+        if (!VirtualProtect(guest + DAC_RAMP, 0x1000u,
+                            PAGE_READWRITE | PAGE_GUARD, &old_protection))
+            return 2;
+    }
+    eax = g_eax;
+    edx = g_edx;
+    if (strcmp(mode, "gamma-concurrent") == 0) {
+        for (i = 0; i < THREADS; ++i) {
+            threads[i] = CreateThread(NULL, 0, trace_gamma, NULL, 0, NULL);
+            if (!threads[i])
+                return 2;
+        }
+        if (WaitForMultipleObjects(THREADS, threads, TRUE, 5000) != WAIT_OBJECT_0)
+            return 2;
+        for (i = 0; i < THREADS; ++i) {
+            DWORD result;
+            if (!GetExitCodeThread(threads[i], &result) || result != 0 ||
+                !CloseHandle(threads[i]))
+                return 2;
+        }
+    } else {
+        sub_0037834E_enter();
+    }
+    if (strcmp(mode, "gamma-disabled-guard") == 0) {
+        MEMORY_BASIC_INFORMATION info;
+        DWORD old_protection;
+        if (VirtualQuery(guest + DAC_RAMP, &info, sizeof(info)) != sizeof(info) ||
+            !(info.Protect & PAGE_GUARD) ||
+            !VirtualProtect(guest + DAC_RAMP, 0x1000u, PAGE_READWRITE, &old_protection))
+            return 1;
+    }
+    if (g_eax != eax || g_edx != edx || g_ecx != 0x11223344u ||
+        g_ebx != 0x55667788u || g_ebp != 0x10203040u || g_esp != 0x50607080u ||
+        g_esi != 0x90A0B0C0u || g_edi != 0xD0E0F000u || g_eflags != 0x246u ||
+        *(uint32_t *)(guest + MINIPORT) != 0xFD000000u ||
+        memcmp(guest + DAC_RAMP, expected, sizeof(expected)) != 0)
+        return 1;
+    return 0;
+}
+
 int main(int argc, char **argv)
 {
     const char *mode = argc == 2 ? argv[1] : "";
@@ -143,6 +238,8 @@ int main(int argc, char **argv)
     if (!initialize() || _putenv_s("RECOMP_PB_EXEC", "") != 0 ||
         _putenv_s("RECOMP_PGRAPH_IRQ", "") != 0)
         return 2;
+    if (strncmp(mode, "gamma-", 6) == 0)
+        return gamma_test(mode);
     if (strcmp(mode, "trap-disabled") == 0) {
         g_esp = GUEST_RETURN;
         sub_00377F80();

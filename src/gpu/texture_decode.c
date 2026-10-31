@@ -8,6 +8,7 @@
 #include <string.h>
 
 #include "d3d/d3d8_swizzle.h"
+#include "d3d11_device_status.h"
 #include "texture_decode.h"
 
 static const char s_decode_hlsl[] =
@@ -175,6 +176,59 @@ int gpu_texture_decode_supported(const Nv2aTexture *t)
     return t->pitch != 0;
 }
 
+int gpu_texture_p8_indices_valid(const Nv2aTexture *t, int faces,
+                                 const void *bytes, unsigned palette_entries,
+                                 unsigned *invalid_index)
+{
+    const uint8_t *src = (const uint8_t *)bytes;
+    size_t face_size, stride, i;
+    int face;
+
+    if (invalid_index)
+        *invalid_index = 256;
+    if (!t || t->color != 0x0B || !gpu_texture_decode_supported(t) || !bytes
+        || (faces != 1 && faces != 6) || (faces == 6 && t->width != t->height)
+        || (palette_entries != 32 && palette_entries != 64
+            && palette_entries != 128 && palette_entries != 256)
+        || !gpu_texture_span(t, faces))
+        return 0;
+    face_size = (size_t)t->width * t->height;
+    stride = faces == 6 ? gpu_texture_face_stride(t) : face_size;
+    for (face = 0; face < faces; ++face)
+        for (i = 0; i < face_size; ++i)
+            if (src[(size_t)face * stride + i] >= palette_entries) {
+                if (invalid_index)
+                    *invalid_index = src[(size_t)face * stride + i];
+                return 0;
+            }
+    return 1;
+}
+
+int gpu_texture_decode_p8_cpu(const Nv2aTexture *t, int faces,
+                              const void *bytes, const void *palette,
+                              unsigned palette_entries, uint32_t *output)
+{
+    const uint8_t *src = (const uint8_t *)bytes;
+    const uint8_t *pal = (const uint8_t *)palette;
+    size_t stride, face_size;
+    uint32_t x, y;
+    int face;
+
+    if (!palette || !output || !gpu_texture_p8_indices_valid(t, faces, bytes,
+                                                               palette_entries, NULL))
+        return 0;
+    face_size = (size_t)t->width * t->height;
+    stride = faces == 6 ? gpu_texture_face_stride(t) : face_size;
+    for (face = 0; face < faces; ++face)
+        for (y = 0; y < t->height; ++y)
+            for (x = 0; x < t->width; ++x) {
+                size_t source = (size_t)face * stride + swizzle_offset(x, y, t->width, t->height);
+                size_t dest = (size_t)face * face_size + (size_t)y * t->width + x;
+                memcpy(&output[dest], pal + (size_t)src[source] * 4, 4);
+            }
+    return 1;
+}
+
 static int init_decoder(GpuTextureDecoder *decoder, ID3D11Device *device)
 {
     ID3DBlob *code = NULL, *errors = NULL;
@@ -200,6 +254,7 @@ static int init_decoder(GpuTextureDecoder *decoder, ID3D11Device *device)
                                           &decoder->shader);
     ID3D10Blob_Release(code);
     if (FAILED(hr)) {
+        gpu_d3d11_check_device(device, hr, "creating texture compute shader");
         fprintf(stderr, "[GPU-D3D11] CreateComputeShader failed 0x%08lX\n", (unsigned long)hr);
         decoder->unavailable = 1;
         return 0;
@@ -210,6 +265,7 @@ static int init_decoder(GpuTextureDecoder *decoder, ID3D11Device *device)
     desc.BindFlags = D3D11_BIND_CONSTANT_BUFFER;
     hr = ID3D11Device_CreateBuffer(device, &desc, NULL, &decoder->constants);
     if (FAILED(hr)) {
+        gpu_d3d11_check_device(device, hr, "creating texture compute constants");
         fprintf(stderr, "[GPU-D3D11] texture constants failed 0x%08lX\n", (unsigned long)hr);
         ID3D11ComputeShader_Release(decoder->shader);
         decoder->shader = NULL;
@@ -247,7 +303,7 @@ static HRESULT raw_view(ID3D11Device *device, const void *bytes, UINT size,
 int gpu_texture_decode(GpuTextureDecoder *decoder, ID3D11Device *device,
                        ID3D11DeviceContext *context, const Nv2aTexture *t,
                        int faces, const void *bytes, const void *palette,
-                       ID3D11Texture2D **output)
+                       unsigned palette_entries, ID3D11Texture2D **output)
 {
     struct {
         uint32_t width, height, format, swizzled, bpp, pitch, face_stride, faces;
@@ -264,7 +320,10 @@ int gpu_texture_decode(GpuTextureDecoder *decoder, ID3D11Device *device,
 
     *output = NULL;
     if (!gpu_texture_decode_supported(t) || !bytes || !span
-        || (t->color == 0x0B && !palette) || (faces == 6 && t->width != t->height)) {
+        || (t->color == 0x0B
+            && (!palette || !gpu_texture_p8_indices_valid(t, faces, bytes,
+                                                            palette_entries, NULL)))
+        || (faces == 6 && t->width != t->height)) {
         fprintf(stderr, "[GPU-D3D11] invalid texture compute input\n");
         return 0;
     }
@@ -285,7 +344,7 @@ int gpu_texture_decode(GpuTextureDecoder *decoder, ID3D11Device *device,
     if (FAILED(hr))
         goto failed;
     if (t->color == 0x0B) {
-        hr = raw_view(device, palette, 256 * 4, &pal_buffer, &views[1]);
+        hr = raw_view(device, palette, palette_entries * 4, &pal_buffer, &views[1]);
         if (FAILED(hr))
             goto failed;
     }
@@ -336,6 +395,7 @@ int gpu_texture_decode(GpuTextureDecoder *decoder, ID3D11Device *device,
     return 1;
 
 failed:
+    gpu_d3d11_check_device(device, hr, "creating texture compute resources");
     fprintf(stderr, "[GPU-D3D11] texture compute resource creation failed 0x%08lX\n",
             (unsigned long)hr);
     if (uav) ID3D11UnorderedAccessView_Release(uav);

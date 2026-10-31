@@ -1,0 +1,1422 @@
+diff --git a/src/kernel/CMakeLists.txt b/src/kernel/CMakeLists.txt
+index 9fdf44d..fce12ca 100644
+--- a/src/kernel/CMakeLists.txt
++++ b/src/kernel/CMakeLists.txt
+@@ -32,6 +32,7 @@ set(KERNEL_SOURCES
+     nv2a_combiner.c
+     nv2a_frame_stats.c
+     nv2a_census.c
++    nv2a_gpu_audit.c
+ )
+ 
+ add_library(xbox_kernel STATIC ${KERNEL_SOURCES})
+diff --git a/src/kernel/nv2a_gpu_audit.c b/src/kernel/nv2a_gpu_audit.c
+new file mode 100644
+index 0000000..f68e40f
+--- /dev/null
++++ b/src/kernel/nv2a_gpu_audit.c
+@@ -0,0 +1,583 @@
++/*
++ * Bounded, opt-in GPU request accounting. The method/value accounting and
++ * per-batch observer are adapted from bloodwake-recomp's
++ * src/gpu/bw_gpu_audit.c, commit e631edddfe56d22344e9f696923aeb6d78a9e7ba.
++ *
++ * Copyright (c) 2026 the bloodwake-recomp contributors
++ *
++ * Permission is hereby granted, free of charge, to any person obtaining a
++ * copy of this software and associated documentation files (the "Software"),
++ * to deal in the Software without restriction, including without limitation
++ * the rights to use, copy, modify, merge, publish, distribute, sublicense,
++ * and/or sell copies of the Software, and to permit persons to whom the
++ * Software is furnished to do so, subject to the following conditions:
++ *
++ * The above copyright notice and this permission notice shall be included in
++ * all copies or substantial portions of the Software.
++ *
++ * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
++ * IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
++ * FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
++ * AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
++ * LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING
++ * FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
++ * DEALINGS IN THE SOFTWARE.
++ */
++#include "nv2a_gpu_audit.h"
++
++#include <stdio.h>
++#include <stdlib.h>
++#include <string.h>
++#include <time.h>
++
++#ifdef _WIN32
++#ifndef WIN32_LEAN_AND_MEAN
++#define WIN32_LEAN_AND_MEAN
++#endif
++#include <windows.h>
++static SRWLOCK s_lock = SRWLOCK_INIT;
++#define AUDIT_LOCK() AcquireSRWLockExclusive(&s_lock)
++#define AUDIT_UNLOCK() ReleaseSRWLockExclusive(&s_lock)
++#else
++#include <pthread.h>
++static pthread_mutex_t s_lock = PTHREAD_MUTEX_INITIALIZER;
++#define AUDIT_LOCK() pthread_mutex_lock(&s_lock)
++#define AUDIT_UNLOCK() pthread_mutex_unlock(&s_lock)
++#endif
++
++#define AUDIT_METHODS 2048u
++#define AUDIT_SUBCHANNELS 8u
++#define AUDIT_VALUES 6u
++#define AUDIT_SLOTS 4096u
++#define AUDIT_LIMIT (AUDIT_SLOTS * 3u / 4u)
++
++typedef struct {
++    uint64_t count, unhandled, mirror_only, other;
++    uint64_t value_count[AUDIT_VALUES];
++    uint32_t values[AUDIT_VALUES];
++    uint32_t nvalues;
++} AuditMethod;
++
++typedef struct {
++    uint32_t category;
++    uint64_t key;
++    uint64_t count, vertices;
++} AuditEntry;
++
++typedef struct {
++    uint32_t primitive, route, reasons, stride;
++    uint64_t requested[NV2A_AUDIT_INPUT_COUNT];
++    uint64_t buffered[NV2A_AUDIT_INPUT_COUNT];
++    int active;
++} AuditBatch;
++
++enum {
++    CAT_SUMMARY = 1, CAT_ROUTE, CAT_SOURCE, CAT_PRIMITIVE, CAT_REASON,
++    CAT_BACKEND, CAT_FALLBACK, CAT_VISIBILITY, CAT_CULL, CAT_INPUT,
++    CAT_CLEAR_FLAGS, CAT_CLEAR_SIZE, CAT_CLEAR_RECT_SET, CAT_CLEAR_RECT_H,
++    CAT_CLEAR_RECT_V, CAT_FLIP_SIZE, CAT_FLIP_FORMAT, CAT_SEMAPHORE,
++    CAT_OUTPUT, CAT_REJECTION
++};
++
++static AuditMethod s_methods[AUDIT_SUBCHANNELS][AUDIT_METHODS];
++static AuditEntry s_entries[AUDIT_SLOTS];
++static AuditBatch s_batch;
++static uint32_t s_used;
++static uint64_t s_table_overflow, s_value_overflow, s_saturations;
++static uint64_t s_bad_methods, s_bad_unhandled, s_bad_mirror;
++static int s_enabled, s_path_ok, s_warned;
++static char s_path[4096];
++static time_t s_last_report;
++
++static void add_saturating(uint64_t *value, uint64_t amount)
++{
++    if (UINT64_MAX - *value < amount) {
++        *value = UINT64_MAX;
++        if (s_saturations != UINT64_MAX)
++            s_saturations++;
++    } else {
++        *value += amount;
++    }
++}
++
++static void add_entry(uint32_t category, uint64_t key, uint64_t count, uint64_t vertices)
++{
++    uint32_t i, n;
++    if (!count && !vertices)
++        return;
++    i = (category * 0x9E3779B1u ^ (uint32_t)(key ^ (key >> 32)) * 0x85EBCA6Bu)
++        & (AUDIT_SLOTS - 1);
++    for (n = 0; n < AUDIT_SLOTS; n++, i = (i + 1) & (AUDIT_SLOTS - 1)) {
++        AuditEntry *e = &s_entries[i];
++        if (!e->category) {
++            if (s_used >= AUDIT_LIMIT)
++                break;
++            e->category = category;
++            e->key = key;
++            s_used++;
++        } else if (e->category != category || e->key != key) {
++            continue;
++        }
++        add_saturating(&e->count, count);
++        add_saturating(&e->vertices, vertices);
++        return;
++    }
++    add_saturating(&s_table_overflow, 1);
++}
++
++static int valid_method(uint32_t subch, uint32_t method)
++{
++    return subch < AUDIT_SUBCHANNELS && method < 0x2000u && !(method & 3u);
++}
++
++/* Payload words are still counted, but their values are not state. */
++static int bulk_method(uint32_t subch, uint32_t method)
++{
++    return subch == 0 && ((method >= 0x0B00 && method < 0x0C00)
++        || (method >= 0x1500 && method < 0x1720)
++        || (method >= 0x1800 && method < 0x1B00));
++}
++
++static void audit_initialize(void)
++{
++    const char *on = getenv("RECOMP_GPU_AUDIT");
++    s_enabled = on && strcmp(on, "1") == 0;
++    if (s_enabled) {
++        const char *path = getenv("RECOMP_GPU_AUDIT_FILE");
++        size_t len;
++        if (!path || !*path)
++            path = "gpu_audit.csv";
++        len = strlen(path);
++        s_path_ok = len < sizeof s_path;
++        if (s_path_ok)
++            memcpy(s_path, path, len + 1);
++        else
++            fprintf(stderr, "[GPU-AUDIT] report path is too long\n");
++        s_last_report = time(NULL);
++        atexit(nv2a_gpu_audit_write);
++    }
++}
++
++#ifdef _WIN32
++static INIT_ONCE s_once = INIT_ONCE_STATIC_INIT;
++static BOOL CALLBACK audit_initialize_once(PINIT_ONCE once, PVOID parameter, PVOID *context)
++{
++    (void)once; (void)parameter; (void)context;
++    audit_initialize();
++    return TRUE;
++}
++#else
++static pthread_once_t s_once = PTHREAD_ONCE_INIT;
++#endif
++
++int nv2a_gpu_audit_enabled(void)
++{
++#ifdef _WIN32
++    InitOnceExecuteOnce(&s_once, audit_initialize_once, NULL, NULL);
++#else
++    pthread_once(&s_once, audit_initialize);
++#endif
++    return s_enabled;
++}
++
++void nv2a_gpu_audit_method(uint32_t subch, uint32_t method, uint32_t value)
++{
++    AuditMethod *m;
++    uint32_t i;
++    if (!nv2a_gpu_audit_enabled())
++        return;
++    AUDIT_LOCK();
++    if (!valid_method(subch, method)) {
++        add_saturating(&s_bad_methods, 1);
++        AUDIT_UNLOCK();
++        return;
++    }
++    m = &s_methods[subch][method / 4];
++    add_saturating(&m->count, 1);
++    if (!bulk_method(subch, method)) {
++        for (i = 0; i < m->nvalues && m->values[i] != value; i++)
++            ;
++        if (i < m->nvalues) {
++            add_saturating(&m->value_count[i], 1);
++        } else if (m->nvalues < AUDIT_VALUES) {
++            m->values[i] = value;
++            m->value_count[i] = 1;
++            m->nvalues++;
++        } else {
++            add_saturating(&m->other, 1);
++            add_saturating(&s_value_overflow, 1);
++        }
++    }
++    AUDIT_UNLOCK();
++}
++
++void nv2a_gpu_audit_unhandled(uint32_t subch, uint32_t method)
++{
++    if (!nv2a_gpu_audit_enabled())
++        return;
++    AUDIT_LOCK();
++    if (valid_method(subch, method))
++        add_saturating(&s_methods[subch][method / 4].unhandled, 1);
++    else
++        add_saturating(&s_bad_unhandled, 1);
++    AUDIT_UNLOCK();
++}
++
++void nv2a_gpu_audit_mirror_only(uint32_t subch, uint32_t method)
++{
++    if (!nv2a_gpu_audit_enabled())
++        return;
++    AUDIT_LOCK();
++    if (valid_method(subch, method))
++        add_saturating(&s_methods[subch][method / 4].mirror_only, 1);
++    else
++        add_saturating(&s_bad_mirror, 1);
++    AUDIT_UNLOCK();
++}
++
++void nv2a_gpu_audit_semaphore(enum Nv2aAuditSemaphore event)
++{
++    if (!nv2a_gpu_audit_enabled() || (unsigned)event >= NV2A_AUDIT_SEMAPHORE_COUNT)
++        return;
++    AUDIT_LOCK();
++    add_entry(CAT_SEMAPHORE, (uint32_t)event, 1, 0);
++    AUDIT_UNLOCK();
++}
++
++static void finish_batch(uint32_t culled, uint32_t drawn, uint32_t clipped,
++                         uint32_t offscreen, uint32_t degenerate)
++{
++    uint32_t source, i, tail = 0;
++    uint64_t requested, buffered;
++    if (!s_batch.active)
++        return;
++    source = s_batch.buffered[NV2A_AUDIT_IMMEDIATE] ? NV2A_AUDIT_IMMEDIATE :
++             s_batch.buffered[NV2A_AUDIT_INLINE] ? NV2A_AUDIT_INLINE :
++             s_batch.requested[NV2A_AUDIT_ARRAY] ? NV2A_AUDIT_ARRAY :
++             NV2A_AUDIT_INPUT_COUNT;
++    requested = source < NV2A_AUDIT_INPUT_COUNT ? s_batch.requested[source] : 0;
++    buffered = source < NV2A_AUDIT_INPUT_COUNT ? s_batch.buffered[source] : 0;
++    if (source == NV2A_AUDIT_INLINE) {
++        uint32_t words = s_batch.stride / 4;
++        requested = words ? requested / words : 0;
++        buffered = words ? buffered / words : 0;
++    }
++    if (s_batch.route == NV2A_AUDIT_DROPPED && !s_batch.reasons)
++        s_batch.reasons = 1u << (requested ? NV2A_AUDIT_NO_EXECUTION : NV2A_AUDIT_NO_VERTICES);
++    if (s_batch.primitive == 5)
++        tail = (uint32_t)(buffered % 3);
++    else if (s_batch.primitive == 8)
++        tail = (uint32_t)(buffered % 4);
++    else if (s_batch.primitive == 9 && buffered >= 4)
++        tail = (uint32_t)((buffered - 2) % 2);
++    if (tail)
++        s_batch.reasons |= 1u << NV2A_AUDIT_TRAILING_VERTICES;
++
++    add_entry(CAT_SUMMARY, 0, 1, requested);
++    add_entry(CAT_SUMMARY, 1, buffered, 0);
++    add_entry(CAT_ROUTE, s_batch.route, 1, requested);
++    add_entry(CAT_SOURCE, source, 1, requested);
++    add_entry(CAT_PRIMITIVE, s_batch.primitive, 1, requested);
++    for (i = 0; i < NV2A_AUDIT_REASON_COUNT; i++)
++        if (s_batch.reasons & (1u << i))
++            add_entry(CAT_REASON, i, 1, requested);
++    add_entry(CAT_VISIBILITY, s_batch.route == NV2A_AUDIT_DROPPED ? 1 : 0, 1, requested);
++    add_entry(CAT_OUTPUT, drawn ? 0 : 1, 1, requested);
++    if (culled) {
++        add_entry(CAT_CULL, 0, culled, 0);
++        add_entry(CAT_CULL, 1, 1, requested);
++        if (!drawn)
++            add_entry(CAT_CULL, 2, 1, requested);
++    }
++    add_entry(CAT_CULL, 3, clipped, 0);
++    add_entry(CAT_CULL, 4, offscreen, 0);
++    add_entry(CAT_CULL, 5, degenerate, 0);
++    for (i = 0; i < NV2A_AUDIT_INPUT_COUNT; i++) {
++        add_entry(CAT_INPUT, i * 3, s_batch.requested[i], 0);
++        add_entry(CAT_INPUT, i * 3 + 1, s_batch.buffered[i], 0);
++        if (s_batch.requested[i] > s_batch.buffered[i])
++            add_entry(CAT_INPUT, i * 3 + 2,
++                      s_batch.requested[i] - s_batch.buffered[i], 0);
++    }
++    add_entry(CAT_INPUT, 9, tail, 0);
++    memset(&s_batch, 0, sizeof s_batch);
++}
++
++void nv2a_gpu_audit_begin(uint32_t primitive)
++{
++    if (!nv2a_gpu_audit_enabled())
++        return;
++    AUDIT_LOCK();
++    if (s_batch.active) {
++        s_batch.route = NV2A_AUDIT_DROPPED;
++        s_batch.reasons |= 1u << NV2A_AUDIT_SUPERSEDED;
++        finish_batch(0, 0, 0, 0, 0);
++    }
++    s_batch.active = 1;
++    s_batch.primitive = primitive;
++    AUDIT_UNLOCK();
++}
++
++void nv2a_gpu_audit_input(enum Nv2aAuditInput source, uint64_t requested,
++                          uint64_t buffered)
++{
++    if (!nv2a_gpu_audit_enabled() || (unsigned)source >= NV2A_AUDIT_INPUT_COUNT)
++        return;
++    AUDIT_LOCK();
++    if (s_batch.active) {
++        add_saturating(&s_batch.requested[source], requested);
++        add_saturating(&s_batch.buffered[source], buffered);
++    }
++    AUDIT_UNLOCK();
++}
++
++void nv2a_gpu_audit_inline_stride(uint32_t bytes)
++{
++    if (!nv2a_gpu_audit_enabled())
++        return;
++    AUDIT_LOCK();
++    if (s_batch.active)
++        s_batch.stride = bytes;
++    AUDIT_UNLOCK();
++}
++
++void nv2a_gpu_audit_route(enum Nv2aAuditRoute route)
++{
++    if (!nv2a_gpu_audit_enabled())
++        return;
++    AUDIT_LOCK();
++    if (s_batch.active && !s_batch.reasons)
++        s_batch.route = (uint32_t)route;
++    AUDIT_UNLOCK();
++}
++
++void nv2a_gpu_audit_drop(enum Nv2aAuditReason reason)
++{
++    if (!nv2a_gpu_audit_enabled() || (unsigned)reason >= NV2A_AUDIT_REASON_COUNT)
++        return;
++    AUDIT_LOCK();
++    if (s_batch.active) {
++        s_batch.route = NV2A_AUDIT_DROPPED;
++        s_batch.reasons |= 1u << reason;
++    }
++    AUDIT_UNLOCK();
++}
++
++void nv2a_gpu_audit_backend(enum Nv2aAuditBackend event, uint32_t vertices)
++{
++    if (!nv2a_gpu_audit_enabled() || (unsigned)event >= NV2A_AUDIT_BACKEND_COUNT)
++        return;
++    AUDIT_LOCK();
++    add_entry(CAT_BACKEND, (uint32_t)event, 1, vertices);
++    AUDIT_UNLOCK();
++}
++
++void nv2a_gpu_audit_fallback(enum Nv2aAuditFallback reason)
++{
++    if (!nv2a_gpu_audit_enabled() || (unsigned)reason >= NV2A_AUDIT_FALLBACK_COUNT)
++        return;
++    AUDIT_LOCK();
++    add_entry(CAT_FALLBACK, (uint32_t)reason, 1, 0);
++    AUDIT_UNLOCK();
++}
++
++void nv2a_gpu_audit_rejection(enum Nv2aAuditRejection reason)
++{
++    if (!nv2a_gpu_audit_enabled() || (unsigned)reason >= NV2A_AUDIT_REJECTION_COUNT)
++        return;
++    AUDIT_LOCK();
++    add_entry(CAT_REJECTION, (uint32_t)reason, 1, 0);
++    AUDIT_UNLOCK();
++}
++
++void nv2a_gpu_audit_end(uint32_t culled, uint32_t drawn, uint32_t clipped,
++                        uint32_t offscreen, uint32_t degenerate)
++{
++    if (!nv2a_gpu_audit_enabled())
++        return;
++    AUDIT_LOCK();
++    finish_batch(culled, drawn, clipped, offscreen, degenerate);
++    AUDIT_UNLOCK();
++}
++
++void nv2a_gpu_audit_clear(uint32_t flags, uint32_t width, uint32_t height,
++                          uint32_t rect_set, uint32_t rect_h, uint32_t rect_v)
++{
++    if (!nv2a_gpu_audit_enabled())
++        return;
++    AUDIT_LOCK();
++    add_entry(CAT_CLEAR_FLAGS, flags, 1, 0);
++    add_entry(CAT_CLEAR_SIZE, (uint64_t)width << 32 | height, 1, 0);
++    add_entry(CAT_CLEAR_RECT_SET, rect_set, 1, 0);
++    if (rect_set & 1)
++        add_entry(CAT_CLEAR_RECT_H, rect_h, 1, 0);
++    if (rect_set & 2)
++        add_entry(CAT_CLEAR_RECT_V, rect_v, 1, 0);
++    AUDIT_UNLOCK();
++}
++
++void nv2a_gpu_audit_flip(uint32_t width, uint32_t height, uint32_t format)
++{
++    time_t now;
++    int report = 0;
++    if (!nv2a_gpu_audit_enabled())
++        return;
++    now = time(NULL);
++    AUDIT_LOCK();
++    add_entry(CAT_FLIP_SIZE, (uint64_t)width << 32 | height, 1, 0);
++    add_entry(CAT_FLIP_FORMAT, format, 1, 0);
++    if (now != (time_t)-1 && (s_last_report == (time_t)-1 ||
++        now < s_last_report || now - s_last_report >= 20)) {
++        s_last_report = now;
++        report = 1;
++    }
++    AUDIT_UNLOCK();
++    if (report)
++        nv2a_gpu_audit_write();
++}
++
++static const char *category_name(uint32_t category)
++{
++    static const char *const names[] = {
++        "", "summary", "route", "source", "primitive", "reason",
++        "backend", "fallback", "visibility", "cull", "input",
++        "clear_flags", "clear_size", "clear_rect_set", "clear_rect_h",
++        "clear_rect_v", "flip_size", "flip_current_format", "semaphore",
++        "output", "rejection"
++    };
++    return category < sizeof names / sizeof names[0] ? names[category] : "invalid";
++}
++
++static const char *key_name(uint32_t category, uint64_t key)
++{
++    static const char *const summary[] = {"REQUESTS", "BUFFERED_VERTICES"};
++    static const char *const route[] = {"DROPPED", "GPU_VERTEX", "CPU_PROGRAM",
++                                       "FIXED_FUNCTION", "SCREEN_SPACE"};
++    static const char *const source[] = {"ARRAY", "INLINE", "IMMEDIATE", "NONE"};
++    static const char *const reason[] = {
++        "NO_VERTICES", "SHORT_BATCH", "INLINE_LAYOUT", "UNSUPPORTED_PRIMITIVE",
++        "UNTRANSFORMED", "PROBE_DROP", "ALLOCATION_FAILED", "TRANSFORM_FAILED",
++        "SUPERSEDED", "NO_EXECUTION", "TRAILING_VERTICES"
++    };
++    static const char *const backend[] = {"BASE_SUBMITTED", "EXTENDED_SUBMITTED",
++        "GPU_VERTEX_SUBMITTED", "GPU_VERTEX_REJECTED", "BASE_STAGING_DROP",
++        "EXTENDED_STAGING_DROP"};
++    static const char *const fallback[] = {"VSH_UNAVAILABLE", "VSH_PREPARATION", "VSH_REJECTED"};
++    static const char *const visibility[] = {"UNKNOWN", "NOT_SUBMITTED"};
++    static const char *const cull[] = {"SOFTWARE_TRIANGLES", "BATCHES_WITH_CULL",
++        "CULL_WITH_NO_TRIANGLES_EMITTED", "CLIPPED_OR_BEHIND", "OFFSCREEN_TRIANGLES",
++        "DEGENERATE_TRIANGLES"};
++    static const char *const input[] = {
++        "ARRAY_REQUESTED", "ARRAY_BUFFERED", "ARRAY_DISCARDED",
++        "INLINE_WORDS_REQUESTED", "INLINE_WORDS_BUFFERED", "INLINE_WORDS_DISCARDED",
++        "IMMEDIATE_REQUESTED", "IMMEDIATE_BUFFERED", "IMMEDIATE_DISCARDED",
++        "TRAILING_VERTICES"
++    };
++    static const char *const semaphore[] = {"DIRECT_RELEASE", "NO_TARGET"};
++    static const char *const output[] = {"TRIANGLES_EMITTED", "NO_TRIANGLES_EMITTED"};
++    static const char *const rejection[] = {"INVALID_SURFACE_FORMAT", "POSITION_FETCH_FAILED",
++        "SURFACE_REFUSED", "SCREEN_DEGENERATE", "NONFINITE_CLIP"};
++#define AUDIT_KEY(cat, array) \
++    if (category == (cat) && key < sizeof(array) / sizeof((array)[0])) return (array)[key]
++    AUDIT_KEY(CAT_SUMMARY, summary);
++    AUDIT_KEY(CAT_ROUTE, route);
++    AUDIT_KEY(CAT_SOURCE, source);
++    AUDIT_KEY(CAT_REASON, reason);
++    AUDIT_KEY(CAT_BACKEND, backend);
++    AUDIT_KEY(CAT_FALLBACK, fallback);
++    AUDIT_KEY(CAT_VISIBILITY, visibility);
++    AUDIT_KEY(CAT_CULL, cull);
++    AUDIT_KEY(CAT_INPUT, input);
++    AUDIT_KEY(CAT_SEMAPHORE, semaphore);
++    AUDIT_KEY(CAT_OUTPUT, output);
++    AUDIT_KEY(CAT_REJECTION, rejection);
++#undef AUDIT_KEY
++    return NULL;
++}
++
++static void write_count(FILE *f, const char *category, const char *key, uint64_t count)
++{
++    fprintf(f, "%s,%s,%llu,0\n", category, key, (unsigned long long)count);
++}
++
++void nv2a_gpu_audit_write(void)
++{
++    FILE *f;
++    uint32_t i, s;
++    if (!nv2a_gpu_audit_enabled() || !s_path_ok)
++        return;
++    AUDIT_LOCK();
++    f = fopen(s_path, "w");
++    if (!f) {
++        if (!s_warned) {
++            fprintf(stderr, "[GPU-AUDIT] cannot write report: %s\n", s_path);
++            s_warned = 1;
++        }
++        AUDIT_UNLOCK();
++        return;
++    }
++    fprintf(f, "# GPU audit: submissions are not visibility; active_begin=%d\n", s_batch.active);
++    fprintf(f, "category,key,count,vertices\n");
++    for (i = 0; i < AUDIT_SLOTS; i++) {
++        const AuditEntry *e = &s_entries[i];
++        const char *name;
++        if (!e->category)
++            continue;
++        name = key_name(e->category, e->key);
++        if (name)
++            fprintf(f, "%s,%s,%llu,%llu\n", category_name(e->category), name,
++                    (unsigned long long)e->count, (unsigned long long)e->vertices);
++        else if (e->category == CAT_CLEAR_SIZE || e->category == CAT_FLIP_SIZE)
++            fprintf(f, "%s,%u:%u,%llu,%llu\n", category_name(e->category),
++                    (uint32_t)(e->key >> 32), (uint32_t)e->key,
++                    (unsigned long long)e->count, (unsigned long long)e->vertices);
++        else
++            fprintf(f, "%s,%08X,%llu,%llu\n", category_name(e->category), (uint32_t)e->key,
++                    (unsigned long long)e->count, (unsigned long long)e->vertices);
++    }
++    if (s_batch.active) {
++        fprintf(f, "open_request,%08X,1,0\n", s_batch.primitive);
++        for (i = 0; i < NV2A_AUDIT_INPUT_COUNT; i++) {
++            static const char *const open_input[] = {"ARRAY", "INLINE_WORDS", "IMMEDIATE"};
++            fprintf(f, "open_input,%s,%llu,%llu\n", open_input[i],
++                    (unsigned long long)s_batch.requested[i],
++                    (unsigned long long)s_batch.buffered[i]);
++        }
++    }
++    for (s = 0; s < AUDIT_SUBCHANNELS; s++) {
++        for (i = 0; i < AUDIT_METHODS; i++) {
++            const AuditMethod *m = &s_methods[s][i];
++            uint32_t v;
++            if (!m->count && !m->unhandled && !m->mirror_only)
++                continue;
++            fprintf(f, "method_seen,%u:%04X,%llu,0\n", s, i * 4,
++                    (unsigned long long)m->count);
++            if (m->unhandled)
++                fprintf(f, "method_unhandled,%u:%04X,%llu,0\n", s, i * 4,
++                        (unsigned long long)m->unhandled);
++            if (m->mirror_only)
++                fprintf(f, "method_mirror_only,%u:%04X,%llu,0\n", s, i * 4,
++                        (unsigned long long)m->mirror_only);
++            if (bulk_method(s, i * 4))
++                fprintf(f, "method_bulk_values_omitted,%u:%04X,%llu,0\n", s, i * 4,
++                        (unsigned long long)m->count);
++            for (v = 0; v < m->nvalues; v++)
++                fprintf(f, "method_value,%u:%04X=%08X,%llu,0\n", s, i * 4, m->values[v],
++                        (unsigned long long)m->value_count[v]);
++            if (m->other)
++                fprintf(f, "method_value_other,%u:%04X,%llu,0\n", s, i * 4,
++                        (unsigned long long)m->other);
++        }
++    }
++    write_count(f, "overflow", "TABLE_EVENTS", s_table_overflow);
++    write_count(f, "overflow", "METHOD_VALUE_OTHER", s_value_overflow);
++    write_count(f, "overflow", "COUNTER_SATURATIONS", s_saturations);
++    write_count(f, "overflow", "INVALID_METHODS", s_bad_methods);
++    write_count(f, "overflow", "INVALID_UNHANDLED", s_bad_unhandled);
++    write_count(f, "overflow", "INVALID_MIRROR_ONLY", s_bad_mirror);
++    if (fclose(f) != 0 && !s_warned) {
++        fprintf(stderr, "[GPU-AUDIT] cannot finish report: %s\n", s_path);
++        s_warned = 1;
++    }
++    AUDIT_UNLOCK();
++}
+diff --git a/src/kernel/nv2a_gpu_audit.h b/src/kernel/nv2a_gpu_audit.h
+new file mode 100644
+index 0000000..cedb791
+--- /dev/null
++++ b/src/kernel/nv2a_gpu_audit.h
+@@ -0,0 +1,104 @@
++/*
++ * Opt-in executor observer. Adapted from the generic accounting design in
++ * bloodwake-recomp src/gpu/bw_gpu_audit.{c,h}, commit
++ * e631edddfe56d22344e9f696923aeb6d78a9e7ba.
++ *
++ * Copyright (c) 2026 the bloodwake-recomp contributors
++ * Licensed under the MIT license; see THIRD_PARTY_NOTICES.md in the
++ * consuming project.
++ *
++ * RECOMP_GPU_AUDIT=1 enables this observer on the executor thread, regardless
++ * of whether a rendering backend is registered. RECOMP_GPU_AUDIT_FILE names
++ * the CSV report (default gpu_audit.csv). Submissions are not visibility.
++ */
++#ifndef NV2A_GPU_AUDIT_H
++#define NV2A_GPU_AUDIT_H
++
++#include <stdint.h>
++
++enum Nv2aAuditInput {
++    NV2A_AUDIT_ARRAY,
++    NV2A_AUDIT_INLINE,
++    NV2A_AUDIT_IMMEDIATE,
++    NV2A_AUDIT_INPUT_COUNT
++};
++
++enum Nv2aAuditRoute {
++    NV2A_AUDIT_DROPPED,
++    NV2A_AUDIT_GPU_VERTEX,
++    NV2A_AUDIT_CPU_PROGRAM,
++    NV2A_AUDIT_FIXED_FUNCTION,
++    NV2A_AUDIT_SCREEN_SPACE
++};
++
++enum Nv2aAuditReason {
++    NV2A_AUDIT_NO_VERTICES,
++    NV2A_AUDIT_SHORT_BATCH,
++    NV2A_AUDIT_INLINE_LAYOUT,
++    NV2A_AUDIT_UNSUPPORTED_PRIMITIVE,
++    NV2A_AUDIT_UNTRANSFORMED,
++    NV2A_AUDIT_PROBE_DROP,
++    NV2A_AUDIT_ALLOCATION_FAILED,
++    NV2A_AUDIT_TRANSFORM_FAILED,
++    NV2A_AUDIT_SUPERSEDED,
++    NV2A_AUDIT_NO_EXECUTION,
++    NV2A_AUDIT_TRAILING_VERTICES,
++    NV2A_AUDIT_REASON_COUNT
++};
++
++enum Nv2aAuditBackend {
++    NV2A_AUDIT_BASE_SUBMITTED,
++    NV2A_AUDIT_EXTENDED_SUBMITTED,
++    NV2A_AUDIT_GPU_VERTEX_SUBMITTED,
++    NV2A_AUDIT_GPU_VERTEX_REJECTED,
++    NV2A_AUDIT_BASE_STAGING_DROP,
++    NV2A_AUDIT_EXTENDED_STAGING_DROP,
++    NV2A_AUDIT_BACKEND_COUNT
++};
++
++enum Nv2aAuditFallback {
++    NV2A_AUDIT_VSH_UNAVAILABLE,
++    NV2A_AUDIT_VSH_PREPARATION,
++    NV2A_AUDIT_VSH_REJECTED,
++    NV2A_AUDIT_FALLBACK_COUNT
++};
++
++enum Nv2aAuditRejection {
++    NV2A_AUDIT_INVALID_SURFACE_FORMAT,
++    NV2A_AUDIT_POSITION_FETCH_FAILED,
++    NV2A_AUDIT_SURFACE_REFUSED,
++    NV2A_AUDIT_SCREEN_DEGENERATE,
++    NV2A_AUDIT_NONFINITE_CLIP,
++    NV2A_AUDIT_REJECTION_COUNT
++};
++
++enum Nv2aAuditSemaphore {
++    NV2A_AUDIT_SEMAPHORE_DIRECT,
++    NV2A_AUDIT_SEMAPHORE_NO_TARGET,
++    NV2A_AUDIT_SEMAPHORE_COUNT
++};
++
++int nv2a_gpu_audit_enabled(void);
++void nv2a_gpu_audit_method(uint32_t subch, uint32_t method, uint32_t value);
++void nv2a_gpu_audit_unhandled(uint32_t subch, uint32_t method);
++void nv2a_gpu_audit_mirror_only(uint32_t subch, uint32_t method);
++void nv2a_gpu_audit_semaphore(enum Nv2aAuditSemaphore event);
++
++void nv2a_gpu_audit_begin(uint32_t primitive);
++void nv2a_gpu_audit_input(enum Nv2aAuditInput source, uint64_t requested,
++                          uint64_t buffered);
++void nv2a_gpu_audit_inline_stride(uint32_t bytes);
++void nv2a_gpu_audit_route(enum Nv2aAuditRoute route);
++void nv2a_gpu_audit_drop(enum Nv2aAuditReason reason);
++void nv2a_gpu_audit_backend(enum Nv2aAuditBackend event, uint32_t vertices);
++void nv2a_gpu_audit_fallback(enum Nv2aAuditFallback reason);
++void nv2a_gpu_audit_rejection(enum Nv2aAuditRejection reason);
++void nv2a_gpu_audit_end(uint32_t culled, uint32_t drawn, uint32_t clipped,
++                        uint32_t offscreen, uint32_t degenerate);
++
++void nv2a_gpu_audit_clear(uint32_t flags, uint32_t width, uint32_t height,
++                          uint32_t rect_set, uint32_t rect_h, uint32_t rect_v);
++void nv2a_gpu_audit_flip(uint32_t width, uint32_t height, uint32_t format);
++void nv2a_gpu_audit_write(void);
++
++#endif
+diff --git a/src/kernel/nv2a_pb_exec.c b/src/kernel/nv2a_pb_exec.c
+index f4888f0..eff999d 100644
+--- a/src/kernel/nv2a_pb_exec.c
++++ b/src/kernel/nv2a_pb_exec.c
+@@ -45,6 +45,9 @@
+ #include "nv2a_texture_sample.h"
+ #include "nv2a_frame_stats.h"
+ #include "nv2a_census.h"
++#include "nv2a_gpu_audit.h"
++
++#define GPU_AUDIT(call) do { if (nv2a_gpu_audit_enabled()) { call; } } while (0)
+ #if defined(_WIN32)
+ #include <windows.h>
+ #define NV_TLS __declspec(thread)
+@@ -548,10 +551,11 @@ static void note_texture_use(void)
+  * report sorts s_unhandled and rebuilds the slots afterwards. */
+ static uint16_t s_unhandled_slot[0x2000 / 4];
+ 
+-static void note_unhandled(uint32_t method, uint32_t param)
++static void note_unhandled(uint32_t subch, uint32_t method, uint32_t param)
+ {
+     uint16_t *slot = &s_unhandled_slot[(method & 0x1FFC) / 4];
+ 
++    GPU_AUDIT(nv2a_gpu_audit_unhandled(subch, method));
+     nv2a_census_add("unhandled_method", method, 0);
+     s_gpu.unhandled_total++;
+     if (*slot) {
+@@ -1681,12 +1685,16 @@ static void raster_triangle(const float a[2], const float b[2],
+     int minx, maxx, miny, maxy, x, y;
+     int textured = uv && s_gpu.texs[0].valid;
+ 
+-    if (bpp != 4 && bpp != 2)
++    if (bpp != 4 && bpp != 2) {
++        GPU_AUDIT(nv2a_gpu_audit_rejection(NV2A_AUDIT_INVALID_SURFACE_FORMAT));
+         return;
++    }
+ 
+     area = (b[0] - a[0]) * (c[1] - a[1]) - (b[1] - a[1]) * (c[0] - a[0]);
+-    if (area == 0.0f)
++    if (area == 0.0f) {
++        GPU_AUDIT(nv2a_gpu_audit_rejection(NV2A_AUDIT_SCREEN_DEGENERATE));
+         return;                            /* degenerate */
++    }
+     if (software_cull_rejects(area)) {
+         s_gpu.tris_culled++;
+         return;
+@@ -1695,8 +1703,10 @@ static void raster_triangle(const float a[2], const float b[2],
+     /* Where this batch writes. The same check the per-pixel path made, made
+      * once: a surface address landing on the title's own image is no safer
+      * one pixel at a time than 4.9 MB at once. */
+-    if (!surface_begin_batch(mem))
++    if (!surface_begin_batch(mem)) {
++        GPU_AUDIT(nv2a_gpu_audit_rejection(NV2A_AUDIT_SURFACE_REFUSED));
+         return;
++    }
+ 
+     minx = (int)floorf(fminf(a[0], fminf(b[0], c[0])));
+     maxx = (int)ceilf (fmaxf(a[0], fmaxf(b[0], c[0])));
+@@ -2127,10 +2137,14 @@ static int xf_near_clip_enabled(void);
+ static Nv2aVertex *backend_slot(void)
+ {
+     if (!s_bverts
+-        && !(s_bverts = (Nv2aVertex *)calloc(NV_BACKEND_MAX_VERTS, sizeof *s_bverts)))
++        && !(s_bverts = (Nv2aVertex *)calloc(NV_BACKEND_MAX_VERTS, sizeof *s_bverts))) {
++        GPU_AUDIT(nv2a_gpu_audit_backend(NV2A_AUDIT_BASE_STAGING_DROP, 3));
+         return NULL;
+-    if (s_bcount + 3 > NV_BACKEND_MAX_VERTS)
++    }
++    if (s_bcount + 3 > NV_BACKEND_MAX_VERTS) {
++        GPU_AUDIT(nv2a_gpu_audit_backend(NV2A_AUDIT_BASE_STAGING_DROP, 3));
+         return NULL;
++    }
+     return &s_bverts[s_bcount];
+ }
+ 
+@@ -2182,6 +2196,7 @@ static void backend_flush(int textured)
+         batch.texture = &tex;
+     }
+     s_backend->draw(&surf, &batch);
++    GPU_AUDIT(nv2a_gpu_audit_backend(NV2A_AUDIT_BASE_SUBMITTED, s_bcount));
+     s_gpu.tris_drawn += s_bcount / 3;
+     s_bcount = 0;
+     note_drawn();
+@@ -2196,10 +2211,14 @@ static float fog_factor(float d);
+ static Nv2aXVertex *xbackend_slot(void)
+ {
+     if (!s_xverts
+-        && !(s_xverts = (Nv2aXVertex *)calloc(NV_BACKEND_MAX_VERTS, sizeof *s_xverts)))
++        && !(s_xverts = (Nv2aXVertex *)calloc(NV_BACKEND_MAX_VERTS, sizeof *s_xverts))) {
++        GPU_AUDIT(nv2a_gpu_audit_backend(NV2A_AUDIT_EXTENDED_STAGING_DROP, 3));
+         return NULL;
+-    if (s_xcount + 3 > NV_BACKEND_MAX_VERTS)
++    }
++    if (s_xcount + 3 > NV_BACKEND_MAX_VERTS) {
++        GPU_AUDIT(nv2a_gpu_audit_backend(NV2A_AUDIT_EXTENDED_STAGING_DROP, 3));
+         return NULL;
++    }
+     return &s_xverts[s_xcount];
+ }
+ 
+@@ -2274,6 +2293,7 @@ static void xbackend_flush(void)
+     xb.vertices = s_xverts;
+     xb.count = s_xcount;
+     s_xbackend->draw(&surf, &xb);
++    GPU_AUDIT(nv2a_gpu_audit_backend(NV2A_AUDIT_EXTENDED_SUBMITTED, s_xcount));
+     s_gpu.tris_drawn += s_xcount / 3;
+     s_xcount = 0;
+     note_drawn();
+@@ -2291,8 +2311,10 @@ static void raster_indexed(uint32_t i0, uint32_t i1, uint32_t i2, uint32_t argb)
+ 
+     if (!fetch_attr(&s_gpu.attr[0], i0, p[0])
+      || !fetch_attr(&s_gpu.attr[0], i1, p[1])
+-     || !fetch_attr(&s_gpu.attr[0], i2, p[2]))
++     || !fetch_attr(&s_gpu.attr[0], i2, p[2])) {
++        GPU_AUDIT(nv2a_gpu_audit_rejection(NV2A_AUDIT_POSITION_FETCH_FAILED));
+         return;
++    }
+     for (j = 0; j < 3; j++) {                        /* logical -> real pixels */
+         p[j][0] *= aa_scale_x();
+         p[j][1] *= aa_scale_y();
+@@ -2890,8 +2912,10 @@ static void raster_xf_triangle(const Nv2aVshOutput *va, const Nv2aVshOutput *vb,
+     v[0] = va; v[1] = vb; v[2] = vc;
+     a = va->pos; b = vb->pos; c = vc->pos;
+     T.a = a; T.b = b; T.c = c;
+-    if (T.bpp != 4 && T.bpp != 2)
++    if (T.bpp != 4 && T.bpp != 2) {
++        GPU_AUDIT(nv2a_gpu_audit_rejection(NV2A_AUDIT_INVALID_SURFACE_FORMAT));
+         return;
++    }
+     if (a[3] <= 0.0f || b[3] <= 0.0f || c[3] <= 0.0f) {
+         s_gpu.tris_behind++;
+         return;
+@@ -2932,8 +2956,10 @@ static void raster_xf_triangle(const Nv2aVshOutput *va, const Nv2aVshOutput *vb,
+         if (a[k] > s_gpu.xf_max[k]) s_gpu.xf_max[k] = a[k];
+     }
+     s_gpu.xf_seeded = 1;
+-    if (!surface_begin_batch(T.mem))
++    if (!surface_begin_batch(T.mem)) {
++        GPU_AUDIT(nv2a_gpu_audit_rejection(NV2A_AUDIT_SURFACE_REFUSED));
+         return;
++    }
+     if (s_gpu.depth_test || s_gpu.depth_mask)
+         T.zb = zbuf_current(1);
+     if (tex_size_from_format(s_gpu.texs[0].color)) {
+@@ -3081,8 +3107,10 @@ static void raster_xf_clipped(const Nv2aVshOutput *a, const Nv2aVshOutput *b,
+             p0[i].pos[j] = in[i]->pos[j] * in[i]->pos[3];
+         for (pl = 0; pl < planes; pl++) {
+             float d = xf_clip_dist(&p0[i], pl);
+-            if (d != d || d - d != 0.0f)
++            if (d != d || d - d != 0.0f) {
++                GPU_AUDIT(nv2a_gpu_audit_rejection(NV2A_AUDIT_NONFINITE_CLIP));
+                 return;                       /* not finite: no position at all */
++            }
+             if (d < 0.0f)
+                 inside = 0;
+         }
+@@ -3452,20 +3480,29 @@ static int gpu_vsh_batch(void)
+     Nv2aXVsBatch vb;
+ 
+     if (!s_xbackend || !s_xbackend->draw_vsh || !backend_draws() || !batch_uses_program()
+-        || nv2a_vsh_cxt_write_enabled() || !gpu_vsh_on())
++        || nv2a_vsh_cxt_write_enabled() || !gpu_vsh_on()) {
++        if (nv2a_gpu_audit_enabled() && batch_uses_program())
++            nv2a_gpu_audit_fallback(NV2A_AUDIT_VSH_UNAVAILABLE);
+         return 0;
+-    if (surface_bpp() != 4 && surface_bpp() != 2)
++    }
++    if (surface_bpp() != 4 && surface_bpp() != 2) {
++        GPU_AUDIT(nv2a_gpu_audit_fallback(NV2A_AUDIT_VSH_PREPARATION));
+         return 0;
+-    if (!(prog = nv2a_vsh_program(&nins)))
++    }
++    if (!(prog = nv2a_vsh_program(&nins))) {
++        GPU_AUDIT(nv2a_gpu_audit_fallback(NV2A_AUDIT_VSH_PREPARATION));
+         return 0;                            /* no program: the CPU path skips it too */
++    }
+     mask = nv2a_vsh_inputs_used(prog, nins);
+     nin = popcount32(mask);
+     if (!s_xvs_map) {
+         s_xvs_map = (uint32_t *)malloc(NV_MAX_INDICES * sizeof *s_xvs_map);
+         s_xvs_tri = (uint32_t *)malloc(NV_MAX_INDICES * 3 * sizeof *s_xvs_tri);
+         s_xvs_uidx = (uint32_t *)malloc(NV_MAX_INDICES * sizeof *s_xvs_uidx);
+-        if (!s_xvs_map || !s_xvs_tri || !s_xvs_uidx)
++        if (!s_xvs_map || !s_xvs_tri || !s_xvs_uidx) {
++            GPU_AUDIT(nv2a_gpu_audit_fallback(NV2A_AUDIT_VSH_PREPARATION));
+             return 0;
++        }
+     }
+     memset(&vb, 0, sizeof vb);
+     raw = xvs_streams(&vb, n, mask, &first, &nv);
+@@ -3480,8 +3517,10 @@ static int gpu_vsh_batch(void)
+         if ((size_t)n * nin * 4 > s_xvs_in_cap) {
+             size_t want = (size_t)n * nin * 4;
+             float *p = (float *)realloc(s_xvs_in, want * sizeof *p);
+-            if (!p)
++            if (!p) {
++                GPU_AUDIT(nv2a_gpu_audit_fallback(NV2A_AUDIT_VSH_PREPARATION));
+                 return 0;
++            }
+             s_xvs_in = p;
+             s_xvs_in_cap = want;
+         }
+@@ -3554,8 +3593,10 @@ static int gpu_vsh_batch(void)
+         break;
+     }
+ #undef XVS_TRI
+-    if (!ni)
++    if (!ni) {
++        GPU_AUDIT(nv2a_gpu_audit_fallback(NV2A_AUDIT_VSH_PREPARATION));
+         return 0;
++    }
+ 
+     xf_set_viewport();
+     current_surface(&surf);
+@@ -3579,9 +3620,12 @@ static int gpu_vsh_batch(void)
+     vb.fog_param[0] = s_gpu.fog_param[0];
+     vb.fog_param[1] = s_gpu.fog_param[1];
+     if (!s_xbackend->draw_vsh(&surf, &vb)) {
++        GPU_AUDIT(nv2a_gpu_audit_backend(NV2A_AUDIT_GPU_VERTEX_REJECTED, ni));
++        GPU_AUDIT(nv2a_gpu_audit_fallback(NV2A_AUDIT_VSH_REJECTED));
+         s_xvs_cpu++;
+         return 0;
+     }
++    GPU_AUDIT(nv2a_gpu_audit_backend(NV2A_AUDIT_GPU_VERTEX_SUBMITTED, ni));
+     gpu_vsh_verify(nv, mask, nin);
+     s_gpu.batches_program++;
+     s_gpu.verts_program += n;
+@@ -3596,25 +3640,33 @@ static void raster_batch_program(void)
+ {
+     uint32_t i, n = s_gpu.idx_count;
+ 
+-    if (gpu_vsh_batch())
++    if (gpu_vsh_batch()) {
++        GPU_AUDIT(nv2a_gpu_audit_route(NV2A_AUDIT_GPU_VERTEX));
+         return;
++    }
+ 
+-    if (!s_xf && !(s_xf = (Nv2aVshOutput *)calloc(NV_MAX_INDICES, sizeof *s_xf)))
++    if (!s_xf && !(s_xf = (Nv2aVshOutput *)calloc(NV_MAX_INDICES, sizeof *s_xf))) {
++        GPU_AUDIT(nv2a_gpu_audit_drop(NV2A_AUDIT_ALLOCATION_FAILED));
+         return;
++    }
+     for (i = 0; i < n; i++)
+-        if (!transform_vertex(s_gpu.idx[i], &s_xf[i]))
++        if (!transform_vertex(s_gpu.idx[i], &s_xf[i])) {
++            GPU_AUDIT(nv2a_gpu_audit_drop(NV2A_AUDIT_TRANSFORM_FAILED));
+             return;                                    /* no program loaded */
++        }
+     xf_set_viewport();
+     {
+         const VertexAttr *tc = texcoord_attr();
+         s_xf_no_tex = !batch_uses_program() && !(tc->offset && tc->stride);
+     }
+     if (batch_uses_program()) {
++        GPU_AUDIT(nv2a_gpu_audit_route(NV2A_AUDIT_CPU_PROGRAM));
+         s_gpu.batches_program++;
+         s_gpu.verts_program += n;
+     } else {
+         static int ftrace = -1;
+ 
++        GPU_AUDIT(nv2a_gpu_audit_route(NV2A_AUDIT_FIXED_FUNCTION));
+         s_gpu.batches_ffp++;
+         /* RECOMP_FFP_TRACE: the matrix and the first vertices of the first few
+          * fixed-function batches, raw and transformed -- the one view that
+@@ -3866,18 +3918,27 @@ static void raster_batch(void)
+     if (nv2a_census_active())
+         census_draw(s_gpu.idx_count < 3 ? 'x' : batch_uses_program() ? 'P'
+                     : batch_is_ffp() ? 'F' : batch_is_screen_space() ? 'S' : 'U');
+-    if (s_gpu.idx_count < 3)
++    if (s_gpu.idx_count < 3) {
++        GPU_AUDIT(nv2a_gpu_audit_drop(NV2A_AUDIT_SHORT_BATCH));
+         return;
++    }
++    if ((s_gpu.prim == NV_PRIM_QUADS || s_gpu.prim == NV_PRIM_QUAD_STRIP)
++        && s_gpu.idx_count < 4)
++        GPU_AUDIT(nv2a_gpu_audit_drop(NV2A_AUDIT_SHORT_BATCH));
+     if (batch_uses_program() || batch_is_ffp()) {
+-        if (probe_drop_transformed())
++        if (probe_drop_transformed()) {
++            GPU_AUDIT(nv2a_gpu_audit_drop(NV2A_AUDIT_PROBE_DROP));
+             return;
++        }
+         raster_batch_program();
+         return;
+     }
+     if (!batch_is_screen_space()) {
++        GPU_AUDIT(nv2a_gpu_audit_drop(NV2A_AUDIT_UNTRANSFORMED));
+         s_gpu.batches_untransformed++;
+         return;
+     }
++    GPU_AUDIT(nv2a_gpu_audit_route(NV2A_AUDIT_SCREEN_SPACE));
+ 
+     /* Count why, once per batch: the texture stage cannot change inside one. */
+     {
+@@ -4213,12 +4274,18 @@ static void draw_inline_array(void)
+         off += (bytes + 3u) & ~3u;
+     }
+     vsize = off;
+-    if (!vsize)
++    GPU_AUDIT(nv2a_gpu_audit_inline_stride(vsize));
++    if (!vsize) {
++        GPU_AUDIT(nv2a_gpu_audit_drop(NV2A_AUDIT_INLINE_LAYOUT));
+         goto out;
++    }
+ 
+     count = (s_gpu.inline_count * 4) / vsize;
+-    if (count < 3 || count > NV_MAX_INDICES)
++    if (count < 3 || count > NV_MAX_INDICES) {
++        GPU_AUDIT(nv2a_gpu_audit_drop(count < 3 ? NV2A_AUDIT_SHORT_BATCH
++                                                : NV2A_AUDIT_INLINE_LAYOUT));
+         goto out;
++    }
+     for (a = 0; a < NV_VERTEX_ATTRS; a++)
+         if (s_gpu.attr[a].size)
+             s_gpu.attr[a].stride = vsize;
+@@ -4255,8 +4322,10 @@ static void draw_immediate(void)
+     VertexAttr saved[NV_VERTEX_ATTRS];
+     uint32_t i;
+ 
+-    if (s_gpu.imm_count < 3)
++    if (s_gpu.imm_count < 3) {
++        GPU_AUDIT(nv2a_gpu_audit_drop(NV2A_AUDIT_SHORT_BATCH));
+         return;
++    }
+ 
+     memcpy(saved, s_gpu.attr, sizeof saved);
+     memset(s_gpu.attr, 0, sizeof s_gpu.attr);
+@@ -4293,6 +4362,9 @@ static void imm_emit_vertex(void)
+ {
+     uint32_t at = s_gpu.imm_count * IMM_VERTEX_DWORDS;
+ 
++    if (s_gpu.prim)
++        GPU_AUDIT(nv2a_gpu_audit_input(NV2A_AUDIT_IMMEDIATE, 1,
++                                       at + IMM_VERTEX_DWORDS <= NV_MAX_INLINE));
+     if (!s_gpu.prim || at + IMM_VERTEX_DWORDS > NV_MAX_INLINE)
+         return;
+     memcpy(&s_gpu.inline_buf[at], s_gpu.imm_attr, sizeof s_gpu.imm_attr);
+@@ -4452,6 +4524,7 @@ static void tex_stage_method(uint32_t method, uint32_t param)
+         t->border = param;
+         break;
+     default:
++        GPU_AUDIT(nv2a_gpu_audit_mirror_only(0, method));
+         break;
+     }
+     tex_update_valid(t);
+@@ -4619,6 +4692,7 @@ void nv2a_pb_exec_method(uint32_t subch, uint32_t method, uint32_t param)
+ {
+     static int inited;
+ 
++    GPU_AUDIT(nv2a_gpu_audit_method(subch, method, param));
+     /* BACK_END_WRITE_SEMAPHORE_RELEASE. The title's pointer already names the
+      * semaphore word; SET_SEMAPHORE_OFFSET is not added (in X-Men Legends it
+      * held 0xFF000000 at times, which put the write outside guest memory). */
+@@ -4627,8 +4701,10 @@ void nv2a_pb_exec_method(uint32_t subch, uint32_t method, uint32_t param)
+         if (sem_va) {
+             uint8_t *mem = (uint8_t *)xbox_GetMemoryOffset();
+             *(volatile uint32_t *)(mem + sem_va) = param;
++            GPU_AUDIT(nv2a_gpu_audit_semaphore(NV2A_AUDIT_SEMAPHORE_DIRECT));
+             return;
+         }
++        GPU_AUDIT(nv2a_gpu_audit_semaphore(NV2A_AUDIT_SEMAPHORE_NO_TARGET));
+     }
+     if (!inited) {
+         const char *window_clip = getenv("RECOMP_WINDOW_CLIP");
+@@ -4771,7 +4847,7 @@ void nv2a_pb_exec_method(uint32_t subch, uint32_t method, uint32_t param)
+         return;
+     }
+     if (subch != 0) {                      /* 3D class lives on subchannel 0 */
+-        note_unhandled(method, param);
++        note_unhandled(subch, method, param);
+         return;
+     }
+     switch (method) {
+@@ -4791,7 +4867,7 @@ void nv2a_pb_exec_method(uint32_t subch, uint32_t method, uint32_t param)
+         if (s_gpu.window_clip_enabled)
+             s_gpu.window_clip.exclusive = param & 1u;
+         else
+-            note_unhandled(method, param);
++            note_unhandled(subch, method, param);
+         break;
+     case 0x1D98:                       /* SET_CLEAR_RECT_HORIZONTAL */
+         s_gpu.clear_rect_h = param;
+@@ -4819,7 +4895,7 @@ void nv2a_pb_exec_method(uint32_t subch, uint32_t method, uint32_t param)
+         if (s_gpu.software_cull_enabled)
+             s_gpu.cull.enabled = param & 1u;
+         else
+-            note_unhandled(method, param);
++            note_unhandled(subch, method, param);
+         break;
+     case NV097_SET_CULL_FACE:
+         if (s_gpu.software_cull_enabled) {
+@@ -4830,7 +4906,7 @@ void nv2a_pb_exec_method(uint32_t subch, uint32_t method, uint32_t param)
+             s_gpu.cull.face = param;
+             s_gpu.cull.programmed |= 1;
+         } else {
+-            note_unhandled(method, param);
++            note_unhandled(subch, method, param);
+         }
+         break;
+     case NV097_SET_FRONT_FACE:
+@@ -4842,7 +4918,7 @@ void nv2a_pb_exec_method(uint32_t subch, uint32_t method, uint32_t param)
+             s_gpu.cull.front = param;
+             s_gpu.cull.programmed |= 2;
+         } else {
+-            note_unhandled(method, param);
++            note_unhandled(subch, method, param);
+         }
+         break;
+     case NV097_SET_BLEND_EQUATION:
+@@ -4926,6 +5002,8 @@ void nv2a_pb_exec_method(uint32_t subch, uint32_t method, uint32_t param)
+         break;
+     case NV097_CLEAR_SURFACE: {
+         int backend_depth_clear = backend_draws() && s_backend->clear;
++        GPU_AUDIT(nv2a_gpu_audit_clear(param, s_gpu.clip_w, s_gpu.clip_h,
++                    (uint32_t)s_gpu.clear_rect_set, s_gpu.clear_rect_h, s_gpu.clear_rect_v));
+         if (s_ftrace == 2)
+             fprintf(stderr, "[FTRACE] clear %X surf %08X %ux%u colour %08X%c",
+                     param, s_gpu.color_offset, s_gpu.clip_w, s_gpu.clip_h,
+@@ -4943,13 +5021,25 @@ void nv2a_pb_exec_method(uint32_t subch, uint32_t method, uint32_t param)
+         break;
+     }
+ 
+-    case NV097_SET_BEGIN_END:
++    case NV097_SET_BEGIN_END: {
++        int audit = nv2a_gpu_audit_enabled();
+         if (param) {
++            if (audit)
++                nv2a_gpu_audit_begin(param);
+             s_gpu.prim = param;
+             s_gpu.idx_count = 0;
+             s_gpu.inline_count = 0;
+             s_gpu.imm_count = 0;
+         } else {
++            uint32_t culled = s_gpu.tris_culled, drawn = s_gpu.tris_drawn;
++            uint32_t clipped = s_gpu.tris_behind, offscreen = s_gpu.tris_skipped_offscreen;
++            uint32_t degenerate = s_gpu.xf_degenerate;
++            if (audit && s_gpu.prim) {
++                if (s_gpu.prim < NV_PRIM_TRIANGLES || s_gpu.prim > NV_PRIM_POLYGON)
++                    nv2a_gpu_audit_drop(NV2A_AUDIT_UNSUPPORTED_PRIMITIVE);
++                if (!s_gpu.imm_count && !s_gpu.inline_count && !s_gpu.idx_count)
++                    nv2a_gpu_audit_drop(NV2A_AUDIT_NO_VERTICES);
++            }
+             /* Three ways a batch can have arrived, and only one is in use at
+              * a time: vertices completed by SET_VERTEX4F, a payload written
+              * with INLINE_ARRAY, or indices into the title's own arrays. */
+@@ -4959,15 +5049,24 @@ void nv2a_pb_exec_method(uint32_t subch, uint32_t method, uint32_t param)
+                 draw_inline_array();
+             else
+                 draw_primitive();
++            if (audit)
++                nv2a_gpu_audit_end(s_gpu.tris_culled - culled, s_gpu.tris_drawn - drawn,
++                                   s_gpu.tris_behind - clipped,
++                                   s_gpu.tris_skipped_offscreen - offscreen,
++                                   s_gpu.xf_degenerate - degenerate);
+             s_gpu.prim = 0;
+             s_gpu.inline_count = 0;
+             s_gpu.imm_count = 0;
+         }
+         break;
++    }
+ 
+     case NV097_INLINE_ARRAY:
+         /* Vertex data, not a pointer to it. Buffered rather than decoded here
+          * because the format is only fully known at END. */
++        if (s_gpu.prim)
++            GPU_AUDIT(nv2a_gpu_audit_input(NV2A_AUDIT_INLINE, 1,
++                                           s_gpu.inline_count < NV_MAX_INLINE));
+         if (s_gpu.prim && s_gpu.inline_count < NV_MAX_INLINE)
+             s_gpu.inline_buf[s_gpu.inline_count++] = param;
+         break;
+@@ -4987,6 +5086,9 @@ void nv2a_pb_exec_method(uint32_t subch, uint32_t method, uint32_t param)
+ 
+         if (!s_gpu.prim)
+             break;
++        GPU_AUDIT(nv2a_gpu_audit_input(NV2A_AUDIT_ARRAY, count,
++                    count < NV_MAX_INDICES - s_gpu.idx_count
++                        ? count : NV_MAX_INDICES - s_gpu.idx_count));
+         for (i = 0; i < count && s_gpu.idx_count < NV_MAX_INDICES; i++)
+             s_gpu.idx[s_gpu.idx_count++] = start + i;
+         break;
+@@ -4994,6 +5096,9 @@ void nv2a_pb_exec_method(uint32_t subch, uint32_t method, uint32_t param)
+ 
+     case NV097_ARRAY_ELEMENT16:
+         /* Two 16-bit indices per parameter word. */
++        if (s_gpu.prim)
++            GPU_AUDIT(nv2a_gpu_audit_input(NV2A_AUDIT_ARRAY, 2,
++                                           s_gpu.idx_count + 2 <= NV_MAX_INDICES ? 2 : 0));
+         if (s_gpu.prim && s_gpu.idx_count + 2 <= NV_MAX_INDICES) {
+             s_gpu.idx[s_gpu.idx_count++] = (uint16_t)(param & 0xFFFF);
+             s_gpu.idx[s_gpu.idx_count++] = (uint16_t)(param >> 16);
+@@ -5001,6 +5106,9 @@ void nv2a_pb_exec_method(uint32_t subch, uint32_t method, uint32_t param)
+         break;
+ 
+     case 0x1808:                            /* ARRAY_ELEMENT32: one index */
++        if (s_gpu.prim)
++            GPU_AUDIT(nv2a_gpu_audit_input(NV2A_AUDIT_ARRAY, 1,
++                                           s_gpu.idx_count < NV_MAX_INDICES));
+         if (s_gpu.prim && s_gpu.idx_count < NV_MAX_INDICES)
+             s_gpu.idx[s_gpu.idx_count++] = param;
+         break;
+@@ -5012,7 +5120,7 @@ void nv2a_pb_exec_method(uint32_t subch, uint32_t method, uint32_t param)
+          * matters here (nv2a_flip_hold.h); the rest stays a no-op. */
+         if (!nv2a_pb_exec_flip_pacing()) {
+             if (!imm_vertex_method(method, param))
+-                note_unhandled(method, param);   /* as before the hold */
++                note_unhandled(subch, method, param);   /* as before the hold */
+             break;
+         }
+         if (param)
+@@ -5123,6 +5231,9 @@ void nv2a_pb_exec_method(uint32_t subch, uint32_t method, uint32_t param)
+         if (nv2a_census_active())
+             nv2a_census_add("flip_surface", s_gpu.drawn_w << 16 | s_gpu.drawn_h, 0);
+         nv2a_census_flip();
++        GPU_AUDIT(nv2a_gpu_audit_flip(s_gpu.drawn_offset ? s_gpu.drawn_w : s_gpu.clip_w,
++                                      s_gpu.drawn_offset ? s_gpu.drawn_h : s_gpu.clip_h,
++                                      s_gpu.format));
+         s_gpu.drawn_stale = 1;
+         if (s_backend && s_backend->flip)
+             s_backend->flip();
+@@ -5199,7 +5310,7 @@ void nv2a_pb_exec_method(uint32_t subch, uint32_t method, uint32_t param)
+                 nv2a_window_clip_write(&s_gpu.window_clip, vertical,
+                                        (method - first) / 4, param);
+             } else {
+-                note_unhandled(method, param);
++                note_unhandled(subch, method, param);
+             }
+             break;
+         }
+@@ -5283,7 +5394,7 @@ void nv2a_pb_exec_method(uint32_t subch, uint32_t method, uint32_t param)
+                 a->size = 3;
+             a->stride = (param >> 8)  & 0xFF;
+         } else if (!imm_vertex_method(method, param)) {
+-            note_unhandled(method, param);
++            note_unhandled(subch, method, param);
+         }
+         break;
+     }
+@@ -5471,6 +5582,7 @@ void nv2a_pb_exec_report(void)
+     }
+     flip_hold_report();
+     nv2a_census_write();
++    GPU_AUDIT(nv2a_gpu_audit_write());
+     if (s_frame_stats_on > 0) {
+         uint32_t flips, distinct, unknown;
+         nv2a_frame_stats_take_report(&s_frame_stats, &flips, &distinct, &unknown);
+diff --git a/tests/nv2a_ffp_backend/CMakeLists.txt b/tests/nv2a_ffp_backend/CMakeLists.txt
+index 79bc2c2..f96496c 100644
+--- a/tests/nv2a_ffp_backend/CMakeLists.txt
++++ b/tests/nv2a_ffp_backend/CMakeLists.txt
+@@ -7,6 +7,7 @@ add_executable(nv2a-ffp-backend-test nv2a_ffp_backend_test.c
+     ../../src/kernel/nv2a_combiner.c
+     ../../src/kernel/nv2a_frame_stats.c
+     ../../src/kernel/nv2a_census.c
++    ../../src/kernel/nv2a_gpu_audit.c
+     ../../src/kernel/nv2a_flip_hold.c)
+ target_include_directories(nv2a-ffp-backend-test PRIVATE ../../src/kernel ../../src)
+ if(MSVC)
+diff --git a/tests/nv2a_ffp_backend/nv2a_ffp_backend_test.c b/tests/nv2a_ffp_backend/nv2a_ffp_backend_test.c
+index d696b82..aced576 100644
+--- a/tests/nv2a_ffp_backend/nv2a_ffp_backend_test.c
++++ b/tests/nv2a_ffp_backend/nv2a_ffp_backend_test.c
+@@ -40,6 +40,8 @@ void xbox_FramebufferWindowStart(void) {}
+ void xbox_FramebufferWindowFrameStats(uint32_t draws) { (void)draws; }
+ void xbox_FramebufferWindowPresent(uint32_t va, uint32_t pitch) { (void)va; (void)pitch; }
+ void xbox_Nv2aFrameCounterFlip(void) {}
++int xbox_Nv2aGraphSoftwareTrap(uint32_t subch, uint32_t method, uint32_t data)
++{ (void)subch; (void)method; (void)data; return 0; }
+ /* The flip hold (nv2a_flip_hold.c, linked in). No vblank moves here, so the
+  * executor never holds a flip; the walk is never inside a pushbuffer CALL. */
+ int nv2a_pb_scan_in_call(void) { return 0; }
+diff --git a/tests/nv2a_gpu_audit/CMakeLists.txt b/tests/nv2a_gpu_audit/CMakeLists.txt
+new file mode 100644
+index 0000000..ca90282
+--- /dev/null
++++ b/tests/nv2a_gpu_audit/CMakeLists.txt
+@@ -0,0 +1,16 @@
++cmake_minimum_required(VERSION 3.20)
++project(nv2a_gpu_audit_regression C)
++enable_testing()
++add_executable(nv2a-gpu-audit-test nv2a_gpu_audit_test.c
++    ../../src/kernel/nv2a_gpu_audit.c)
++target_include_directories(nv2a-gpu-audit-test PRIVATE ../../src/kernel)
++if(MSVC)
++    target_compile_definitions(nv2a-gpu-audit-test PRIVATE _CRT_SECURE_NO_WARNINGS)
++elseif(NOT WIN32)
++    find_package(Threads REQUIRED)
++    target_link_libraries(nv2a-gpu-audit-test PRIVATE Threads::Threads)
++endif()
++add_test(NAME nv2a-gpu-audit-off COMMAND nv2a-gpu-audit-test off
++    "${CMAKE_CURRENT_BINARY_DIR}/audit-off.csv")
++add_test(NAME nv2a-gpu-audit-on COMMAND nv2a-gpu-audit-test on
++    "${CMAKE_CURRENT_BINARY_DIR}/audit-on.csv")
+diff --git a/tests/nv2a_gpu_audit/nv2a_gpu_audit_test.c b/tests/nv2a_gpu_audit/nv2a_gpu_audit_test.c
+new file mode 100644
+index 0000000..8cdc5db
+--- /dev/null
++++ b/tests/nv2a_gpu_audit/nv2a_gpu_audit_test.c
+@@ -0,0 +1,88 @@
++/* Standalone synthetic observer fixture; no guest image or backend required. */
++#include "nv2a_gpu_audit.h"
++#include <stdio.h>
++#include <stdlib.h>
++#include <string.h>
++
++static int set_environment(const char *name, const char *value)
++{
++#ifdef _WIN32
++    return _putenv_s(name, value) == 0;
++#else
++    return setenv(name, value, 1) == 0;
++#endif
++}
++
++static int contains(const char *report, const char *line)
++{
++    if (strstr(report, line))
++        return 1;
++    fprintf(stderr, "missing audit row: %s\n", line);
++    return 0;
++}
++
++int main(int argc, char **argv)
++{
++    static char report[65536];
++    FILE *f;
++    size_t bytes;
++    int on;
++
++    if (argc != 3 || (strcmp(argv[1], "on") && strcmp(argv[1], "off")))
++        return 2;
++    on = strcmp(argv[1], "on") == 0;
++    if (!set_environment("RECOMP_GPU_AUDIT", on ? "1" : "0") ||
++        !set_environment("RECOMP_GPU_AUDIT_FILE", argv[2]))
++        return 2;
++
++    nv2a_gpu_audit_method(0, 0x1D70, 7);
++    nv2a_gpu_audit_semaphore(NV2A_AUDIT_SEMAPHORE_DIRECT);
++    nv2a_gpu_audit_method(5, 0x0310, 9);
++    nv2a_gpu_audit_method(4, 0x1D70, 11);
++    nv2a_gpu_audit_unhandled(4, 0x1D70);
++    nv2a_gpu_audit_begin(5);
++    nv2a_gpu_audit_input(NV2A_AUDIT_ARRAY, 3, 3);
++    nv2a_gpu_audit_backend(NV2A_AUDIT_GPU_VERTEX_REJECTED, 3);
++    nv2a_gpu_audit_fallback(NV2A_AUDIT_VSH_REJECTED);
++    nv2a_gpu_audit_route(NV2A_AUDIT_CPU_PROGRAM);
++    nv2a_gpu_audit_end(1, 0, 0, 0, 0);
++    nv2a_gpu_audit_begin(5);
++    nv2a_gpu_audit_input(NV2A_AUDIT_INLINE, 4, 4);
++    nv2a_gpu_audit_inline_stride(16);
++    nv2a_gpu_audit_drop(NV2A_AUDIT_SHORT_BATCH);
++    nv2a_gpu_audit_end(0, 0, 0, 0, 0);
++    nv2a_gpu_audit_clear(0xF0, 16, 16, 3, 0x10000, 0x20000);
++    nv2a_gpu_audit_flip(16, 16, 0x108);
++    nv2a_gpu_audit_write();
++
++    f = fopen(argv[2], "r");
++    if (!on) {
++        if (f)
++            fclose(f);
++        return f ? 1 : 0;
++    }
++    if (!f)
++        return 1;
++    bytes = fread(report, 1, sizeof report - 1, f);
++    if (ferror(f) || bytes == sizeof report - 1) {
++        fclose(f);
++        return 1;
++    }
++    fclose(f);
++    report[bytes] = '\0';
++    if (!contains(report, "route,CPU_PROGRAM,1,3\n") ||
++        !contains(report, "route,DROPPED,1,1\n") ||
++        !contains(report, "backend,GPU_VERTEX_REJECTED,1,3\n") ||
++        !contains(report, "fallback,VSH_REJECTED,1,0\n") ||
++        !contains(report, "visibility,UNKNOWN,1,3\n") ||
++        !contains(report, "visibility,NOT_SUBMITTED,1,1\n") ||
++        !contains(report, "cull,SOFTWARE_TRIANGLES,1,0\n") ||
++        !contains(report, "reason,SHORT_BATCH,1,1\n") ||
++        !contains(report, "semaphore,DIRECT_RELEASE,1,0\n") ||
++        !contains(report, "clear_size,16:16,1,0\n") ||
++        !contains(report, "flip_size,16:16,1,0\n") ||
++        !contains(report, "method_seen,5:0310,1,0\n") ||
++        !contains(report, "method_unhandled,4:1D70,1,0\n"))
++        return 1;
++    return 0;
++}
+diff --git a/tests/nv2a_raster_batch/CMakeLists.txt b/tests/nv2a_raster_batch/CMakeLists.txt
+index 1bc4d1c..8fc844f 100644
+--- a/tests/nv2a_raster_batch/CMakeLists.txt
++++ b/tests/nv2a_raster_batch/CMakeLists.txt
+@@ -7,6 +7,7 @@ add_executable(nv2a-raster-batch-test nv2a_raster_batch_test.c
+     ../../src/kernel/nv2a_combiner.c
+     ../../src/kernel/nv2a_frame_stats.c
+     ../../src/kernel/nv2a_census.c
++    ../../src/kernel/nv2a_gpu_audit.c
+     ../../src/kernel/nv2a_flip_hold.c)
+ target_include_directories(nv2a-raster-batch-test PRIVATE ../../src/kernel ../../src)
+ if(MSVC)
+diff --git a/tests/nv2a_raster_batch/nv2a_raster_batch_test.c b/tests/nv2a_raster_batch/nv2a_raster_batch_test.c
+index c79640a..f713de8 100644
+--- a/tests/nv2a_raster_batch/nv2a_raster_batch_test.c
++++ b/tests/nv2a_raster_batch/nv2a_raster_batch_test.c
+@@ -44,6 +44,8 @@ void xbox_FramebufferWindowStart(void) {}
+ void xbox_FramebufferWindowFrameStats(uint32_t draws) { (void)draws; }
+ void xbox_FramebufferWindowPresent(uint32_t va, uint32_t pitch) { (void)va; (void)pitch; }
+ void xbox_Nv2aFrameCounterFlip(void) {}
++int xbox_Nv2aGraphSoftwareTrap(uint32_t subch, uint32_t method, uint32_t data)
++{ (void)subch; (void)method; (void)data; return 0; }
+ /* The flip hold (#192, nv2a_flip_hold.c, linked in): no vblank moves here,
+  * so the executor never holds a flip. */
+ int nv2a_pb_scan_in_call(void) { return 0; }

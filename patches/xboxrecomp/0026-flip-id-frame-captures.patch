@@ -1,0 +1,166 @@
+diff --git a/src/kernel/nv2a_pb_exec.c b/src/kernel/nv2a_pb_exec.c
+index eff999d..8cbb19d 100644
+--- a/src/kernel/nv2a_pb_exec.c
++++ b/src/kernel/nv2a_pb_exec.c
+@@ -724,9 +724,26 @@ static uint32_t surface_bpp(void)
+  * the sequence. */
+ static int s_flip_dumping;
+ 
++static int flip_dump_with_id(void)
++{
++    static int enabled = -1;
++    if (enabled < 0) {
++        const char *value = getenv("RECOMP_FB_DUMP_FLIP_ID");
++        if (value && *value && strcmp(value, "0") != 0 &&
++            strcmp(value, "1") != 0) {
++            fprintf(stderr, "[GPU] RECOMP_FB_DUMP_FLIP_ID must be 0 or 1\n");
++            abort();
++        }
++        enabled = value && strcmp(value, "1") == 0;
++    }
++    return enabled;
++}
++
+ static int flip_dump_only(void)
+ {
+     static int enabled = -1;
++    if (flip_dump_with_id())
++        return 1;
+     if (enabled < 0) {
+         const char *value = getenv("RECOMP_FB_DUMP_FLIPS_ONLY");
+         enabled = value && *value && strcmp(value, "0") != 0;
+@@ -734,7 +751,7 @@ static int flip_dump_only(void)
+     return enabled;
+ }
+ 
+-static void dump_surface_bmp(void)
++static void dump_surface_bmp(uint32_t flip_id)
+ {
+     const char *prefix = getenv("RECOMP_FB_DUMP");
+     const uint8_t *mem = (const uint8_t *)xbox_GetMemoryOffset();
+@@ -752,17 +769,54 @@ static void dump_surface_bmp(void)
+     uint8_t hdr[54];
+     FILE *f;
+ 
+-    if (!prefix || !w || !h || (bpp != 2 && bpp != 4) || !offset)
++    if (!prefix || !w || !h || (bpp != 2 && bpp != 4) || !offset) {
++        if (flip_id) {
++            fprintf(stderr, "[GPU] cannot capture flip %u: invalid framebuffer\n", flip_id);
++            abort();
++        }
+         return;
++    }
++
++    if (flip_id) {
++        uint64_t padded_row = ((uint64_t)w * 3 + 3) & ~(uint64_t)3;
++        uint64_t source_row = ((uint64_t)cx + w) * bpp;
++        uint64_t source_rows = (uint64_t)cy + h;
++        uint32_t base = dma_resolve(offset);
++        if (padded_row > UINT32_MAX - 54 ||
++            h > (UINT32_MAX - 54) / padded_row) {
++            fprintf(stderr, "[GPU] cannot capture flip %u: framebuffer is too large\n", flip_id);
++            abort();
++        }
++        if (!pitch || source_row > pitch || source_rows > UINT32_MAX / pitch ||
++            !guest_span_ok(base, (uint32_t)(source_rows * pitch))) {
++            fprintf(stderr, "[GPU] cannot capture flip %u: invalid framebuffer span\n", flip_id);
++            abort();
++        }
++    }
+ 
+     row_bytes = w * 3;
+     pad = (4 - (row_bytes & 3)) & 3;
+     filesz = 54 + (row_bytes + pad) * h;
+ 
+-    snprintf(path, sizeof path, "%s%05d.bmp", prefix, seq++);
+-    f = fopen(path, "wb");
+-    if (!f)
++    if (flip_id) {
++        int n = snprintf(path, sizeof path, "%s%010u.bmp", prefix, flip_id);
++        if (n < 0 || (size_t)n >= sizeof path) {
++            fprintf(stderr, "[GPU] cannot capture flip %u: dump path is too long\n", flip_id);
++            abort();
++        }
++    } else {
++        snprintf(path, sizeof path, "%s%05d.bmp", prefix, seq);
++    }
++    seq++;
++    f = fopen(path, flip_id ? "wbx" : "wb");
++    if (!f) {
++        if (flip_id) {
++            fprintf(stderr, "[GPU] cannot create framebuffer dump for flip %u: %s\n",
++                    flip_id, path);
++            abort();
++        }
+         return;
++    }
+ 
+     memset(hdr, 0, sizeof hdr);
+     hdr[0] = 'B'; hdr[1] = 'M';
+@@ -799,7 +853,16 @@ static void dump_surface_bmp(void)
+             fwrite(zero, 1, pad, f);
+         }
+     }
+-    fclose(f);
++    {
++        int failed = ferror(f);
++        if (fclose(f) != 0)
++            failed = 1;
++        if (flip_id && failed) {
++            fprintf(stderr, "[GPU] failed to write framebuffer dump for flip %u: %s\n",
++                    flip_id, path);
++            abort();
++        }
++    }
+     if (seq == 1)
+         fprintf(stderr, "  [GPU] framebuffer dump: %s (%ux%u from 0x%08X %ubpp)\n",
+                 path, w, h, s_gpu.color_offset, bpp);
+@@ -2116,7 +2179,7 @@ static int batch_is_screen_space(void)
+ #define FB_DUMP_AFTER_DRAW 8
+ static int s_drawn_dumps;
+ 
+-static void dump_surface_bmp(void);
++static void dump_surface_bmp(uint32_t flip_id);
+ 
+ /* A fixed-function batch without texture coordinates is drawn untextured, as
+  * the screen-space path does, whatever stale texture the stage still holds. */
+@@ -4015,7 +4078,7 @@ static void raster_batch(void)
+     if (s_gpu.tris_drawn != before && s_drawn_dumps < FB_DUMP_AFTER_DRAW
+         && !s_flip_dumping && !flip_dump_only()) {
+         s_drawn_dumps++;
+-        dump_surface_bmp();
++        dump_surface_bmp(0);
+     }
+ }
+ 
+@@ -5223,8 +5286,19 @@ void nv2a_pb_exec_method(uint32_t subch, uint32_t method, uint32_t param)
+                     if (f) { fclose(f); on = 1; }
+                 }
+                 s_flip_dumping = on;
+-                if (on)
+-                    dump_surface_bmp();
++                if (on) {
++                    uint32_t flip_id = 0;
++                    if (flip_dump_with_id()) {
++                        if (!frame_stats_on() || !s_frame_in_guest ||
++                            s_frame_stats.flips == UINT32_MAX) {
++                            fprintf(stderr, "[GPU] cannot tag framebuffer dump: "
++                                            "frame statistics or guest pixels unavailable\n");
++                            abort();
++                        }
++                        flip_id = s_frame_stats.flips + 1;
++                    }
++                    dump_surface_bmp(flip_id);
++                }
+             }
+         }
+         frame_stats_flip();
+@@ -5601,7 +5675,7 @@ void nv2a_pb_exec_report(void)
+     /* One picture per report rather than per clear: a title clears hundreds of
+      * times a second and nobody wants that many files. */
+     if (!s_flip_dumping && !flip_dump_only())
+-        dump_surface_bmp();
++        dump_surface_bmp(0);
+ 
+     /* Drawn and skipped separately: "nothing appeared" and "every batch needed
+      * a vertex program we do not run" look identical on screen, and only one

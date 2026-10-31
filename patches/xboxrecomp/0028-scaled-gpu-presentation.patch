@@ -1,0 +1,214 @@
+diff --git a/src/video/gpu_present.c b/src/video/gpu_present.c
+index 6aaf932..04364a2 100644
+--- a/src/video/gpu_present.c
++++ b/src/video/gpu_present.c
+@@ -43,9 +43,11 @@ static volatile LONG             s_shared_ready;
+ static SRWLOCK                   s_shared_lock = SRWLOCK_INIT;
+ static HANDLE                    s_pending_shared, s_shared_handle;
+ static uint64_t                  s_pending_frame_id;
++static uint32_t                  s_pending_width, s_pending_height;
+ static ID3D11Texture2D          *s_shared_texture;
+ static ID3D11ShaderResourceView *s_shared_srv;
+ static IDXGIKeyedMutex          *s_shared_mutex;
++static uint32_t                  s_shared_width, s_shared_height;
+ 
+ /* A triangle covering the viewport, from the vertex id; uv 0..1. */
+ static const char s_hlsl[] =
+@@ -178,7 +180,35 @@ int gpu_present_init(HWND hwnd, uint32_t width, uint32_t height)
+ int gpu_present_shared_ready(uint32_t width, uint32_t height)
+ {
+     return InterlockedCompareExchange(&s_shared_ready, 0, 0) &&
+-           width == s_w && height == s_h && !getenv("RECOMP_FB_VA");
++           width && height && width <= 16384 && height <= 16384 && !getenv("RECOMP_FB_VA");
++}
++
++static int picture_size(uint32_t client_width, uint32_t client_height,
++                        uint32_t *width, uint32_t *height)
++{
++    if (!client_width || !client_height || !width || !height)
++        return 0;
++    if ((uint64_t)client_width * 3 <= (uint64_t)client_height * 4) {
++        *width = client_width;
++        *height = client_width * 3 / 4;
++    } else {
++        *height = client_height;
++        *width = client_height * 4 / 3;
++    }
++    return *width && *height;
++}
++
++int gpu_present_output_size(uint32_t *width, uint32_t *height)
++{
++    RECT r;
++    uint32_t client_width, client_height;
++
++    if (!width || !height || !InterlockedCompareExchange(&s_shared_ready, 0, 0) ||
++        !s_hwnd || !GetClientRect(s_hwnd, &r) || r.right <= r.left || r.bottom <= r.top)
++        return 0;
++    client_width = (uint32_t)(r.right - r.left);
++    client_height = (uint32_t)(r.bottom - r.top);
++    return picture_size(client_width, client_height, width, height);
+ }
+ 
+ int gpu_present_submit_shared(HANDLE handle, uint32_t width, uint32_t height,
+@@ -191,6 +221,8 @@ int gpu_present_submit_shared(HANDLE handle, uint32_t width, uint32_t height,
+     if (InterlockedCompareExchange(&s_shared_ready, 0, 0) && !s_pending_shared) {
+         s_pending_shared = handle;
+         s_pending_frame_id = frame_id;
++        s_pending_width = width;
++        s_pending_height = height;
+         submitted = 1;
+     }
+     ReleaseSRWLockExclusive(&s_shared_lock);
+@@ -206,23 +238,30 @@ static void release_shared_resources(void)
+     s_shared_mutex = NULL;
+     s_shared_texture = NULL;
+     s_shared_handle = NULL;
++    s_shared_width = s_shared_height = 0;
+ }
+ 
+-static ID3D11ShaderResourceView *take_shared(int allow_shared, uint64_t frame_id, int *held)
++static ID3D11ShaderResourceView *take_shared(int allow_shared, uint64_t frame_id, int *held,
++                                             uint32_t *width, uint32_t *height)
+ {
+     HANDLE handle;
+     uint64_t pending_id;
++    uint32_t pending_width, pending_height;
+     HRESULT hr;
++    int dimensions_match = 1;
+ 
+     *held = 0;
+     AcquireSRWLockExclusive(&s_shared_lock);
+     handle = s_pending_shared;
+     pending_id = s_pending_frame_id;
++    pending_width = s_pending_width;
++    pending_height = s_pending_height;
+     if (handle && allow_shared && frame_id < pending_id) {
+         ReleaseSRWLockExclusive(&s_shared_lock);
+         return NULL;
+     }
+     s_pending_shared = NULL;
++    s_pending_width = s_pending_height = 0;
+     ReleaseSRWLockExclusive(&s_shared_lock);
+     if (!handle)
+         return NULL;
+@@ -236,6 +275,16 @@ static ID3D11ShaderResourceView *take_shared(int allow_shared, uint64_t frame_id
+         if (SUCCEEDED(hr))
+             hr = ID3D11Device_CreateShaderResourceView(s_dev, (ID3D11Resource *)s_shared_texture,
+                                                        NULL, &s_shared_srv);
++        if (SUCCEEDED(hr)) {
++            D3D11_TEXTURE2D_DESC td;
++            ID3D11Texture2D_GetDesc(s_shared_texture, &td);
++            if (td.Width != pending_width || td.Height != pending_height)
++                hr = E_INVALIDARG;
++            else {
++                s_shared_width = td.Width;
++                s_shared_height = td.Height;
++            }
++        }
+         if (FAILED(hr)) {
+             fprintf(stderr, "  [D3D] shared frame open failed 0x%08lX; using CPU frames\n",
+                     (unsigned long)hr);
+@@ -244,13 +293,16 @@ static ID3D11ShaderResourceView *take_shared(int allow_shared, uint64_t frame_id
+             return NULL;
+         }
+         s_shared_handle = handle;
+-    }
++    } else if (pending_width != s_shared_width || pending_height != s_shared_height)
++        dimensions_match = 0;
+     hr = IDXGIKeyedMutex_AcquireSync(s_shared_mutex, 1, 0);
+     if (hr == WAIT_TIMEOUT) {
+         AcquireSRWLockExclusive(&s_shared_lock);
+         if (!s_pending_shared && InterlockedCompareExchange(&s_shared_ready, 0, 0)) {
+             s_pending_shared = handle;
+             s_pending_frame_id = pending_id;
++            s_pending_width = pending_width;
++            s_pending_height = pending_height;
+         }
+         ReleaseSRWLockExclusive(&s_shared_lock);
+         return NULL;
+@@ -261,6 +313,13 @@ static ID3D11ShaderResourceView *take_shared(int allow_shared, uint64_t frame_id
+         InterlockedExchange(&s_shared_ready, 0);
+         return NULL;
+     }
++    if (!dimensions_match) {
++        fprintf(stderr, "  [D3D] shared frame dimensions changed without a new resource;"
++                        " using CPU frames\n");
++        IDXGIKeyedMutex_ReleaseSync(s_shared_mutex, 0);
++        InterlockedExchange(&s_shared_ready, 0);
++        return NULL;
++    }
+     if (!allow_shared || frame_id != pending_id) {
+         hr = IDXGIKeyedMutex_ReleaseSync(s_shared_mutex, 0);
+         if (FAILED(hr)) {
+@@ -271,6 +330,8 @@ static ID3D11ShaderResourceView *take_shared(int allow_shared, uint64_t frame_id
+         return NULL;
+     }
+     *held = 1;
++    *width = s_shared_width;
++    *height = s_shared_height;
+     return s_shared_srv;
+ }
+ 
+@@ -284,7 +345,7 @@ static int gpu_present_frame_impl(const uint32_t *pixels, int allow_shared,
+     D3D11_VIEWPORT vp;
+     ID3D11ShaderResourceView *frame, *none = NULL;
+     HRESULT present_hr, hr;
+-    uint32_t cw, ch;
++    uint32_t cw, ch, frame_width = s_w, frame_height = s_h;
+     float sx, sy;
+     int held;
+ 
+@@ -315,7 +376,7 @@ static int gpu_present_frame_impl(const uint32_t *pixels, int allow_shared,
+         }
+         s_bw = cw; s_bh = ch;
+     }
+-    frame = take_shared(allow_shared, frame_id, &held);
++    frame = take_shared(allow_shared, frame_id, &held, &frame_width, &frame_height);
+     if (frame && trace) {
+         trace->route = GPU_PRESENT_SHARED_REJECTED;
+         trace->stage = GPU_PRESENT_INCOMPATIBLE;
+@@ -336,10 +397,10 @@ static int gpu_present_frame_impl(const uint32_t *pixels, int allow_shared,
+     ID3D11DeviceContext_OMSetRenderTargets(s_ctx, 1, &s_rtv, NULL);
+     ID3D11DeviceContext_ClearRenderTargetView(s_ctx, s_rtv, black);
+     /* The largest rectangle of the frame's shape that fits, centred. */
+-    sx = (float)s_bw / (float)s_w;
+-    sy = (float)s_bh / (float)s_h;
+-    vp.Width = (float)s_w * (sx < sy ? sx : sy);
+-    vp.Height = (float)s_h * (sx < sy ? sx : sy);
++    sx = (float)s_bw / (float)frame_width;
++    sy = (float)s_bh / (float)frame_height;
++    vp.Width = (float)frame_width * (sx < sy ? sx : sy);
++    vp.Height = (float)frame_height * (sx < sy ? sx : sy);
+     vp.TopLeftX = ((float)s_bw - vp.Width) * 0.5f;
+     vp.TopLeftY = ((float)s_bh - vp.Height) * 0.5f;
+     vp.MinDepth = 0; vp.MaxDepth = 1;
+@@ -393,6 +454,7 @@ void gpu_present_shutdown(void)
+     InterlockedExchange(&s_shared_ready, 0);
+     AcquireSRWLockExclusive(&s_shared_lock);
+     s_pending_shared = NULL;
++    s_pending_width = s_pending_height = 0;
+     ReleaseSRWLockExclusive(&s_shared_lock);
+     release_shared_resources();
+     if (s_ps)    { ID3D11PixelShader_Release(s_ps);           s_ps = NULL; }
+@@ -404,6 +466,7 @@ void gpu_present_shutdown(void)
+     if (s_chain) { IDXGISwapChain_Release(s_chain);           s_chain = NULL; }
+     if (s_ctx)   { ID3D11DeviceContext_Release(s_ctx);        s_ctx = NULL; }
+     if (s_dev)   { ID3D11Device_Release(s_dev);               s_dev = NULL; }
++    s_hwnd = NULL;
+ }
+ 
+ int gpu_present_active(void)
+diff --git a/src/video/gpu_present.h b/src/video/gpu_present.h
+index 1a59dfa..38c79f2 100644
+--- a/src/video/gpu_present.h
++++ b/src/video/gpu_present.h
+@@ -36,6 +36,8 @@ int  gpu_present_frame_capture(const uint32_t *pixels, int allow_shared,
+  * 0, copies the finished frame and releases key 1 before submitting. The
+  * presenter acquires key 1 and releases key 0 after using or discarding it. */
+ int  gpu_present_shared_ready(uint32_t width, uint32_t height);
++/* Current 4:3 picture rectangle inside the framebuffer window. */
++int  gpu_present_output_size(uint32_t *width, uint32_t *height);
+ uint64_t xbox_FramebufferWindowNextFrameId(void);
+ int  gpu_present_submit_shared(HANDLE handle, uint32_t width, uint32_t height,
+                                uint64_t frame_id);

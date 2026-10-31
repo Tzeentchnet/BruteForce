@@ -76,7 +76,8 @@ def test_unsupported_face_culling_fails_explicitly(mode, message):
 
 
 @pytest.mark.parametrize(
-    "mode", ["near-on", "near-off", "near-unset", "near-no-z", "near-clip", "near-cull"]
+    "mode",
+    ["near-on", "near-hud", "near-off", "near-unset", "near-no-z", "near-clip", "near-cull"],
 )
 def test_programmable_near_plane(mode):
     result = run_clip(mode)
@@ -97,10 +98,10 @@ def test_programmable_near_plane_trace(mode, plane, tmp_path):
 @pytest.mark.parametrize(
     ("mode", "message"),
     [
-        ("near-invalid", "RECOMP_PROGRAM_NEAR_ZERO must be 0 or 1"),
+        ("near-invalid", "RECOMP_PROGRAM_NEAR_ZERO must be 0, 1, or hud"),
         ("near-conflict", "RECOMP_PROGRAM_NEAR_ZERO requires RECOMP_CLIP_NEAR_Z"),
-        ("near-backend-before", "registered render back ends are unsupported"),
-        ("near-backend-after", "registered render back ends are unsupported"),
+        ("near-backend-before", "requires the software rasterizer or a capable extended"),
+        ("near-backend-after", "requires the software rasterizer or a capable extended"),
     ],
 )
 def test_unsupported_programmable_near_plane_fails_explicitly(mode, message):

@@ -7,6 +7,11 @@ other disc files. Counts and sample sizes below are observations from that
 disc, and may differ on other releases. The disc, archives, payloads, and
 runtime captures remain local.
 
+For the guest-to-host graphics pipeline, renderer systems and their validation
+limits, see [RENDERING.md](./RENDERING.md). This document focuses on the disc,
+resources and asset formats rather than inferring an original engine design
+from the current renderer.
+
 ## Disc layout and ownership
 
 The extracted disc has 685 files. The relevant top-level distribution is
@@ -49,12 +54,20 @@ systems have not yet been established.
 At a high level, the current host validates and maps `default.xbe`, initializes
 the framework's kernel and guest paths, and enters the statically recompiled
 guest. The guest opens disc bundles and cached resources; with graphics
-enabled, the pushbuffer executor uses the CPU rasterizer by default or an
-opt-in D3D11 GPU backend. The window can use D3D11 presentation, including
+enabled, the command-line path defaults to the CPU rasterizer; the launcher
+defaults to the experimental D3D11 GPU backend. The window can use D3D11 presentation, including
 an experimental shared-GPU path that retains guest readback. USB support is
 optional. This describes the present recompilation environment, not the
 original Xbox's complete engine design. See [FINDINGS.md](./FINDINGS.md)
 for observed guest entry points and limitations.
+
+The optional [launcher](../tools/launcher.py) stores host-side display and
+renderer choices separately from game data, then uses the existing validated
+experimental-tutorial launch path. Presentation scaling does not change guest
+logical render-target dimensions; scaled D3D11 modes allocate separate
+physical dimensions. The opt-in D3D11 combiner-shader cache stores derived
+bytecode locally, not game resources; guest memory, synchronization, and
+per-flip readback remain unchanged.
 
 ## Packaging and runtime paths
 
@@ -78,7 +91,7 @@ under `Z:\common\...` on `\Device\Harddisk0\Partition5`, and later opens
 disc-bundle-to-cache workflow for that run, not proof that every resource
 follows it or that a file open means successful decoding. `Z:` is a guest
 path, not a path an importer should hardcode on the host. Save and cache
-isolation is described in [README.md](../README.md#experimental-controller-diagnostic).
+isolation is described in [README.md](../README.md#isolated-controller-diagnostic).
 
 ## Resource families inside the game bundles
 

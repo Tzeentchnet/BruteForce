@@ -63,13 +63,24 @@ def test_flip_capture_rearms_without_reusing_previous_images(tmp_path):
 
 
 @pytest.mark.parametrize(("census", "report_ms"), [(False, "600000"), (True, "5000")])
-def test_capture_keeps_periodic_reports_when_census_needs_them(tmp_path, census, report_ms):
+@pytest.mark.parametrize("tagged", [False, True])
+def test_capture_keeps_periodic_reports_when_census_needs_them(tmp_path, census, report_ms, tagged):
     env = {"RECOMP_PB_REPORT_MS": "5000"}
-    gate = bench.configure_flip_capture(env, tmp_path, census)
+    gate = bench.configure_flip_capture(env, tmp_path, census, tagged=tagged)
     assert env["RECOMP_PB_REPORT_MS"] == report_ms
     assert env["RECOMP_FB_DUMP"] == str(tmp_path / "capture" / "hold")
     assert env["RECOMP_FB_DUMP_FLIPS"] == str(gate.flag)
     assert env["RECOMP_FB_DUMP_FLIPS_ONLY"] == "1"
+    assert env.get("RECOMP_FB_DUMP_FLIP_ID") == ("1" if tagged else None)
+
+
+def test_capture_rejects_an_overridden_flip_id_mode(tmp_path):
+    with pytest.raises(bench.BenchError, match="flip capture owns"):
+        bench.run_once(
+            tmp_path / "run", "gpu", "movement", {"RECOMP_FB_DUMP_FLIP_ID": "0"},
+            1, 120, False, False, "Release", capture_world=True,
+        )
+    assert not (tmp_path / "run").exists()
 
 
 def test_movement_capture_requires_movement_scene(tmp_path, capsys):

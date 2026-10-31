@@ -8,7 +8,8 @@ most other work: input, audio, HUD, and rendering investigations all slow
 down when each experiment runs at a tenth of real time. This plan replaces
 the CPU rendering path rather than tuning it further. Brute Force-specific
 evidence is in [FINDINGS.md](./FINDINGS.md); framework contribution candidates
-that come out of this work belong in [UPSTREAM.md](./UPSTREAM.md).
+that come out of this work belong in [UPSTREAM.md](./UPSTREAM.md). The current
+pipeline and system boundaries are summarized in [RENDERING.md](./RENDERING.md).
 
 The worked example is the
 [Blood Wake recompilation](https://github.com/minimalice92/bloodwake-recomp)
@@ -26,12 +27,39 @@ next steps are in [NEXTSTEPS.md](../NEXTSTEPS.md).
 
 | Phase | Status |
 | --- | --- |
-| 0 | Mostly done. Harness (`tools/bench.py`), frame statistics (patch 0014), census and ceiling probes (0015), profiler (`src/profile.c`), null back end and surface guard (`src/gpu/null_backend.c`) exist and were run. A guard diagnostic aborted on a protected semaphore page, so the surface-read answer remains open. Missing: the native-rate measurement and upstream PR measurements (#231, #272, #273). |
+| 0 | Mostly done. Harness (`tools/bench.py`), frame statistics (patch 0014), census and ceiling probes (0015), profiler (`src/profile.c`), null back end and surface guard (`src/gpu/null_backend.c`) exist and were run. Request audit 0025 has a partial, unreviewed retail diagnostic; flip-ID capture mapping 0026 is synthetic-tested. Presenter capture 0027 verified one link per GDI and CPU-upload route in short, unmatched retail probes, but did not validate physical visibility. Matched tutorial inventory, real scene review and world-frame labels remain open. A guard diagnostic aborted on a protected semaphore page, so the surface-read answer remains open. Missing: the native-rate measurement and upstream PR measurements (#231, #272, #273). |
 | 1 | Implemented, G4 not met. D3D11 back end (`src/gpu/`, `RECOMP_GPU=d3d11`) with the extended interface (0016). Synthetic WARP and hardware fixtures match apart from listed edge pixels. The new GPU-vertex tutorial capture differs from the CPU reference in 0.52% of pixels beyond 8/255; an older CPU-vertex capture differs substantially. |
-| 2 | Implemented (0017, on by default with the D3D11 back end). Stationary hold 3.20 → 30.41 rendered fps (3 runs each, alternating). Verification mode exists; not yet run on the title. |
+| 2 | Implemented (0017, on by default with the D3D11 back end). Stationary hold 3.20 → 30.41 rendered fps (3 runs each, alternating). An unreviewed retail diagnostic sampled 23,400 GPU-program batches without reported vertex differences through its last report. WARP and hardware fixtures cover additional packed formats, relative constants and culling against the CPU interpreter; matched-scene and complete format/hardware verification remain open. |
 | 3 | Partial. Async visibility reports (0018) and shared GPU presentation (0024) are opt-in. Shared presentation bounds one pending snapshot and retains synchronous per-flip guest readback; on-demand readback and a limit on all GPU frames in flight are not implemented. The combined alias/presentation campaign did not establish a speedup. |
 | 4 | Not started. Preserve flush, semaphore, and flip ordering. |
-| 5 | In progress. GPU compute decodes common textures; exact D24 and packed D24S8/stencil surface aliases and GPU window clipping are experimental opt-ins. The packed-alias/presentation candidate substantially darkened matched stationary backgrounds; G4 remains unmet. D3D11 honors partial clear rectangles, and patch 0022 removes redundant software depth clears when a backend owns drawing and clearing. Patch 0019 cached hot `getenv` calls. |
+| 5 | In progress. GPU compute decodes common textures; exact D24 and packed D24S8/stencil surface aliases and GPU window clipping are experimental opt-ins. One alias-only hardware diagnostic reproduced the combined alias/presentation candidate's much darker stationary background; its correctness is unknown and G4 remains unmet. D3D11 honors partial clear rectangles, and patch 0022 removes redundant software depth clears when a backend owns drawing and clearing. Patch 0019 cached hot `getenv` calls. |
+
+The first disc-inserted xemu reference attempt verified the retail XBE and
+private read-only media setup, but foreground focus and controller response
+could not be verified. No requested tutorial or fade scene was matched, and
+the available client-window captures are not pixel-exact. G4 remains open;
+see [FINDINGS](./FINDINGS.md#private-xemu-reference-attempt-2026-10-30).
+
+The D3D11 texture cache now checks retained source and palette snapshots on
+each ordinary use; the old approximate checks are a diagnostic opt-in.
+Failed uploads no longer accumulate unkeyed cache slots, and deterministic
+unsupported decodes are negatively cached after alias checks. A P8 page-query
+reuse experiment recorded no hits in three candidate runs and was removed.
+Synthetic rewrite, failure, alias and P8 boundary/reprotection fixtures pass,
+but the final binary has not been rebenchmarked, and the user-reported 6 fps
+case, controlled snapshot cost, guest-write races and matched gameplay
+correctness remain unresolved. Renderer device loss fails explicitly;
+recovery and the separate presenter device remain open. See
+[FINDINGS](./FINDINGS.md#default-d3d11-movement-regression-2026-10-30).
+
+An opt-in persistent combiner pixel-shader cache now avoids recompiling
+matching bytecode in synthetic warm runs and an alternating stationary-tutorial
+comparison. Timing and output checks are in
+[FINDINGS.md](./FINDINGS.md#launcher-and-pixel-shader-cache); gameplay stutter
+and G4 remain unestablished, and the title captures have small unexplained
+differences. Synthetic blocked-publication and concurrent-writer checks now
+exercise recovery when an identical valid entry already exists; their
+results are not gameplay performance evidence.
 
 Scenes are defined by frames and content, not wall-clock windows, because the
 tutorial's stationary hold appears to be a frame count. The stationary
@@ -75,8 +103,10 @@ without inserting report-time frames into the numbered sequence. Isolated
 diagnostic runs are for investigating failures, not repeated acceptance campaigns. Keep separate switches for timing changes
 so interactions can be isolated if the combined result regresses. The CPU
 reference, image-difference accounting, and synchronization requirements are
-not optional. The phases below group work by mechanism; a milestone may span
-several phases without waiting for a separate benchmark between them.
+not optional. Reuse existing captures and synthetic fixtures first, and
+state the specific question each gameplay run will answer before starting it.
+The phases below group work by mechanism; a milestone may span several phases
+without waiting for a separate benchmark between them.
 
 ## Why it is slow
 
@@ -139,9 +169,10 @@ Make the GPU authoritative for rendering and decouple the game thread from it:
 4. Let the game thread run ahead of the NV2A thread by a bounded amount, as
    the console's CPU and GPU overlap.
 
-The CPU rasterizer stays as the reference path (`RECOMP_GPU=cpu`, the
-current default until G4 passes) for A/B correctness comparisons. The D3D11
-path is enabled with a single switch while it matures.
+The CPU rasterizer stays as the reference path (`RECOMP_GPU=cpu`) for A/B
+correctness comparisons and remains the command-line default. Per user
+preference, the launcher defaults to the experimental D3D11 path even though
+G4 remains unmet.
 
 ## Phase 0: measurement and ceiling probes
 
@@ -150,13 +181,24 @@ Done before writing renderer code. All evidence stays local.
 1. **Benchmark harness.** Add `tools/bench.py`, or a `build.py bench`
    subcommand, that runs the tutorial with an isolated save root, a fixed
    `RECOMP_PAD_SCRIPT`, and a fixed watchdog. It produces:
-   - distinct-frame rate per second, from a hash of each presented frame;
+   - frame-change diagnostics from each flipped guest surface, with separately
+     reviewed world-frame changes rather than treating a whole-image hash as
+     presented world FPS;
    - frame-time percentiles;
    - per-thread busy versus waiting time.
 
    Define two scenes: the stationary view used in FINDINGS, and a scripted
    movement route. Run comparisons as alternating A/B/A sequences of at least
-   three runs, on the same generation.
+   three runs, on the same generation. Opt-in patch 0026 tags each captured
+   movement BMP with its frame-statistics flip ID, including across capture
+   gate changes. This mapping is synthetic-tested; it does not prove that the
+   guest surface matches the actual window output, especially with overlays,
+   pinned surfaces or direct presentation. Capture writes occur synchronously
+   before the statistics timestamp and perturb the measured run. Real scene
+   labels and presented-image validation remain unverified. A short
+   unclassified retail boot validated the benchmark's console-control and
+   WAV-finalization helpers; the complete manual audio benchmark and listening
+   pass remain open.
 2. **Sampling profiler with symbols.** Port the approach of Blood Wake's
    `bw_profile.c`: suspend and sample threads about every millisecond, then
    resolve addresses with DbgHelp against `BRUTEFORCE_LINK_SYMBOLS=ON`
@@ -179,7 +221,11 @@ Done before writing renderer code. All evidence stays local.
    The census decides which renderer features are mandatory for Brute Force.
    For example, the 320×240 and 160×120 passes seen in FINDINGS look like
    downsample or post-processing render-to-texture. That is a hypothesis to
-   confirm.
+   confirm. Patch 0025 adds a separate opt-in request audit for early drops,
+   backend outcomes, method/subchannel accounting and unknown visibility;
+   it does not replace the state census. Its synthetic fixtures pass, but it
+   has not yet been run on the tutorial. Rank observed ignored methods and
+   compare matched CPU/GPU/xemu captures before inferring visible impact.
 4. **Guest surface reads.** Determine whether the title's CPU code ever reads
    a rendered colour or depth surface. Candidates: screenshots, the save
    image, occlusion or lens-flare readbacks. Use page protection on surface
@@ -244,8 +290,9 @@ expected tree updated.
      GPU after that;
    - textures whose address is a rendered surface sample that render target
      directly;
-   - a hashed texture cache with direct BC and linear A8R8G8B8 uploads,
-     GPU compute decoding for common formats, and a CPU decoder fallback;
+   - a snapshot-validated texture cache with direct BC and linear A8R8G8B8
+     uploads, GPU compute decoding for common formats, and a CPU decoder
+     fallback;
    - cached blend, depth-stencil, rasterizer, and sampler state objects;
    - one dynamic ring vertex buffer mapped with `NO_OVERWRITE`;
    - persistent constant buffers updated only when changed.
@@ -377,6 +424,23 @@ phases when it is on the critical path:
   four-player split screen from 66 to 113 fps. Treat this as a last resort,
   not a plan item.
 
+## Internal-resolution milestone
+
+The generic Blood Wake physical-resolution model is now implemented in the
+project D3D11 backend: logical/physical surfaces and scale epochs, physical
+clear/clip mapping, guest-sized GPU readback resolves, normalized visibility
+counts, and exact/box/Catmull-Rom output through an independently sized shared
+texture. The launcher exposes Native, 2160p, 1440p, 1080p, 720p and the
+unchanged 480p default. Scaled experimental depth/stencil aliases are
+explicitly rejected.
+
+This is not evidence that the performance gates hold. Available WARP
+fixtures pass at scale two, but hardware scaled rendering, a matched retail
+campaign, VRAM headroom, mip/LOD behavior and a native 4K display remain
+untested. G4 comparisons continue at scale 1. G5 requires the controlled
+1080p/4K A/B/A campaign in [NEXTSTEPS.md](../NEXTSTEPS.md), and the reported
+default-settings movement regression remains a separate blocker.
+
 ## Not in scope, or explicitly rejected
 
 - Further SIMD or threading work on the CPU rasterizer beyond what it needs
@@ -385,12 +449,13 @@ phases when it is on the critical path:
   submitted fences complete before their inputs are consumed. FINDINGS
   explains why these are invalid.
 - Direct3D 12, which is deferred.
-- New mipmap and LOD-transition work is generally deferred by user direction;
-  preserve existing behavior and address a specific correctness need if one
-  is established.
-- Higher internal resolution, MSAA, widescreen, and frame interpolation.
-  The Phase 1–3 architecture is what makes these possible later, and G5
-  checks the headroom, but none of them are performance work.
+- Mipmaps are wanted for the 4K target (NEXTSTEPS B10) and are no longer
+  deferred for scaled modes; other LOD-transition work stays deferred.
+  Preserve existing behavior at scale 1.
+- MSAA, widescreen, and frame interpolation. The Phase 1–3 architecture is
+  what makes these possible later, but none of them are performance work.
+  Higher internal resolution is implemented synthetically as workstream B in
+  [NEXTSTEPS.md](../NEXTSTEPS.md), but G5 remains its performance gate.
 
 ## Risks
 
@@ -399,13 +464,17 @@ phases when it is on the critical path:
   never exercised: stencil shadows, point sprites, cube or projective
   texturing, different surface formats. The census bounds this risk; G4
   guards it.
-- **Existing visual issues.** The dark frames, missing HUD, and black
+- **Existing visual issues.** The user reports that the HUD and excessive
+  glow can disappear together in the live window; a synthetic hardware-D3D11
+  near-plane case reproduces a possible shared clipping mechanism, not the
+  actual gameplay cause. The dark frames, missing HUD, and black
   captures in FINDINGS are unexplained. The GPU path may change or hide them.
   Keep the CPU reference path working so a symptom can be assigned to the
   renderer or to the title.
-- **Shader compile hitches.** Compile on first use; the persistent bytecode
-  cache removes the cost on later runs. Measure first-run stutter separately
-  from the steady state.
+- **Shader compile hitches.** Compile on first use; the opt-in persistent
+  cache can avoid repeated combiner pixel-shader compiles on later runs.
+  Vertex and other shaders are not cached. Measure title first-run stutter
+  separately from the steady state.
 - **Synchronization.** PGRAPH software-method traps, flip holds, and the
   semaphore hook all run on the NV2A thread. The backend must not block that
   thread on the GPU while a trap is pending.
@@ -425,7 +494,7 @@ phases when it is on the critical path:
 
   | Phase | UPSTREAM items |
   | --- | --- |
-  | Phase 0 | 19, 20; also evaluate open PRs #231, #272, #273, and #222 with the benchmark |
+  | Phase 0 | 19, 20, 28; also evaluate open PRs #231, #272, #273, and #222 with the benchmark |
   | Phase 1 | 12, 14 |
   | Phase 2 | 13 |
   | Phase 3 | 15 |

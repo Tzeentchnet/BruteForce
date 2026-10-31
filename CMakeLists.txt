@@ -31,8 +31,8 @@ configure_file(src/bruteforce_config.h.in bruteforce_config.h @ONLY)
 add_subdirectory("${XBOXRECOMP_DIR}" "${CMAKE_BINARY_DIR}/xboxrecomp")
 
 file(GLOB RECOMP_SOURCES CONFIGURE_DEPENDS "${BRUTEFORCE_GEN_DIR}/*.c")
-set(BRUTEFORCE_GPU_SOURCES src/gpu/d3d11_backend.c src/gpu/rc_hlsl.c
-    src/gpu/vsh_hlsl.c src/gpu/texture_decode.c)
+set(BRUTEFORCE_GPU_SOURCES src/gpu/d3d11_backend.c src/gpu/render_scale.c src/gpu/rc_hlsl.c
+    src/gpu/shader_cache.c src/gpu/vsh_hlsl.c src/gpu/texture_decode.c)
 add_executable(bruteforce src/main.c src/recomp_manual.c src/crash_diagnostics.c
     src/profile.c src/gpu/null_backend.c ${BRUTEFORCE_GPU_SOURCES} ${RECOMP_SOURCES})
 target_compile_definitions(bruteforce PRIVATE WIN32_LEAN_AND_MEAN NOMINMAX)
@@ -51,6 +51,7 @@ target_include_directories(bruteforce_fence_test PRIVATE
     "${XBOXRECOMP_DIR}/src"
     "${XBOXRECOMP_DIR}/src/kernel"
 )
+target_link_libraries(bruteforce_fence_test PRIVATE host_time)
 
 add_executable(bruteforce_read_trace_test EXCLUDE_FROM_ALL tests/read_trace_test.c)
 target_compile_definitions(bruteforce_read_trace_test PRIVATE WIN32_LEAN_AND_MEAN NOMINMAX _CRT_SECURE_NO_WARNINGS)
@@ -130,8 +131,17 @@ target_include_directories(bruteforce_frame_stats_test PRIVATE
 )
 target_link_libraries(bruteforce_frame_stats_test PRIVATE xboxrecomp)
 
+add_executable(bruteforce_gpu_audit_test EXCLUDE_FROM_ALL tests/gpu_audit_test.c)
+target_compile_definitions(bruteforce_gpu_audit_test PRIVATE
+    WIN32_LEAN_AND_MEAN NOMINMAX _CRT_SECURE_NO_WARNINGS)
+target_include_directories(bruteforce_gpu_audit_test PRIVATE
+    "${XBOXRECOMP_DIR}/src"
+    "${XBOXRECOMP_DIR}/src/kernel"
+)
+target_link_libraries(bruteforce_gpu_audit_test PRIVATE xboxrecomp)
+
 add_executable(bruteforce_d3d11_test EXCLUDE_FROM_ALL tests/d3d11_test.c
-    tests/d3d11_texture_test.c src/gpu/null_backend.c ${BRUTEFORCE_GPU_SOURCES})
+    tests/d3d11_texture_test.c tests/shader_cache_test.c src/gpu/null_backend.c ${BRUTEFORCE_GPU_SOURCES})
 target_compile_definitions(bruteforce_d3d11_test PRIVATE
     WIN32_LEAN_AND_MEAN NOMINMAX _CRT_SECURE_NO_WARNINGS)
 target_include_directories(bruteforce_d3d11_test PRIVATE
@@ -139,7 +149,7 @@ target_include_directories(bruteforce_d3d11_test PRIVATE
     "${XBOXRECOMP_DIR}/src"
     "${XBOXRECOMP_DIR}/src/kernel"
 )
-target_link_libraries(bruteforce_d3d11_test PRIVATE xboxrecomp d3d11 d3dcompiler dbghelp)
+target_link_libraries(bruteforce_d3d11_test PRIVATE xboxrecomp d3d11 d3dcompiler dbghelp bcrypt)
 
 add_executable(bruteforce_color_unpack_test EXCLUDE_FROM_ALL
     tests/color_unpack_test.c "${XBOXRECOMP_DIR}/src/kernel/nv2a_combiner.c")

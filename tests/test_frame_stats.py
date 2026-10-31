@@ -91,6 +91,48 @@ def test_flip_capture_can_exclude_report_and_after_draw_dumps(mode, flip_only, t
         assert len(images) > 1, "report-time dumps remain enabled by default"
 
 
+def test_tagged_capture_uses_the_recorded_flip_id(tmp_path):
+    result = run_fixture("dump-flip-id", tmp_path / "hold")
+    assert result.returncode == 0, result.stderr
+    images = sorted(tmp_path.glob("hold*.bmp"))
+    assert [path.name for path in images] == ["hold0000000002.bmp"]
+    assert images[0].read_bytes()[54:57] == bytes((0x78, 0x56, 0x34))
+    assert [row["flip"] for row in read_rows(tmp_path / "hold.csv")] == ["1", "2", "3"]
+
+
+def test_tagged_capture_preserves_ids_across_gate_reopens(tmp_path):
+    result = run_fixture("dump-flip-id-reopen", tmp_path / "hold")
+    assert result.returncode == 0, result.stderr
+    images = sorted(tmp_path.glob("hold*.bmp"))
+    assert [path.name for path in images] == ["hold0000000002.bmp", "hold0000000004.bmp"]
+    assert [row["flip"] for row in read_rows(tmp_path / "hold.csv")] == ["1", "2", "3", "4"]
+    assert [path.read_bytes()[54:57] for path in images] == [
+        bytes((0x78, 0x56, 0x34)), bytes((0x33, 0x22, 0x11)),
+    ]
+
+
+@pytest.mark.parametrize(("mode", "message"), [
+    ("dump-flip-id-no-stats", "frame statistics or guest pixels unavailable"),
+    ("dump-flip-id-no-readback", "frame statistics or guest pixels unavailable"),
+    ("dump-flip-id-invalid-span", "invalid framebuffer span"),
+    ("dump-flip-id-invalid", "RECOMP_FB_DUMP_FLIP_ID must be 0 or 1"),
+])
+def test_tagged_capture_rejects_unreliable_inputs(mode, message, tmp_path):
+    result = run_fixture(mode, tmp_path / "hold")
+    assert result.returncode != 0
+    assert message in result.stderr
+    assert not list(tmp_path.glob("hold*.bmp"))
+
+
+def test_tagged_capture_does_not_overwrite_existing_file(tmp_path):
+    image = tmp_path / "hold0000000002.bmp"
+    image.write_bytes(b"existing image")
+    result = run_fixture("dump-flip-id", tmp_path / "hold")
+    assert result.returncode != 0
+    assert "cannot create framebuffer dump for flip 2" in result.stderr
+    assert image.read_bytes() == b"existing image"
+
+
 @pytest.mark.parametrize(("mode", "backend_owns_depth", "callbacks"), [
     ("depth-owner-cpu", False, 0),
     ("depth-owner-draw-only", False, 0),

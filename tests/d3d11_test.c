@@ -23,6 +23,7 @@
 #include "nv2a_vsh_interp.h"
 #include "xbox_memory_layout.h"
 #include "gpu/d3d11_backend.h"
+#include "gpu/d3d11_device_status.h"
 #include "gpu/null_backend.h"
 
 typedef void (*recomp_func_t)(void);
@@ -31,7 +32,11 @@ recomp_func_t recomp_lookup_manual(uint32_t va) { (void)va; return NULL; }
 
 extern void nv2a_pb_exec_method(uint32_t subch, uint32_t method, uint32_t param);
 extern void nv2a_pb_exec_poll(void);
+extern void nv2a_pb_exec_report(void);
 extern int bruteforce_test_textures(int hardware);
+extern int bruteforce_test_shader_cache_keys(void);
+extern int bruteforce_test_shader_cache_publication(int readonly, int different, int corrupt);
+extern int bruteforce_test_shader_cache_temp_collision(int exhausted);
 
 #define REQUIRE(condition, message) do { \
     if (!(condition)) { fprintf(stderr, "FAIL: %s\n", message); return 0; } \
@@ -74,6 +79,85 @@ static int initialize(const char *path)
     ok = xbox_MemoryLayoutInit(image, (size_t)length);
     free(image);
     REQUIRE(ok, "initialize guest memory");
+    return 1;
+}
+
+static HRESULT s_mock_removed_reason;
+static HRESULT s_mock_query_result;
+
+static HRESULT STDMETHODCALLTYPE mock_removed_reason(ID3D11Device *device)
+{
+    (void)device;
+    return s_mock_removed_reason;
+}
+
+static HRESULT STDMETHODCALLTYPE mock_get_data(ID3D11DeviceContext *context,
+                                                ID3D11Asynchronous *query, void *data,
+                                                UINT size, UINT flags)
+{
+    (void)context; (void)query; (void)flags;
+    if (s_mock_query_result == S_OK && data && size == sizeof(BOOL))
+        *(BOOL *)data = TRUE;
+    return s_mock_query_result;
+}
+
+static int test_device_status(const char *mode, const char *path)
+{
+    ID3D11DeviceVtbl vtable;
+    ID3D11Device device;
+    ID3D11DeviceContextVtbl context_vtable;
+    ID3D11DeviceContext context;
+    HRESULT result = S_OK;
+    BOOL complete = FALSE;
+    FILE *f = fopen(path, "wb");
+
+    REQUIRE(f != NULL, "open mock device status output");
+    memset(&vtable, 0, sizeof vtable);
+    vtable.GetDeviceRemovedReason = mock_removed_reason;
+    device.lpVtbl = &vtable;
+    s_mock_removed_reason = S_OK;
+    if (strstr(mode, "result-removed"))
+        result = DXGI_ERROR_DEVICE_REMOVED;
+    else if (strstr(mode, "result-reset"))
+        result = DXGI_ERROR_DEVICE_RESET;
+    else if (strstr(mode, "result-hung"))
+        result = DXGI_ERROR_DEVICE_HUNG;
+    else if (strstr(mode, "result-driver"))
+        result = DXGI_ERROR_DRIVER_INTERNAL_ERROR;
+    else if (strstr(mode, "unrelated"))
+        result = E_OUTOFMEMORY;
+    else if (strstr(mode, "reason-hung"))
+        s_mock_removed_reason = DXGI_ERROR_DEVICE_HUNG;
+    else if (strstr(mode, "reason-invalid"))
+        s_mock_removed_reason = DXGI_ERROR_INVALID_CALL;
+    else if (strcmp(mode, "device-pending") == 0) {
+        result = S_FALSE;
+        s_mock_removed_reason = DXGI_ERROR_DEVICE_REMOVED;
+    }
+    REQUIRE(fwrite("pending", 1, 7, f) == 7 && fflush(f) == 0, "write pending marker");
+    if (strstr(mode, "device-poll")) {
+        memset(&context_vtable, 0, sizeof context_vtable);
+        context_vtable.GetData = mock_get_data;
+        context.lpVtbl = &context_vtable;
+        s_mock_query_result = S_OK;
+        if (strstr(mode, "poll-pending") || strstr(mode, "poll-lost"))
+            s_mock_query_result = S_FALSE;
+        if (strstr(mode, "poll-lost"))
+            s_mock_removed_reason = DXGI_ERROR_DEVICE_REMOVED;
+        if (strstr(mode, "poll-result-removed"))
+            s_mock_query_result = DXGI_ERROR_DEVICE_REMOVED;
+        result = gpu_d3d11_get_data(&device, &context, NULL, &complete, sizeof complete, 0,
+                                    "synthetic visibility poll");
+        if (result == S_FALSE) {
+            REQUIRE(fclose(f) == 0, "close pending marker");
+            return 1;
+        }
+        REQUIRE(result == S_OK && complete, "mock query completed");
+    } else {
+        gpu_d3d11_check_device(&device, result, "synthetic pending GPU work");
+    }
+    REQUIRE(fwrite(" completed", 1, 10, f) == 10 && fclose(f) == 0,
+            "write completed marker");
     return 1;
 }
 
@@ -151,14 +235,21 @@ static void texture_swizzled8(uint32_t va)
     method(0x1B14, 1u << 24 | 1u << 16);             /* nearest */
 }
 
+static void texture_linear_stage(unsigned stage, uint32_t va, unsigned width,
+                                 unsigned height, unsigned pitch, unsigned format)
+{
+    uint32_t base = 0x1B00 + stage * 0x40;
+    method(base, va - XBOX_CONTIG_BASE);
+    method(base + 0x04, 2u << 4 | format << 8 | 1u << 16);
+    method(base + 0x10, pitch << 16);
+    method(base + 0x1C, width << 16 | height);
+    method(base + 0x08, 3u | 3u << 8);              /* clamp */
+    method(base + 0x14, 1u << 24 | 1u << 16);
+}
+
 static void texture_linear(uint32_t va, uint32_t size)
 {
-    method(0x1B00, va - XBOX_CONTIG_BASE);
-    method(0x1B04, 2u << 4 | 0x12u << 8 | 1u << 16);
-    method(0x1B10, (size * 4) << 16);
-    method(0x1B1C, size << 16 | size);
-    method(0x1B08, 3u | 3u << 8);                    /* clamp */
-    method(0x1B14, 1u << 24 | 1u << 16);
+    texture_linear_stage(0, va, size, size, size * 4, 0x12);
 }
 
 static void texture_palette8(uint32_t va, uint32_t palette)
@@ -168,6 +259,29 @@ static void texture_palette8(uint32_t va, uint32_t palette)
     method(0x1B20, palette - XBOX_CONTIG_BASE);
     method(0x1B08, 1u | 1u << 8);
     method(0x1B14, 1u << 24 | 1u << 16);
+}
+
+static void texture_palette_stage(unsigned stage, uint32_t va, uint32_t palette,
+                                  unsigned length_code)
+{
+    uint32_t base = 0x1B00 + stage * 0x40;
+    method(base, va - XBOX_CONTIG_BASE);
+    method(base + 0x04, 2u << 4 | 0x0Bu << 8 | 1u << 16 | 3u << 20 | 3u << 24);
+    method(base + 0x20, (palette - XBOX_CONTIG_BASE) | length_code << 2);
+    method(base + 0x08, 1u | 1u << 8);
+    method(base + 0x14, 1u << 24 | 1u << 16);
+}
+
+static void combiners_stage(unsigned stage)
+{
+    method(0x1E70, 1u << (stage * 5));
+    method(0x0AC0, (0x08u + stage) << 24 | 0x04u << 16);
+    method(0x0260, (0x18u + stage) << 24 | 0x14u << 16);
+    method(0x1E40, 0x0Cu << 4);
+    method(0x0AA0, 0x0Cu << 4);
+    method(0x0288, 0);
+    method(0x028C, 0);
+    method(0x1E60, 1);
 }
 
 static void report_at(uint32_t report, unsigned index)
@@ -226,6 +340,462 @@ static int save_frame(FILE *f, uint32_t color)
 {
     flip();
     return fwrite(guest(color), 4, B_SIZE * B_SIZE, f) == B_SIZE * B_SIZE;
+}
+
+typedef struct PackedVshVertex {
+    int16_t position[4];
+    uint8_t diffuse[4];
+    uint32_t normal;
+} PackedVshVertex;
+
+static int scene_vsh_packed(const char *out_path, int short3, int ubyte4)
+{
+    static const int16_t positions[3][4] = {
+        {-4, 4, 1, 1}, {24, 4, 1, 1}, {-4, 28, 1, 1}
+    };
+    static const int normal[3][3] = {
+        {-1023, 511, -511}, {1023, -1023, 511}, {-1, 1, 0}
+    };
+    uint32_t b = xbox_ContiguousAlloc(B_SIZE * B_SIZE * 4, 4096);
+    uint32_t vb = xbox_ContiguousAlloc(0x1000, 4096);
+    PackedVshVertex *vertices;
+    FILE *f;
+    unsigned i;
+
+    REQUIRE(sizeof(PackedVshVertex) == 16 && b && vb, "allocate packed VSH fixture");
+    vertices = (PackedVshVertex *)guest(vb);
+    for (i = 0; i < 3; ++i) {
+        memcpy(vertices[i].position, positions[i], sizeof positions[i]);
+        if (short3)
+            vertices[i].position[3] = -123;
+        vertices[i].diffuse[0] = 32;
+        vertices[i].diffuse[1] = 128;
+        vertices[i].diffuse[2] = 224;
+        vertices[i].diffuse[3] = ubyte4 ? 255 : 0x5D;
+        vertices[i].normal = ((uint32_t)normal[i][0] & 0x7FFu) |
+                             (((uint32_t)normal[i][1] & 0x7FFu) << 11) |
+                             (((uint32_t)normal[i][2] & 0x3FFu) << 22);
+    }
+    identity_matrix();
+    load_program();
+    surface(b, B_SIZE, 0);
+    combiners(0);
+    method(0x030C, 0);
+    method(0x0358, 0x01010101);
+    clear(0xF0, 0xFF000000u, 0);
+    method(0x1720, vb - XBOX_CONTIG_BASE);
+    method(0x1760, short3 ? 0x1035 : 0x1045);
+    method(0x172C, vb + 8 - XBOX_CONTIG_BASE);
+    method(0x176C, ubyte4 ? 0x1044 : 0x1034);
+    method(0x1744, vb + 12 - XBOX_CONTIG_BASE);
+    method(0x1784, 0x1016);
+    method(0x17FC, 5);
+    method(0x1810, 2u << 24);
+    method(0x17FC, 0);
+    f = fopen(out_path, "wb");
+    REQUIRE(f != NULL, "open packed VSH output");
+    REQUIRE(save_frame(f, b) && fclose(f) == 0, "write packed VSH output");
+    nv2a_pb_exec_report();
+    puts("packed VSH fixture drawn");
+    return 1;
+}
+
+static void load_relative_program(void)
+{
+    const uint32_t arl[4] = {
+        0, (13u << 21) | 0x1Bu | (9u << 9), 2u << 26, 0
+    };
+    const uint32_t color[4] = {
+        0, (1u << 21) | (3u << 13) | 0x1Bu, 3u << 26,
+        (0xFu << 12) | (1u << 11) | (3u << 3) | (1u << 1)
+    };
+    const uint32_t position[4] = {
+        0, (1u << 21) | 0x1Bu, 2u << 26, (0xFu << 12) | (1u << 11) | 1u
+    };
+    nv2a_vsh_set_instruction(0, arl);
+    nv2a_vsh_set_instruction(1, color);
+    nv2a_vsh_set_instruction(2, position);
+    method(0x1E94, 2);
+}
+
+static int scene_vsh_relative(const char *out_path)
+{
+    static const float offsets[8] = {-1.75f, -1.0f, 0.0f, 1.25f,
+                                     2.0f, 188.0f, 189.0f, -4.0f};
+    static const float constants[6][4] = {
+        {1, 1, 1, 1}, {1, 0, 1, 1}, {1, 0, 0, 1},
+        {0, 1, 0, 1}, {0, 0, 1, 1}, {1, 1, 0, 1}
+    };
+    static const float cyan[4] = {0, 1, 1, 1};
+    static const uint32_t white[4] = {
+        0xFFFFFFFFu, 0xFFFFFFFFu, 0xFFFFFFFFu, 0xFFFFFFFFu
+    };
+    uint32_t b = xbox_ContiguousAlloc(B_SIZE * B_SIZE * 4, 4096);
+    uint32_t vb = xbox_ContiguousAlloc(0x1000, 4096);
+    FILE *f;
+    unsigned i;
+
+    REQUIRE(b && vb, "allocate relative VSH fixture");
+    identity_matrix();
+    load_relative_program();
+    for (i = 0; i < 6; ++i)
+        nv2a_vsh_set_constant(i, constants[i]);
+    nv2a_vsh_set_constant(191, cyan);
+    surface(b, B_SIZE, 0);
+    combiners(0);
+    method(0x030C, 0);
+    method(0x0358, 0x01010101);
+    clear(0xF0, 0xFF000000u, 0);
+    for (i = 0; i < 8; ++i) {
+        float x = 2.0f + (float)(i % 4) * 16.0f;
+        float y = 2.0f + (float)(i / 4) * 20.0f;
+        Pos p[4] = {{x, y, 1, 1}, {x + 12, y, 1, 1},
+                    {x + 12, y + 12, 1, 1}, {x, y + 12, 1, 1}};
+        float uv[4][2] = {{offsets[i], 0}, {offsets[i], 0},
+                          {offsets[i], 0}, {offsets[i], 0}};
+        draw(8, p, white, uv, 4, vb);
+    }
+    f = fopen(out_path, "wb");
+    REQUIRE(f != NULL, "open relative VSH output");
+    REQUIRE(save_frame(f, b) && fclose(f) == 0, "write relative VSH output");
+    nv2a_pb_exec_report();
+    puts("relative VSH fixture drawn");
+    return 1;
+}
+
+static int scene_vsh_culling(const char *out_path)
+{
+    static const struct { uint32_t enable, face, front; } cases[] = {
+        {0, 0x405, 0x900}, {1, 0x405, 0x900}, {1, 0x405, 0x901},
+        {1, 0x404, 0x900}, {1, 0x408, 0x900}, {2, 0x405, 0x900},
+        {3, 0x405, 0x900}
+    };
+    static const Pos clockwise[3] = {{4, 4, 1, 1}, {24, 4, 1, 1}, {4, 24, 1, 1}};
+    static const Pos counter[3] = {{36, 4, 1, 1}, {36, 24, 1, 1}, {56, 4, 1, 1}};
+    static const Pos strip[4] = {{4, 36, 1, 1}, {24, 36, 1, 1},
+                                  {4, 56, 1, 1}, {24, 56, 1, 1}};
+    static const uint32_t red[4] = {0xFFFF0000u, 0xFFFF0000u, 0xFFFF0000u, 0xFFFF0000u};
+    static const uint32_t green[4] = {0xFF00FF00u, 0xFF00FF00u, 0xFF00FF00u, 0xFF00FF00u};
+    static const uint32_t blue[4] = {0xFF0000FFu, 0xFF0000FFu, 0xFF0000FFu, 0xFF0000FFu};
+    static const float uv[4][2] = {{0, 0}, {0, 0}, {0, 0}, {0, 0}};
+    uint32_t b = xbox_ContiguousAlloc(B_SIZE * B_SIZE * 4, 4096);
+    uint32_t vb = xbox_ContiguousAlloc(0x1000, 4096);
+    FILE *f;
+    unsigned i;
+
+    REQUIRE(b && vb, "allocate VSH culling fixture");
+    f = fopen(out_path, "wb");
+    REQUIRE(f != NULL, "open VSH culling output");
+    identity_matrix();
+    load_program();
+    surface(b, B_SIZE, 0);
+    combiners(0);
+    method(0x030C, 0);
+    method(0x0358, 0x01010101);
+    for (i = 0; i < sizeof cases / sizeof cases[0]; ++i) {
+        method(0x039C, cases[i].face);
+        method(0x03A0, cases[i].front);
+        method(0x0308, cases[i].enable);
+        clear(0xF0, 0xFF000000u, 0);
+        draw(6, strip, blue, uv, 4, vb);
+        draw(5, clockwise, red, uv, 3, vb);
+        draw(5, counter, green, uv, 3, vb);
+        REQUIRE(save_frame(f, b), "save VSH culling frame");
+    }
+    REQUIRE(fclose(f) == 0, "close VSH culling output");
+    nv2a_pb_exec_report();
+    puts("VSH culling fixture drawn");
+    return 1;
+}
+
+static void sample_quad(float x, float y, float u, float v, uint32_t vb)
+{
+    const Pos p[4] = {{x, y, 0, 1}, {x + 10, y, 0, 1},
+                      {x + 10, y + 10, 0, 1}, {x, y + 10, 0, 1}};
+    static const uint32_t white[4] = {
+        0xFFFFFFFFu, 0xFFFFFFFFu, 0xFFFFFFFFu, 0xFFFFFFFFu
+    };
+    const float uv[4][2] = {{u, v}, {u, v}, {u, v}, {u, v}};
+    draw(8, p, white, uv, 4, vb);
+}
+
+static int scene_unsupported_cache(const char *out_path)
+{
+    uint32_t b = xbox_ContiguousAlloc(B_SIZE * B_SIZE * 4, 4096);
+    uint32_t tex = xbox_ContiguousAlloc(B_SIZE * B_SIZE * 4, 4096);
+    uint32_t vb = xbox_ContiguousAlloc(0x1000, 4096);
+    uint32_t *pixels;
+    DWORD old_protect, ignored;
+    unsigned i;
+    FILE *f;
+
+    REQUIRE(b && tex && vb, "allocate unsupported texture fixture");
+    pixels = (uint32_t *)guest(tex);
+    for (i = 0; i < B_SIZE * B_SIZE; ++i)
+        pixels[i] = 0xFF00FF00u;
+    identity_matrix();
+    surface(b, B_SIZE, 0);
+    clear(0xF0, 0xFF000000u, 0);
+    texture_linear_stage(0, tex, B_SIZE, B_SIZE, B_SIZE * 4, 0x2E);
+    combiners(1);
+    for (i = 0; i < 3; ++i)
+        sample_quad(2, 2, 0.03f, 0.03f, vb);
+
+    REQUIRE(VirtualProtect(guest(tex), B_SIZE * B_SIZE * 4, PAGE_NOACCESS, &old_protect),
+            "protect unsupported texture");
+    sample_quad(16, 2, 0.03f, 0.03f, vb);
+    REQUIRE(VirtualProtect(guest(tex), B_SIZE * B_SIZE * 4, old_protect, &ignored),
+            "restore unsupported texture");
+
+    texture_linear(tex, B_SIZE);
+    sample_quad(30, 2, 0.03f, 0.03f, vb);
+    surface(tex, B_SIZE, 0);
+    clear(0xF0, 0xFF0000FFu, 0);
+    surface(b, B_SIZE, 0);
+    texture_linear_stage(0, tex, B_SIZE, B_SIZE, B_SIZE * 4, 0x2E);
+    sample_quad(44, 2, 0.03f, 0.03f, vb);
+    flip();
+    f = fopen(out_path, "wb");
+    REQUIRE(f != NULL, "open unsupported texture output");
+    REQUIRE(fwrite(guest(b), 4, B_SIZE * B_SIZE, f) == B_SIZE * B_SIZE &&
+            fclose(f) == 0, "write unsupported texture output");
+    puts("unsupported texture cache fixture drawn");
+    return 1;
+}
+
+static int scene_failed_upload_cache(const char *out_path)
+{
+    uint32_t b = xbox_ContiguousAlloc(B_SIZE * B_SIZE * 4, 4096);
+    uint32_t good = xbox_ContiguousAlloc(B_SIZE * B_SIZE * 4, 4096);
+    uint32_t bad = xbox_ContiguousAlloc(0x4000, 4096);
+    uint32_t vb = xbox_ContiguousAlloc(0x1000, 4096);
+    unsigned i;
+    FILE *f;
+
+    REQUIRE(b && good && bad && vb, "allocate failed upload fixture");
+    for (i = 0; i < B_SIZE * B_SIZE; ++i)
+        ((uint32_t *)guest(good))[i] = 0xFF00FF00u;
+    memset(guest(bad), 0, 0x4000);
+    identity_matrix();
+    surface(b, B_SIZE, 0);
+    clear(0xF0, 0xFF000000u, 0);
+    texture_linear(good, B_SIZE);
+    combiners(1);
+    sample_quad(2, 2, 0.03f, 0.03f, vb);
+
+    for (i = 0; i < 4; ++i) {
+        texture_linear_stage(0, bad + (i / 2) * 4, 16, 8, 64, 0x12);
+        method(0x1B04, 2u << 4 | 0x12u << 8 | 1u << 16 | 1u << 2);
+        method(0x1E70, 3);
+        sample_quad(2, 16, 0.03f, 0.03f, vb);
+    }
+
+    texture_linear(good, B_SIZE);
+    combiners(1);
+    sample_quad(16, 2, 0.03f, 0.03f, vb);
+    flip();
+    f = fopen(out_path, "wb");
+    REQUIRE(f != NULL, "open failed upload output");
+    REQUIRE(fwrite(guest(b), 4, B_SIZE * B_SIZE, f) == B_SIZE * B_SIZE &&
+            fclose(f) == 0, "write failed upload output");
+    puts("failed upload cache fixture drawn");
+    return 1;
+}
+
+static int scene_cache_rewrite(const char *out_path)
+{
+    uint32_t b = xbox_ContiguousAlloc(B_SIZE * B_SIZE * 4, 4096);
+    uint32_t tex = xbox_ContiguousAlloc(64 * 64 * 4, 4096);
+    uint32_t vb = xbox_ContiguousAlloc(0x1000, 4096);
+    uint32_t *pixels;
+    unsigned i, generation = 1;
+    FILE *f;
+
+    REQUIRE(b && tex && vb, "allocate texture-cache fixture");
+    pixels = (uint32_t *)guest(tex);
+    for (i = 0; i < 64 * 64; ++i)
+        pixels[i] = 0xFFFF0000u;
+    identity_matrix();
+    surface(b, B_SIZE, 0);
+    clear(0xF0, 0xFF000000u, 0);
+    texture_linear(tex, 64);
+    combiners(1);
+    sample_quad(2, 2, 2.03f, 0.03f, vb);
+    for (i = 0; i < 64 * 64; ++i)
+        pixels[i] = 0xFF00FF00u;
+    sample_quad(16, 2, 2.03f, 0.03f, vb);
+    flip();
+    generation++;
+
+    /* Stabilise this entry and then alter a pixel outside all 128 sparse
+     * eight-byte samples in the old cache. Avoid its periodic full check. */
+    for (i = 0; i < 36; ++i) {
+        sample_quad(2, 18, 2.03f, 0.03f, vb);
+        flip();
+        generation++;
+    }
+    if (((generation + (tex >> 12)) & 31u) == 0) {
+        sample_quad(2, 18, 2.03f, 0.03f, vb);
+        flip();
+    }
+    pixels[2] = 0xFF0000FFu;             /* bytes 8..11 are not sampled */
+    sample_quad(16, 18, 2.03f, 0.03f, vb);
+    flip();
+    f = fopen(out_path, "wb");
+    REQUIRE(f != NULL, "open texture-cache output");
+    REQUIRE(fwrite(guest(b), 4, B_SIZE * B_SIZE, f) == B_SIZE * B_SIZE &&
+            fclose(f) == 0, "write texture-cache output");
+    puts("texture-cache rewrites drawn");
+    return 1;
+}
+
+static int scene_short_palettes(const char *out_path, int invalid_index,
+                                int short_allocation, unsigned stage)
+{
+    static const uint32_t colors[4] = {0xFFFF0000u, 0xFF00FF00u, 0xFF0000FFu,
+                                       0xFFFFFF00u};
+    uint32_t b = xbox_ContiguousAlloc(B_SIZE * B_SIZE * 4, 4096);
+    uint32_t vb = xbox_ContiguousAlloc(0x1000, 4096);
+    unsigned code;
+    FILE *f;
+
+    REQUIRE(b && vb, "allocate P8 fixture surface");
+    identity_matrix();
+    surface(b, B_SIZE, 0);
+    clear(0xF0, 0xFF000000u, 0);
+    for (code = 0; code < 4; ++code) {
+        unsigned entries = 256u >> code;
+        uint32_t tex = xbox_ContiguousAlloc(0x1000, 4096);
+        uint32_t allocation = xbox_ContiguousAlloc(short_allocation ? 0x1000 : 0x2000, 4096);
+        uint32_t palette;
+        DWORD old_protect;
+        uint32_t *table;
+
+        REQUIRE(tex && allocation, "allocate P8 fixture texture and palette");
+        if (short_allocation || invalid_index) {
+            entries = 32;
+            code = 3;
+        }
+        palette = allocation + 0x1000 - (short_allocation ? 64 : entries * 4);
+        memset(guest(tex), invalid_index ? entries : entries - 1, 64);
+        table = (uint32_t *)guest(palette);
+        if (short_allocation)
+            table[0] = 0xFFFF0000u;
+        else {
+            memset(table, 0, entries * 4);
+            table[entries - 1] = colors[code];
+            REQUIRE(VirtualProtect(guest(allocation + 0x1000), 0x1000,
+                                   PAGE_NOACCESS, &old_protect), "guard P8 palette end");
+        }
+        texture_palette_stage(stage, tex, palette, code);
+        combiners_stage(stage);
+        sample_quad((float)(2 + code * 14), 2, 0.03f, 0.03f, vb);
+        if (short_allocation || invalid_index)
+            break;
+    }
+    flip();
+    f = fopen(out_path, "wb");
+    REQUIRE(f != NULL, "open P8 output");
+    REQUIRE(fwrite(guest(b), 4, B_SIZE * B_SIZE, f) == B_SIZE * B_SIZE &&
+            fclose(f) == 0, "write P8 output");
+    puts("short palettes drawn");
+    return 1;
+}
+
+static int scene_p8_rewrite(const char *out_path, int invalid_index, int shrink,
+                            unsigned stage)
+{
+    uint32_t b = xbox_ContiguousAlloc(B_SIZE * B_SIZE * 4, 4096);
+    uint32_t vb = xbox_ContiguousAlloc(0x1000, 4096);
+    uint32_t tex = xbox_ContiguousAlloc(0x1000, 4096);
+    uint32_t palette = xbox_ContiguousAlloc(0x1000, 4096);
+    uint32_t *table;
+    FILE *f;
+
+    REQUIRE(b && vb && tex && palette, "allocate P8 rewrite fixture");
+    memset(guest(tex), shrink ? 32 : 0, 64);
+    table = (uint32_t *)guest(palette);
+    memset(table, 0, 256 * 4);
+    table[0] = 0xFFFF0000u;
+    table[1] = 0xFF00FF00u;
+    table[32] = 0xFF0000FFu;
+    identity_matrix();
+    surface(b, B_SIZE, 0);
+    clear(0xF0, 0xFF000000u, 0);
+    texture_palette_stage(stage, tex, palette, shrink ? 0u : 3u);
+    combiners_stage(stage);
+    sample_quad(2, 2, 0.03f, 0.03f, vb);
+    if (shrink)
+        method(0x1B20 + stage * 0x40, (palette - XBOX_CONTIG_BASE) | 3u << 2);
+    else
+        memset(guest(tex), invalid_index ? 32 : 1, 64);
+    sample_quad(16, 2, 0.03f, 0.03f, vb);
+    if (!invalid_index && !shrink) {
+        table[1] = 0xFF0000FFu;
+        sample_quad(30, 2, 0.03f, 0.03f, vb);
+    }
+    flip();
+    f = fopen(out_path, "wb");
+    REQUIRE(f != NULL, "open P8 rewrite output");
+    REQUIRE(fwrite(guest(b), 4, B_SIZE * B_SIZE, f) == B_SIZE * B_SIZE &&
+            fclose(f) == 0, "write P8 rewrite output");
+    puts("P8 rewrites drawn");
+    return 1;
+}
+
+static int scene_p8_reprotect(int protect_palette, unsigned stage)
+{
+    uint32_t b = xbox_ContiguousAlloc(B_SIZE * B_SIZE * 4, 4096);
+    uint32_t vb = xbox_ContiguousAlloc(0x1000, 4096);
+    uint32_t tex = xbox_ContiguousAlloc(0x1000, 4096);
+    uint32_t palette = xbox_ContiguousAlloc(0x1000, 4096);
+    DWORD old_protect;
+
+    REQUIRE(b && vb && tex && palette, "allocate P8 reprotection fixture");
+    memset(guest(tex), 0, 64);
+    ((uint32_t *)guest(palette))[0] = 0xFFFF0000u;
+    identity_matrix();
+    surface(b, B_SIZE, 0);
+    clear(0xF0, 0xFF000000u, 0);
+    texture_palette_stage(stage, tex, palette, 3);
+    combiners_stage(stage);
+    sample_quad(2, 2, 0.03f, 0.03f, vb);
+    REQUIRE(VirtualProtect(guest(protect_palette ? palette : tex), 0x1000,
+                           PAGE_NOACCESS, &old_protect), "protect cached P8 range");
+    sample_quad(16, 2, 0.03f, 0.03f, vb);
+    return 0;
+}
+
+static int scene_p8_bad_range(const char *mode)
+{
+    uint32_t b = xbox_ContiguousAlloc(B_SIZE * B_SIZE * 4, 4096);
+    uint32_t vb = xbox_ContiguousAlloc(0x1000, 4096);
+    int bad_texture = strstr(mode, "texture") != NULL;
+    int short_texture = strstr(mode, "short-texture") != NULL;
+    uint32_t tex_alloc = xbox_ContiguousAlloc(short_texture ? 0x1000 : 0x2000, 4096);
+    uint32_t pal_alloc = xbox_ContiguousAlloc(0x2000, 4096);
+    uint32_t tex, palette;
+    DWORD old_protect;
+
+    REQUIRE(b && vb && tex_alloc && pal_alloc, "allocate invalid P8 range fixture");
+    tex = bad_texture ? tex_alloc + 0x1000 - 128 : tex_alloc;
+    palette = bad_texture ? pal_alloc : pal_alloc + 0x1000 - 64;
+    memset(guest(tex), 0, bad_texture ? 128 : 64);
+    *(uint32_t *)guest(palette) = 0xFFFF0000u;
+    if (!short_texture) {
+        uint32_t guard = bad_texture ? tex_alloc + 0x1000 : pal_alloc + 0x1000;
+        REQUIRE(VirtualProtect(guest(guard), 0x1000, PAGE_NOACCESS, &old_protect),
+                "guard invalid P8 range");
+    }
+    identity_matrix();
+    surface(b, B_SIZE, 0);
+    clear(0xF0, 0xFF000000u, 0);
+    texture_palette_stage(0, tex, palette, 3);
+    if (bad_texture)
+        method(0x1B04, 2u << 4 | 0x0Bu << 8 | 1u << 16 | 4u << 20 | 4u << 24);
+    combiners_stage(0);
+    sample_quad(2, 2, 0.03f, 0.03f, vb);
+    return 0;
 }
 
 static uint32_t bounds(unsigned first, unsigned last)
@@ -499,18 +1069,145 @@ static int scene_window_clip(const char *out_path, int program)
 
 static void texture_depth(uint32_t va, unsigned width, unsigned height, unsigned pitch)
 {
-    method(0x1B00, va - XBOX_CONTIG_BASE);
-    method(0x1B04, 2u << 4 | 0x2Eu << 8 | 1u << 16);
-    method(0x1B10, pitch << 16);
-    method(0x1B1C, width << 16 | height);
-    method(0x1B08, 3u | 3u << 8);
-    method(0x1B14, 1u << 24 | 1u << 16);
+    texture_linear_stage(0, va, width, height, pitch, 0x2E);
 }
 
 static void texture_packed_depth(uint32_t va, unsigned width, unsigned height, unsigned pitch)
 {
-    texture_depth(va, width, height, pitch);
-    method(0x1B04, 2u << 4 | 0x41u << 8 | 1u << 16);
+    texture_linear_stage(0, va, width, height, pitch, 0x41);
+}
+
+static int scene_hud_near(const char *out_path)
+{
+    static const Pos glow[4] = {{0, 0, 0, 240}, {64, 0, 0, 240},
+                                {64, 64, 0, 240}, {0, 64, 0, 240}};
+    static const Pos hud[4] = {{4, 4, 0, 120}, {20, 4, 0, 120},
+                               {20, 20, 0, 120}, {4, 20, 0, 120}};
+    static const Pos positive[4] = {{44, 4, 1, 1}, {60, 4, 1, 1},
+                                    {60, 20, 1, 1}, {44, 20, 1, 1}};
+    static const Pos negative[4] = {{44, 44, -0.25f, 1}, {60, 44, -0.25f, 1},
+                                    {60, 60, -0.25f, 1}, {44, 60, -0.25f, 1}};
+    static const uint32_t gray[4] = {0xFF404040u, 0xFF404040u, 0xFF404040u, 0xFF404040u};
+    static const uint32_t red[4] = {0xFFFF0000u, 0xFFFF0000u, 0xFFFF0000u, 0xFFFF0000u};
+    static const uint32_t green[4] = {0xFF00FF00u, 0xFF00FF00u, 0xFF00FF00u, 0xFF00FF00u};
+    static const uint32_t blue[4] = {0xFF0000FFu, 0xFF0000FFu, 0xFF0000FFu, 0xFF0000FFu};
+    static const float uv[4][2] = {{0, 0}, {0, 0}, {0, 0}, {0, 0}};
+    static const float offsets[2] = {0.5f, -0.5f};
+    uint32_t b = xbox_ContiguousAlloc(B_SIZE * B_SIZE * 4, 4096);
+    uint32_t vb = xbox_ContiguousAlloc(0x1000, 4096);
+    FILE *f = fopen(out_path, "wb");
+    unsigned i;
+
+    REQUIRE(b && vb && f, "initialize HUD and glow near-plane fixture");
+    identity_matrix();
+    load_program();
+    surface(b, B_SIZE, 0);
+    combiners(0);
+    method(0x030C, 0);
+    method(0x0358, 0x01010101);
+    for (i = 0; i < 2; i++) {
+        method_float(0x0A28, offsets[i]);
+        clear(0xF0, 0xFF606060u, 0);
+        method(0x0304, 1);
+        method(0x0344, 1);
+        method(0x0348, 1);
+        draw(8, glow, gray, uv, 4, vb);
+        method(0x0304, 0);
+        draw(8, hud, red, uv, 4, vb);
+        draw(8, positive, green, uv, 4, vb);
+        draw(8, negative, blue, uv, 4, vb);
+        REQUIRE(save_frame(f, b), "save HUD and glow near-plane frame");
+    }
+    REQUIRE(fclose(f) == 0, "close HUD and glow near-plane frames");
+    puts("HUD and glow near-plane frames 2");
+    return 1;
+}
+
+static void glare_combiners(void)
+{
+    static const uint32_t color_icw[5] = {
+        0xC1C80000u, 0xD9209D40u, 0xC820C020u, 0xCCD80000u, 0xCC200000u
+    };
+    static const uint32_t alpha_icw[5] = {
+        0, 0xD9309D50u, 0xD830D030u, 0xDCD81010u, 0
+    };
+    static const uint32_t color_ocw[5] = {
+        0x000820D0u, 0x00000C00u, 0x00004C00u, 0x000000C0u, 0x000820D0u
+    };
+    static const uint32_t alpha_ocw[5] = {
+        0, 0x00000C00u, 0x00004C00u, 0x000000C0u, 0
+    };
+    unsigned i;
+
+    for (i = 0; i < 5; i++) {
+        method(0x0AC0 + i * 4, color_icw[i]);
+        method(0x0260 + i * 4, alpha_icw[i]);
+        method(0x1E40 + i * 4, color_ocw[i]);
+        method(0x0AA0 + i * 4, alpha_ocw[i]);
+        method(0x0A60 + i * 4, i == 0 ? 0x004C961Du : 0);
+        method(0x0A80 + i * 4, 0);
+    }
+    method(0x0288, 0x0C040000u);
+    method(0x028C, 0x00001D80u);
+    method(0x1E60, 0x00011105u);
+    method(0x1E70, 0x00000021u);
+}
+
+static int scene_glare_threshold(const char *out_path, int program)
+{
+    static const struct { uint32_t argb; uint8_t stencil; } cases[] = {
+        {0xFF202020u, 0xC0}, {0xFFA0A0A0u, 0xC0}, {0xFFA0A0A0u, 0x40},
+        {0xFFE0E0E0u, 0xC0}, {0xFFA0A0A0u, 0xA1}, {0xFFA0A0A0u, 0x9F},
+        {0xFFE02010u, 0x60}, {0xFFE02010u, 0x50}, {0x80A0A0A0u, 0x40}
+    };
+    static const Pos full[4] = {{0, 0, 0, 1}, {64, 0, 0, 1},
+                                 {64, 64, 0, 1}, {0, 64, 0, 1}};
+    static const uint32_t white[4] = {0xFFFFFFFFu, 0xFFFFFFFFu, 0xFFFFFFFFu, 0xFFFFFFFFu};
+    static const float uv[4][2] = {{0, 0}, {64, 0}, {64, 64}, {0, 64}};
+    uint32_t scene = xbox_ContiguousAlloc(B_SIZE * B_SIZE * 4, 4096);
+    uint32_t bright = xbox_ContiguousAlloc(B_SIZE * B_SIZE * 4, 4096);
+    uint32_t z = xbox_ContiguousAlloc(B_SIZE * B_SIZE * 4, 4096);
+    uint32_t vb = xbox_ContiguousAlloc(0x1000, 4096);
+    FILE *f = fopen(out_path, "wb");
+    unsigned i;
+
+    REQUIRE(scene && bright && z && vb && f, "initialize glare threshold fixture");
+    memset(guest(z), 0, B_SIZE * B_SIZE * 4);
+    identity_matrix();
+    if (program)
+        load_program();
+    method(0x030C, 0);
+    method(0x035C, 0);
+    method(0x0358, 0x01010101);
+    for (i = 0; i < sizeof cases / sizeof cases[0]; i++) {
+        surface(scene, B_SIZE, z);
+        clear(0xF3, cases[i].argb, 0xFFFFFF00u | cases[i].stencil);
+        REQUIRE(((const uint32_t *)guest(z))[0] == 0,
+                "fixture requires stale zero guest depth and stencil");
+
+        surface(bright, B_SIZE, 0);
+        clear(0xF0, 0xFF000000u, 0);
+        texture_linear(scene, B_SIZE);
+        texture_linear_stage(1, z, B_SIZE, B_SIZE, B_SIZE * 4, 0x41);
+        glare_combiners();
+        method(0x0304, 1);
+        method(0x0344, 1);
+        method(0x0348, 0);
+        draw(8, full, white, uv, 4, vb);
+        REQUIRE(save_frame(f, bright), "save glare bright-pass frame");
+
+        surface(scene, B_SIZE, z);
+        texture_linear(bright, B_SIZE);
+        combiners(1);
+        method(0x0304, 1);
+        method(0x0344, 1);
+        method(0x0348, 1);
+        draw(8, full, white, uv, 4, vb);
+        REQUIRE(save_frame(f, scene), "save glare composite frame");
+    }
+    REQUIRE(fclose(f) == 0, "close glare threshold frames");
+    puts("glare threshold frames 18");
+    return 1;
 }
 
 static int scene_stencil_texture(const char *out_path, int program)
@@ -1153,6 +1850,8 @@ int main(int argc, char **argv)
         return 1;
     if (!initialize(argv[1]))
         return 1;
+    if (strncmp(argv[2], "device-", 7) == 0)
+        return test_device_status(argv[2], argv[3]) ? 0 : 1;
     if (strncmp(argv[2], "textures-", 9) == 0)
         return bruteforce_test_textures(strstr(argv[2], "hardware") != NULL) ? 0 : 1;
     if (strncmp(argv[2], "guard", 5) == 0)
@@ -1160,9 +1859,19 @@ int main(int argc, char **argv)
     if ((strstr(argv[2], "clip") || strstr(argv[2], "clear")) &&
         _putenv_s("RECOMP_WINDOW_CLIP", "1") != 0)
         return 1;
+    if (strstr(argv[2], "vsh-cull") &&
+        _putenv_s("RECOMP_CULL_FACE", strstr(argv[2], "cull-off") ? "0" : "1") != 0)
+        return 1;
     if (strncmp(argv[2], "gpu", 3) == 0) {
         /* gpu-cpuvsh: programs transformed on the CPU, drawn on the GPU. */
         if (_putenv_s("RECOMP_D3D11_WARP", strstr(argv[2], "hardware") ? "0" : "1") != 0 ||
+            (strstr(argv[2], "scale-invalid") &&
+             _putenv_s("RECOMP_GPU_SCALE", "invalid") != 0) ||
+            (strstr(argv[2], "scale2") &&
+             _putenv_s("RECOMP_GPU_SCALE", "2") != 0) ||
+            (strstr(argv[2], "scale-output-invalid") &&
+             (_putenv_s("RECOMP_GPU_SCALE", "native") != 0 ||
+              _putenv_s("RECOMP_GPU_OUTPUT", "100x100") != 0)) ||
             _putenv_s("RECOMP_GPU_VSH", strstr(argv[2], "cpuvsh") ? "0" : "1") != 0 ||
             _putenv_s("RECOMP_GPU_ZPASS", strstr(argv[2], "async") ? "async" : "sync") != 0 ||
             _putenv_s("RECOMP_GPU_TEX_DECODE", strstr(argv[2], "software-texture") ? "0" : "1") != 0 ||
@@ -1171,7 +1880,9 @@ int main(int argc, char **argv)
             (strstr(argv[2], "stencil") &&
              _putenv_s("RECOMP_GPU_STENCIL_ALIAS", strstr(argv[2], "invalid") ? "invalid" : "1") != 0) ||
             (strstr(argv[2], "direct") &&
-             _putenv_s("RECOMP_GPU_DIRECT_PRESENT", strstr(argv[2], "invalid") ? "invalid" : "1") != 0) ||
+             _putenv_s("RECOMP_GPU_DIRECT_PRESENT",
+                       strstr(argv[2], "invalid") ? "invalid" :
+                       strstr(argv[2], "off") ? "0" : "1") != 0) ||
             (strstr(argv[2], "bc") && _putenv_s("RECOMP_GPU_TEXLOG", "1") != 0) ||
             _putenv_s("RECOMP_GPU_VSH_SYNC", "1") != 0 ||
             _putenv_s("RECOMP_GPU_VSH_VERIFY", "1") != 0 || !bruteforce_d3d11_install())
@@ -1179,9 +1890,41 @@ int main(int argc, char **argv)
     } else if (strncmp(argv[2], "cpu", 3) != 0) {
         return 2;
     }
-    if (strstr(argv[2], "clear") ? !scene_clear_rect(argv[3], strstr(argv[2], "vsh") != NULL,
+    if (strcmp(argv[2], "gpu-cache-keys") == 0)
+        return bruteforce_test_shader_cache_keys() ? 0 : 1;
+    if (strncmp(argv[2], "gpu-cache-temp-", 15) == 0)
+        return bruteforce_test_shader_cache_temp_collision(strstr(argv[2], "exhausted") != NULL)
+                   ? 0 : 1;
+    if (strncmp(argv[2], "gpu-cache-publish-", 18) == 0)
+        return bruteforce_test_shader_cache_publication(strstr(argv[2], "readonly") != NULL,
+                                                        strstr(argv[2], "different") != NULL,
+                                                        strstr(argv[2], "corrupt") != NULL) ? 0 : 1;
+    if (strstr(argv[2], "vsh-packed") ?
+        !scene_vsh_packed(argv[3], strstr(argv[2], "short3") != NULL,
+                          strstr(argv[2], "ubyte4") != NULL) :
+        strstr(argv[2], "vsh-relative") ? !scene_vsh_relative(argv[3]) :
+        strstr(argv[2], "vsh-cull") ? !scene_vsh_culling(argv[3]) :
+        strstr(argv[2], "p8-bad-range") ?
+        !scene_p8_bad_range(argv[2]) :
+        strstr(argv[2], "p8-reprotect") ?
+        !scene_p8_reprotect(strstr(argv[2], "palette") != NULL,
+                            strstr(argv[2], "stage1") ? 1u : 0u) :
+        strstr(argv[2], "p8-rewrite") ?
+        !scene_p8_rewrite(argv[3], strstr(argv[2], "invalid-index") != NULL,
+                          strstr(argv[2], "shrink") != NULL,
+                          strstr(argv[2], "stage1") ? 1u : 0u) :
+        strstr(argv[2], "p8") ?
+        !scene_short_palettes(argv[3], strstr(argv[2], "invalid-index") != NULL,
+                              strstr(argv[2], "short-allocation") != NULL,
+                              strstr(argv[2], "stage1") ? 1u : 0u) :
+        strstr(argv[2], "unsupported-cache") ? !scene_unsupported_cache(argv[3]) :
+        strstr(argv[2], "failed-upload-cache") ? !scene_failed_upload_cache(argv[3]) :
+        strstr(argv[2], "cache-rewrite") ? !scene_cache_rewrite(argv[3]) :
+        strstr(argv[2], "near-hud") ? !scene_hud_near(argv[3]) :
+        strstr(argv[2], "clear") ? !scene_clear_rect(argv[3], strstr(argv[2], "vsh") != NULL,
                                                      strstr(argv[2], "vertical") != NULL) :
         strstr(argv[2], "clip") ? !scene_window_clip(argv[3], strstr(argv[2], "vsh") != NULL) :
+        strstr(argv[2], "glare") ? !scene_glare_threshold(argv[3], strstr(argv[2], "vsh") != NULL) :
         strstr(argv[2], "stencil") ? !scene_stencil_texture(argv[3], strstr(argv[2], "vsh") != NULL) :
         strstr(argv[2], "depth") ? !scene_depth_texture(argv[3], strstr(argv[2], "vsh") != NULL) :
         strstr(argv[2], "bc") ? !scene_bc(argv[3]) :

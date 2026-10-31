@@ -227,7 +227,8 @@ static void screen_triangle(void)
     method(0x17FC, 0);
 }
 
-static int test_flip_dumps(const char *xbe, const char *gate)
+static int test_flip_dumps(const char *xbe, const char *gate, int deny_readback,
+                           int invalid_span, int reopen)
 {
     uint32_t surface = XBOX_CONTIG_BASE + 0x00200000u;
     FILE *f;
@@ -242,6 +243,12 @@ static int test_flip_dumps(const char *xbe, const char *gate)
     nv2a_pb_exec_report();
     flip();
     nv2a_pb_exec_report();
+    if (deny_readback)
+        nv2a_backend_register(&fake_backend);
+    if (invalid_span) {
+        method(0x020C, 4);
+        screen_triangle();
+    }
     f = fopen(gate, "wb");
     REQUIRE(f && fclose(f) == 0, "open the flip capture gate");
     clear_color(0xFF345678u);
@@ -249,6 +256,13 @@ static int test_flip_dumps(const char *xbe, const char *gate)
     REQUIRE(remove(gate) == 0, "close the flip capture gate");
     clear_color(0xFFAABBCCu);
     flip();
+    if (reopen) {
+        f = fopen(gate, "wb");
+        REQUIRE(f && fclose(f) == 0, "reopen the flip capture gate");
+        clear_color(0xFF112233u);
+        flip();
+        REQUIRE(remove(gate) == 0, "close the reopened flip capture gate");
+    }
     nv2a_pb_exec_report();
     return 1;
 }
@@ -463,15 +477,27 @@ int main(int argc, char **argv)
         puts("census run finished");
         return 0;
     }
-    if (strcmp(argv[2], "dump-default") == 0 || strcmp(argv[2], "dump-flip-only") == 0) {
+    if (strcmp(argv[2], "dump-default") == 0 ||
+        strcmp(argv[2], "dump-flip-only") == 0 ||
+        strncmp(argv[2], "dump-flip-id", 12) == 0) {
         char gate[1024];
+        char stats[1024];
         int flip_only = strcmp(argv[2], "dump-flip-only") == 0;
+        int tagged = strncmp(argv[2], "dump-flip-id", 12) == 0;
+        int no_stats = strcmp(argv[2], "dump-flip-id-no-stats") == 0;
+        int no_readback = strcmp(argv[2], "dump-flip-id-no-readback") == 0;
+        int invalid_span = strcmp(argv[2], "dump-flip-id-invalid-span") == 0;
+        int invalid = strcmp(argv[2], "dump-flip-id-invalid") == 0;
+        int reopen = strcmp(argv[2], "dump-flip-id-reopen") == 0;
         snprintf(gate, sizeof gate, "%s.gate", argv[3]);
+        snprintf(stats, sizeof stats, "%s.csv", argv[3]);
         remove(gate);
         if (_putenv_s("RECOMP_FB_DUMP", argv[3]) != 0 ||
             _putenv_s("RECOMP_FB_DUMP_FLIPS", gate) != 0 ||
             _putenv_s("RECOMP_FB_DUMP_FLIPS_ONLY", flip_only ? "1" : "0") != 0 ||
-            !test_flip_dumps(argv[1], gate))
+            (tagged && _putenv_s("RECOMP_FB_DUMP_FLIP_ID", invalid ? "invalid" : "1") != 0) ||
+            (tagged && !no_stats && _putenv_s("RECOMP_FRAME_STATS", stats) != 0) ||
+            !test_flip_dumps(argv[1], gate, no_readback, invalid_span, reopen))
             return 1;
         puts("flip capture tests passed");
         return 0;

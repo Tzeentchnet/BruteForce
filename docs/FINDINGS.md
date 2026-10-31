@@ -4,8 +4,9 @@ These observations apply to the one locally supplied North American retail
 executable identified by [retail.json](../fingerprints/retail.json). Guest
 addresses and layouts must not be assumed valid for other revisions. Asset
 organization and importer research are tracked in
-[ARCHITECTURE.md](./ARCHITECTURE.md); general framework contributions are in
-[UPSTREAM.md](./UPSTREAM.md).
+[ARCHITECTURE.md](./ARCHITECTURE.md), the current rendering architecture is
+in [RENDERING.md](./RENDERING.md), and general framework contributions are
+in [UPSTREAM.md](./UPSTREAM.md).
 
 ## Executable and provenance
 
@@ -35,6 +36,323 @@ but the generated sites actually call `RECOMP_UNIMPL`. This project's
 pair described below. Unresolved indirect calls also abort; generated
 unresolved direct-call stubs retain the framework's logged-and-continue
 behavior, so a stub hit is a correctness problem, not a successful emulation.
+
+## Private xemu reference attempt (2026-10-30)
+
+The supplied XISO was read without extraction using the toolkit's read-only
+XISO reader. Its root `default.xbe` matched all four fields in `retail.json`:
+size, SHA-256, title ID and entry point. The same check passed after the run;
+the ISO's size and modification time also remained unchanged. This verifies
+the executable, not every disc byte.
+
+One isolated xemu 0.8.139 session (source commit
+`aa54c34cae1c09410d74c69a44210a9867fe2d16`) started paused with
+networking, update checks and NVIDIA profile setup explicitly disabled, dummy
+audio, a private EEPROM and `-snapshot`. Before its single `cont`, QMP
+confirmed the requested optical image and its backing were read-only and the
+HDD snapshot backed a separate private copy. QMP's named block nodes placed
+both snapshot overlay files in the private run directory; the HDD backing's
+hash was unchanged afterward. The configured display was OpenGL, surface
+scale 1, nearest filtering and 4:3. xemu reported an RTX 5070 with NVIDIA
+driver 617.42; its DXGI presentation initialization failed and it reported an
+SDL OpenGL swap fallback, with no established effect on the captures.
+
+One prelaunch and 23 running captures targeted only the PID-verified xemu
+client window. They are 426×320 scaled/composited `PrintWindow` images,
+**not** pixel-exact 640×480 guest captures. At 41.94 guest seconds, two local
+OCR preprocessing variants recognized the developer name Digital Anvil; an
+independent synthetic-text OCR control passed. This is evidence of displayed
+guest startup content, not a unique identification of the game executable.
+No tutorial stationary, sun-facing, turned, or end-of-opening-fade state was
+independently matched. QMP running status and changing window images alone do
+not prove those scenes or a successful Brute Force game boot.
+
+The target never acquired verified foreground focus; `SetForegroundWindow`
+returned false. No keys or F12 were sent in this run, which ended normally via
+QMP quit after about 99 guest seconds. QMP `screendump` was unavailable. The
+earlier no-disc probe's targeted F12 `PostMessage` also produced no file.
+xemu's source shows that its F12 action renders the framebuffer texture
+through its DAC gamma shader before PNG output and uses second-resolution
+filenames that can overwrite existing files; raw guest-framebuffer bit
+identity remains unverified. A future operator-assisted session must focus
+and verify the exact xemu window, verify a visible control response, and use
+a fresh empty screenshot inbox with collision guards before independently
+matching all four scenes.
+
+The earlier no-disc retry displayed a guest disc-insertion prompt, not a
+confirmed dashboard, and reported `SHUTDOWN` reason `host-ui` at about
+41.8 seconds. The xemu source has host-UI paths for window-close/quit events
+and the shutdown action, but the initiating event was not established.
+This disc-inserted run continued past that time and ended with
+`host-qmp-quit`; it does not explain the earlier shutdown.
+
+The local [session result](../analysis/xemu-reference-game-20261030-133140-7d1b5af7/reference-results.json),
+[QMP media verification](../analysis/xemu-reference-game-20261030-133140-7d1b5af7/run/qmp-media-verification.json)
+and [offline classification](../analysis/xemu-reference-game-20261030-133140-7d1b5af7/run/offline-classification.json)
+are ignored private artifacts; the disc, captures, EEPROM and HDD remain
+local. No frame-rate or rendering-equivalence measurement was made.
+
+## Launcher and pixel-shader cache
+
+On 2026-10-30, the Windows launcher was tested with generation
+`20261029-175500-dfadbdd9`, the North American retail executable above,
+isolated saves and a 25-second watchdog. A D3D11 launch opened the framebuffer
+window and reported point filtering and VSync off. A second bounded startup
+opened borderless fullscreen and F11 restored the window. A third reported
+linear filtering and VSync on but did not reach a cacheable combiner shader
+before the watchdog. These are startup and window-control checks, not
+evidence of gameplay or a cache failure.
+
+Following the user's preference, new launcher settings now default to the
+experimental D3D11 renderer; existing saved renderer choices are retained.
+The command-line default remains the CPU reference. The packed alias and
+other experimental options remain off by default.
+
+The opt-in cache was also measured with the same Release-build synthetic
+D3D11 scene on a hardware device, four raster threads, and three alternating
+cold/warm runs after priming the warm cache. Every output frame was
+byte-identical. Cold runs compiled three shaders each; their median sum of
+compile-and-create times was 26.356 ms. Warm runs loaded three each; their
+median sum of lookup-and-create times was 0.532 ms. Median whole-process
+times were 250.4 ms cold and 222.9 ms warm. Cold compile times exclude cache
+writes; process times include startup and other work. The adapter model was
+not recorded. These synthetic numbers do not establish gameplay stutter or
+world-frame performance.
+
+A subsequent [scripted stationary-tutorial comparison](../analysis/bench/shader-cache-20261030-013241/summary.json)
+used the same generation, four raster threads, D3D11 GPU vertex programs,
+VSync off, `RECOMP_PROGRAM_NEAR_ZERO=1`, isolated saves, and three alternating
+runs each with an empty cache or a cache seeded from the first cold run.
+There were no retries. Each cold run compiled 31 combiner shaders, with
+compile-and-create sums of 387.674–457.867 ms (median 454.624 ms), excluding
+cache writes. Each warm run loaded 31, with lookup-and-create sums of
+4.504–108.891 ms (median 4.794 ms). These sums do not directly measure
+frame-time stutter.
+
+The static hold produced 20.523–37.589 rendered fps cold and
+27.815–38.836 warm; these are not distinct world-frame rates, and the
+variation does not establish a steady-state speedup. The first captured
+640x480 flip in each content-matched cold/warm pair differed by more than
+8/255 in 176, 412, and 350 pixels respectively (about 0.06–0.13%).
+Captures were not frame-locked and the differences remain unexplained. They
+do not establish G4 or prove the cache caused a visual difference.
+
+[test_d3d11.py](../tests/test_d3d11.py) also checks cold/warm frame identity
+with CPU-transformed and GPU vertex-program batches on WARP and hardware,
+cache-key inputs, damaged-entry recovery, concurrent writes, Unicode paths,
+and the logged unavailable-directory fallback. Forced read-only and
+deny-delete destinations reproduced Windows error 5 on replacement. The
+cache now briefly retries transient publication errors and accepts an existing
+entry only after verifying its key, checksum and byte-for-byte equality with
+the newly compiled output; differing or damaged entries still report the
+failure. Fifty concurrent two-process synthetic cases passed, with one
+identical-entry recovery observed. The complete D3D11 fixture suite passed 106
+tests with WARP and the default hardware device. These cases explain a
+reproducible form of the failure but do not prove the cause of the earlier
+intermittent occurrence. The renderer's existing CPU reference parity
+fixtures still run with the cache disabled.
+
+A separate forced temporary-name collision exposed another failure: after a
+later `CreateFileW` succeeded, the earlier Windows error 80 was retained and
+the valid entry was not published. The store now clears that stale error
+when creation succeeds. Synthetic fixtures verify both successful retry
+without changing the colliding file and explicit failure after exhausting
+all 32 names; they do not establish that this caused the earlier error 5.
+The nine focused collision, blocked-publication and key tests passed after
+the fix. The later integrated D3D11, frame-statistics, audit, clipping and
+presentation run passed 174 tests, including 108 D3D11 cases on WARP and
+hardware.
+
+## GPU audit instrumentation
+
+On 2026-10-30, framework patch 0025 was built against tree
+`cb43fad03befa678166d84b56acbc75b3663e9ce`. This was a **synthetic**
+validation using the framework's test XBE, not a run of the retail revision
+identified above or of generation `20261029-175500-dfadbdd9`. No game was
+played and no performance campaign or new distinct-world-frame measurement
+was made. The patch changes runtime code only; the framework's code-generation
+subtrees are unchanged.
+
+Set `RECOMP_GPU_AUDIT=1` to enable the default-off observer;
+`RECOMP_GPU_AUDIT_FILE` names its CSV, defaulting to `gpu_audit.csv`.
+Unset, `0`, and other values leave it disabled. It does not register a
+rendering backend, so the existing CPU rasterizer remains the reference.
+Reports are rewritten at executor reports, on a flip after 20 seconds have
+elapsed (or the wall clock moves backwards), and at normal exit. An active
+BEGIN appears separately as `open_request` and `open_input`, not as a
+completed request. Forced termination can lose the latest interval, and a
+reader can encounter a partially rewritten report. Method values can include
+guest addresses; keep reports and other runtime captures local.
+
+The CSV columns are `category,key,count,vertices`. Completed requests are
+classified by primitive, input source and actual route: GPU vertex program,
+CPU vertex program, fixed function, screen space, or dropped. The input rows
+count requested, buffered and discarded array indices, immediate vertices,
+or **inline words**; inline request vertex totals require a known stride.
+Backend rows count base and extended draw callbacks and accepted or rejected
+GPU-vertex callbacks, not visible pixels. Existing executor triangle
+counters supply output, software-cull, clip and offscreen rows; even a
+triangle emitted by the executor can produce no pixels. `visibility,UNKNOWN`
+therefore includes every non-dropped route. `visibility,NOT_SUBMITTED`
+identifies dropped routes, including a rejected GPU callback that falls back
+and then drops, rather than asserting that no callback was attempted.
+
+`method_seen` counts dispatched methods by subchannel, including the
+subchannel-0 semaphore release and subchannel-5 DMA KickOff early returns.
+`method_unhandled` means the executor called its existing unhandled-method
+path; `method_mirror_only` means a texture-stage method was mirrored but not
+decoded there. A backend may consume that mirror, so neither category proves
+that hardware ignores the method. Clear flags, sizes and rectangle state and
+flip-event dimensions/current format are recorded separately; current format
+is not necessarily the presented surface's format. There are eight
+subchannels and 2,048 method slots each, with at most six retained values per
+non-bulk method; bulk payload values are omitted while their occurrences are
+counted. The aggregate table has 4,096 slots and admits up to 3,072 distinct
+keys. All counters saturate at 64 bits; the overflow rows report lost table
+events, extra method values, saturation and invalid method keys. Once overflow
+occurs, affected aggregates are lower bounds, not a complete inventory.
+
+The Windows x64 Release fixtures used MSVC 19.44. The focused run passed 16
+audit cases, 40 frame-statistics/window-clip cases and nine existing
+CPU/GPU-reference cases; four standalone framework CTest cases also passed.
+The audit fixture used one raster thread; the D3D11 reference fixture used
+four. Audit-off/on synthetic guest bytes, stdout, stderr and fake-backend
+callback order matched; WARP and hardware-mode D3D11 output also matched
+between audit-off/on runs. The separate CPU/GPU parity fixtures allow their
+documented edge-pixel differences. The D3D11 fixture did **not** record its
+adapter identity. A separate `D3D11CreateDevice(NULL, HARDWARE)` probe
+selected NVIDIA GeForce RTX 5070 (vendor `0x10de`, device `0x2f04`); that
+observation does not prove which adapter the fixture used. Linux/pthread,
+additional backends and real-title behavior remain unverified.
+
+The focused commands below ran from the project root; they use the private
+build and scratch directories. Choose a **new, nonexistent** pytest
+`--basetemp` when repeating them, since pytest deletes a reused basetemp.
+
+```powershell
+$root = (Get-Location).Path
+$work = Join-Path $root 'build\gpu-audit-20261030-7beb2474'
+$env:TEMP = Join-Path $work 'scratch'; $env:TMP = $env:TEMP
+$env:PYTHONDONTWRITEBYTECODE = '1'
+cmake -S $root -B $work -G 'Visual Studio 17 2022' -A x64 "-DBRUTEFORCE_GEN_DIR=$root\tests\fixtures\generated"
+cmake --build $work --config Release --parallel 4 --target bruteforce_gpu_audit_test bruteforce_frame_stats_test bruteforce_window_clip_test bruteforce_d3d11_test -- /verbosity:quiet
+$env:BRUTEFORCE_TEST_GPU_AUDIT = Join-Path $work 'Release\bruteforce_gpu_audit_test.exe'
+$env:BRUTEFORCE_TEST_D3D11 = Join-Path $work 'Release\bruteforce_d3d11_test.exe'
+$env:BRUTEFORCE_TEST_D3D11_HARDWARE = '1'
+$env:BRUTEFORCE_TEST_FRAME_STATS = Join-Path $work 'Release\bruteforce_frame_stats_test.exe'
+$env:BRUTEFORCE_TEST_WINDOW_CLIP = Join-Path $work 'Release\bruteforce_window_clip_test.exe'
+$private = Join-Path $work 'pytest-audit-final'
+if (Test-Path $private) { throw "Refusing to reuse pytest basetemp: $private" }
+python -m pytest -q -p no:cacheprovider --basetemp $private tests\test_gpu_audit.py tests\test_frame_stats.py tests\test_window_clip.py tests\test_d3d11.py::test_gpu_matches_cpu_reference
+$private = Join-Path $work 'pytest-toolkit-metadata'
+if (Test-Path $private) { throw "Refusing to reuse pytest basetemp: $private" }
+python -m pytest -q -p no:cacheprovider --basetemp $private tests\test_build.py::test_generation_survives_runtime_only_toolkit_changes tests\test_build.py::test_generation_rejects_changed_recompiler_or_template tests\test_build.py::test_run_rejects_an_executable_built_against_another_toolkit
+cmake -S (Join-Path $root '.deps\xboxrecomp\tests\nv2a_gpu_audit') -B (Join-Path $work 'upstream-audit') -G 'Visual Studio 17 2022' -A x64
+cmake -S (Join-Path $root '.deps\xboxrecomp\tests\nv2a_ffp_backend') -B (Join-Path $work 'upstream-ffp') -G 'Visual Studio 17 2022' -A x64
+cmake -S (Join-Path $root '.deps\xboxrecomp\tests\nv2a_raster_batch') -B (Join-Path $work 'upstream-raster') -G 'Visual Studio 17 2022' -A x64
+foreach ($fixture in @('upstream-audit','upstream-ffp','upstream-raster')) {
+    $build = Join-Path $work $fixture
+    cmake --build $build --config Release --parallel 2 -- /verbosity:quiet
+    ctest --test-dir $build -C Release --output-on-failure
+}
+python tools\toolkit.py --verify
+```
+
+The first pytest command reported **65 passed in 3.47 seconds**; the
+toolkit-metadata command reported **3 passed in 0.24 seconds**. The CTest
+runs reported **2/2**, **1/1** and **1/1** passed respectively.
+`toolkit.py --verify` passed; an independent private-index reconstruction
+applied all seven selected upstream commits and 25 local patches to the base
+and produced the same tree.
+
+### Unmatched retail GPU audit and vertex probe
+
+On 2026-10-30, one isolated, audio-off retail diagnostic used generation
+`20261030-135733-86f4d023`, the same framework tree, four raster threads,
+the D3D11 hardware path, `RECOMP_PROGRAM_NEAR_ZERO=0`, GPU audit and
+`RECOMP_GPU_VSH_VERIFY=100`. The framebuffer window was verified minimized;
+the legacy timed menu script and its stationary-state detection are
+heuristics. The run lasted 96.6 seconds and ended by console control; guest
+threads were not cleanly joined. There were no scene screenshots or operator
+labels, so the reached content and the physical display are unverified. The
+diagnostic instrumentation and minimization make its frame rate unsuitable
+for a performance comparison.
+
+The last periodic audit was written before shutdown with one BEGIN active;
+its 10,464 flips and other counts are a partial snapshot. It recorded
+2,303,415 completed requests, including 174 line-list requests with 696
+vertices, and 174 unsupported-primitive drops with those same vertex totals.
+No point request was recorded in this snapshot; that is not evidence that
+points are unused in other scenes. The executor excludes primitive types
+below triangles, so the line requests are a concrete compatibility lead,
+not proof that any affected pixels were visible. The snapshot had no table
+or counter saturation, but 1,412,042 method values fell into the bounded
+`METHOD_VALUE_OTHER` bucket.
+
+For prioritization, the unhandled-path count for subchannel-0 cull enable
+(`0x0308`) was 52,118, including 19,044 writes of `1`; front and back cull
+face values were also written. The culling switch was off, and the mirrored
+state and submitted geometry do not prove a visible effect. The higher
+`0x0100` count includes NO_OPERATION/software-method traffic; nonzero values
+can also trigger a software trap, so its count must not be interpreted as
+an entirely ignored or visually defective feature. `0x1E74` was always
+zero and `0x1E78` was zero except for one retained value in this snapshot;
+their visual importance remains unknown. Match scenes before changing these
+paths or enabling culling.
+
+The last vertex-verification report showed 23,400 sampled GPU-program
+batches and 383,560 vertices checked, with zero reported differences or odd
+inputs; no per-vertex difference message appeared in the log. This compares
+only every hundredth eligible batch before the last report and does not
+establish clipping, culling, full-scene correctness or visible pixels.
+Matched CPU, D3D11 and xemu captures and classified real movement frames
+remain necessary; neither this audit nor flip counts close G4.
+
+## Presenter-source capture alignment
+
+Framework patch 0027 adds a default-off Windows presenter diagnostic. It
+copies each GDI or D3D11 CPU-upload input after the existing pixel conversion
+and PVIDEO composition, before window scaling. A ledger records the
+publication and candidate statistics flip IDs, submission route, API status,
+format, overlay and timing. A separate verifier checks the completed ledger,
+BMPs and the identity and rows of the same run's statistics file. Repeated or
+skipped presentations remain separate events rather than being inferred from
+filename order.
+
+On MSVC/Windows, 17 synthetic presenter tests passed, including repeated and
+skipped flips, RGB565 and AA conversion, overlays, corrupt or incomplete
+output, collision protection, concurrent publication, WARP and hardware
+shared-texture rejection, and capture-off project presentation fixtures. A
+hidden-window D3D11 CPU-upload fixture also compared its capture with the
+uploaded texture. The integrated D3D11, statistics, audit, clipping and
+presentation suites passed 174 cases, and four framework CTests passed.
+Hardware-mode tests do not themselves identify the adapter.
+
+Two short, isolated, audio-off retail probes then used Release generation
+`20261030-142754-81f8c6e6`, the D3D11 hardware renderer and guest-sized
+readback, with no controller inputs and separate save roots. The framebuffer
+window was verified minimized before the bounded close, which used `WM_CLOSE`
+and did not cleanly join guest threads. Each run produced a completion marker
+and passed the ledger/image/statistics verifier. The GDI route recorded 80
+submissions: one successful link, 79 no-client submissions and one image.
+The D3D11 CPU-upload route recorded eight submissions and images: one
+successful link and seven occluded results. The successful submission in
+each run was the first and may have occurred before minimization. Both links
+identified their own run's second recorded flip; neither capture recorded a
+PVIDEO overlay. The renderer logged a hardware D3D11 device but did not identify
+the adapter. The scenes were not classified or matched, and SDL capture was
+not tested. Private captures and logs remain local.
+
+The verifier links a successful submission to a recorded flip; it does not
+prove that a guest dump, statistics hash and composed input have the same
+pixels, or that the image reached unobscured physical scanout. Pinned inputs,
+missing or unknown statistics, failed/occluded API results and incomplete
+captures are not accepted as aligned evidence. Direct shared-GPU capture is
+explicitly rejected, and an independent guest writer can still race the
+snapshot. The diagnostic synchronously writes every submission, can consume
+several GiB per minute, and must not be used to measure performance. Real
+scene review, window visibility and integration with the benchmark labels
+remain open.
 
 ## GPU fence and presentation
 
@@ -105,6 +423,19 @@ audio-enabled runs; a timed selection can navigate to a different menu. A
 subsequent run isolated both partition and user-data roots and captured 160
 seconds of non-silent PCM through campaign cinematics, but its watchdog expired
 before the tutorial.
+
+On 2026-10-30, a separate short audio-on boot used Release generation
+`20261030-142754-81f8c6e6`, an isolated save root, no input and a verified
+minimized framebuffer window. The benchmark's shutdown helper sent CTRL_BREAK
+without forced termination, and its WAV validator accepted the runtime's
+close marker and exact 48 kHz stereo PCM length: 96,512 frames, about
+2.01 seconds. Guest threads were not cleanly joined. The entire WAV was zero,
+but the interval was not classified as active or intentional silence, so this
+is not an audio-quality verdict. XAudio2 initialized and the one periodic host
+snapshot reported no starvation or refusal; it preceded the end of the WAV,
+so host coverage is inconclusive. The analyzer ran without marked intervals.
+This tests the shared helpers, not an end-to-end manual benchmark, a tutorial
+capture or a listening pass. The WAV and logs remain local.
 
 ## Window-clip investigation
 
@@ -186,6 +517,53 @@ brighter image with it. This narrows the reproduction beyond comparisons of
 different camera positions, but does not establish whether the title's timing,
 the selected frame, or an unimplemented rendering feature is responsible.
 Both experiments remained disabled.
+
+### User-reported HUD and glow correlation
+
+On 2026-10-30, the user supplied live-window screenshots of nearly the
+same view: one is darker with no HUD, while the other is brighter with the
+HUD visible. They report that moving the mouse while the window is active
+can make the HUD and glow disappear together. The screenshots differ in
+window size and focus and are not frame-locked. The earlier explanation for
+arbitrary report-time dumps does not by itself explain these live-window
+images; neither the mouse input nor HUD is established as the cause.
+
+The existing near-plane investigation below offers one possible mechanism.
+A new synthetic hardware-D3D11 fixture draws a scene, an additive glow
+quad, and a HUD-like quad, followed by positive- and negative-depth
+controls. With the legacy programmable plane, a positive `c[59].z` clips the
+zero-depth glow and HUD quads, while a negative value lets both through.
+With `RECOMP_PROGRAM_NEAR_ZERO=1`, they remain visible at
+both offsets; positive-depth geometry remains visible and the negative-depth
+control is clipped. The fixture passes with GPU and CPU-transformed vertex
+programs on hardware D3D11. It does not replay the title's HUD, blur or
+input, and does not prove that the reported gameplay frames use those
+particular clip values or that either image matches original hardware.
+
+After the user confirmed that the UI still flickered and the visible-UI
+state bloomed at 1440p, framework patch 0029 added a separate HUD-safe mode.
+It selects screen zero for ordinary and alpha-blended programmable draws,
+but selects at least a small positive near plane for additive blends whose
+destination factor is `ONE`. The title has emitted both `ONE/ONE` and
+`SRC_ALPHA/ONE` blends. This clips zero-depth additive geometry without
+discarding positive-depth additive geometry. Legacy and full screen-zero
+modes remain available.
+
+The launcher now defaults to HUD-safe mode and migrates version-1 settings
+that retained the old inherited default. CPU and WARP D3D11 fixtures cover
+positive and negative `c[59].z` offsets, GPU and CPU vertex transformation,
+unblended and alpha-blended HUD-like geometry, zero-depth additive glow, and
+positive-depth additive geometry. In those fixtures the HUD remains present
+and the additive glow remains absent. This is a targeted title workaround,
+not proof of original-hardware behavior or a reviewed retail result. The
+separate packed depth/stencil alias remains opt-in and unavailable with
+scaled rendering.
+
+For GPU-executed vertex programs, the current frame trace can print
+`s_xf` vertices left by an earlier CPU-transformed batch. Its GPU triangle
+count is submitted triangles, not post-clip output, and its pixel count
+does not measure GPU fragments. Do not use those fields as proof of the
+vertices or clipping in a GPU-program batch.
 
 ## Programmable near-plane investigation
 
@@ -315,13 +693,16 @@ epilogue also matched the CPU interpreter after GPU readback. These few cases
 do not establish full shader parity, title compatibility, or rendering
 performance.
 
-The current backend interface does not pass all four texture stages and
-register-combiner state. The executor also writes semaphore releases directly
-to guest memory. An asynchronous hardware backend must explicitly complete and
-read back relevant GPU work before guest-visible memory, fence releases,
-software-method traps, or frame snapshots can rely on it. A compiled shader
-or a swap-chain present alone is not that guarantee. Scaling, widescreen HUD
-placement, and changed frame timing require additional title-specific work.
+At the time of this evaluation, the base backend interface did not pass all
+four texture stages and register-combiner state. The later extended interface
+does; see [RENDERING.md](./RENDERING.md#command-execution-and-backend-contract).
+The executor still writes semaphore releases directly to guest memory. An
+asynchronous hardware backend must explicitly complete and read back relevant
+GPU work before guest-visible memory, fence releases, software-method traps,
+or frame snapshots can rely on it. General GPU completion ordering remains
+open: a compiled shader or a swap-chain present alone is not that guarantee.
+Scaling, widescreen HUD placement, and changed frame timing require additional
+title-specific work.
 
 The guest-memory statistics patch accounts for the title's guest allocations
 rather than the host's available memory. Two observed x87 function entries,
@@ -656,6 +1037,29 @@ are rejected, while non-alias `0x41` textures keep their original path.
 Guest writes, partially overlapping aliases and CPU stencil emulation
 remain unsupported.
 
+The existing depth-seed movement trace used generation
+`20261029-175500-dfadbdd9` and framework tree `3472bac8e33c1758c801fb1ca65a346a170ad8e5`.
+Its 320x240 bright pass reads the 640x480 scene and the `0x41` alias; a
+160x120 additive pass and a full-size additive composite follow. The trace
+is from gameplay, not the opening-to-gameplay transition. Its five-stage
+bright-pass combiner uses the alias's alpha, corresponding to the stencil
+byte, to gate scene brightness.
+
+A synthetic 64x64 fixture replays that combiner state with uniform scene
+colors and GPU-cleared stencil, followed by a simple additive composite.
+It does not replay the title's blur or geometry. With gray `0xA0`, GPU
+stencil `0xC0`, and deliberately stale zero guest stencil, the alias-off
+D3D11 path produces `0xA0` in the bright pass and saturates to `0xFF` after
+the synthetic composite; the alias-on path produces zero bright-pass output
+and retains `0xA0`. Tests exercise values on both sides of the threshold,
+including one-byte differences, mixed RGB and partial scene alpha, on WARP
+and hardware with fixed and programmable vertices, both with and without the
+separate depth-texture option. The same fixture on the CPU path reads the
+unchanged zero guest stencil after its software clear.
+This establishes a mechanism by which stale stencil can amplify glow, not
+that the actual gameplay stencil is stale zero or that enabling the option
+matches Xbox hardware.
+
 Patch 0024 and the optional renderer path hand one completed 32-bit frame
 to the window device through a keyed-mutex shared texture. Snapshot IDs
 avoid showing a pending old GPU frame over a newer CPU frame; PVIDEO and
@@ -706,9 +1110,26 @@ The images show the same tutorial panel but are not proven frame-locked.
 Against the earlier CPU capture from a different framework tree, the first
 baseline differed in 22,666 pixels (7.38%) and the first candidate in
 147,760 (48.10%). The CPU renderer ignores stencil, so it is not an oracle
-for this glare path; neither that comparison nor the combined A/B isolates
-which new option caused the difference or establishes hardware fidelity.
-This material rendering difference remains unexplained and G4 is not met.
+for this glare path; neither that comparison nor the combined A/B isolated
+which new option caused the difference or established hardware fidelity.
+G4 is not met.
+
+One later hardware D3D11 diagnostic isolated the packed alias from shared
+presentation. It used the same generation and toolkit tree, 12 raster
+threads, GPU depth aliases, window clipping and async visibility; packed
+aliases were on and shared presentation was explicitly off. There was one
+isolated-save run, no automatic retry and no profiler. Its stationary tutorial
+capture differed from the three earlier alias-off captures in
+145,363–145,369 pixels (47.32%) beyond 8/255, but from the earlier
+alias-plus-presentation captures in only 20–473 pixels (0.01%–0.15%).
+The images show the same tutorial panel but are not proven frame-locked.
+Seven periodic reports recorded 1,373 packed alias samples and conversions,
+zero depth-alias rejections and zero shared presentations, excluding the
+final partial interval. This supports the packed alias as the main source
+of the earlier stationary brightness change rather than shared presentation.
+It does not establish which brightness matches original hardware, explain
+every gameplay view, or directly capture the opening fade. One diagnostic
+is not a performance comparison.
 
 One combined Release build and targeted pytest batch passed 132 tests,
 including WARP and hardware packed-alias, exact shared-pixel transfer,
@@ -786,28 +1207,322 @@ The user also observed strongly bloomed, bright vegetation and sky while
 looking toward the sun, with a darker view after turning. An earlier traced
 world frame includes downsampling and an additive glow composite, but the
 effect's fidelity and the cause of the brightness change remain unverified.
+The user later reported that the excessive bloom starts as the scripted
+opening ends and gameplay begins, while the vignette/letterbox bars fade.
+This is a user-reported timing observation, not evidence that the fade
+causes the bloom.
 In the seeded diagnostic, movement captures also show dark and much brighter
 views, but the camera and capture times differ. The new optional movement
 captures and adjustable frame-trace timing are diagnostic tools; compare
 matched views and a trusted reference before changing lighting or gamma.
 
-The P8 compute path and palette cache use a 256-entry palette, matching the
-current CPU decoder. Palette-length bits and shorter palette allocations are
-not modeled or validated; disabling compute decoding does not disable the
-D3D11 cache's 256-entry palette hash. The existing approximate texture cache
-can also miss same-frame raw texture rewrites and changes between sparse hash
-samples; P8 palette contents are checked separately on each use.
+### Static gamma-ramp investigation
+
+The retail generation `20261029-175500-dfadbdd9` contains a game-code routine
+that constructs three 256-byte tables, compares them with saved state, and
+conditionally calls a D3D-section routine that writes an index followed by
+256 RGB triplets to offsets `0x6813C8` and `0x6813C9` from a runtime base.
+Another D3D-section caller also reaches that writer. The offsets match the
+NV2A user DAC palette registers, but static code alone does not establish
+the runtime base, whether either call executes during the opening, or the
+ramp values or visual effect.
+
+The selected framework maps the title's NV2A register aperture as ordinary
+RAM, and its `PRMDIO` handler is a stub. Repeated writes to the candidate
+offsets through that aperture do not retain a DAC palette.
+The framework's separate D3D8 wrapper implements `SetGammaRamp`, but that
+does not establish that the statically linked title path reaches the wrapper
+or the framebuffer presenter. A presentation effect remains unproven.
+
+An opt-in `BRUTEFORCE_DAC_TRACE=1` title-specific entry hook now records the
+candidate writer's miniport address, runtime base, ramp address and 768
+planar RGB bytes with a host-monotonic timestamp. It is off when unset or
+set to `0`; invalid settings or inaccessible and guarded guest spans abort
+explicitly. Synthetic fixtures cover the exact byte order, disabled behavior,
+guest register and memory preservation, invalid and partial spans, and
+concurrent complete log records. The entry and its snapshots precede the
+generated writer; they do not prove completed DAC writes. They are not atomic
+with guest writes or protection changes, and logging changes timing.
+
+In the [unmatched retail diagnostic](#unmatched-retail-gpu-audit-and-vertex-probe),
+the probe logged exactly one entry, about 4 ms before the first recorded
+flip, and no later entry before shutdown. Its runtime base was `0xFD000000`,
+the framework's NV2A aperture; all three captured planes were exactly the
+identity sequence `0..255`. This establishes the observed entry and snapshot,
+not completed writes or displayed output. The unreviewed legacy-scripted
+interval does not identify the opening fade and the hook does not cover
+other possible writers. A nonidentity ramp, a visual effect, and any need for
+presentation-side gamma remain unverified; raw logs remain local.
+
+### Default D3D11 movement regression (2026-10-30)
+
+The user reported roughly 6 fps while moving with the default launcher
+settings. Earlier faster movement figures used different options and included
+substantial unclassified or known-black intervals, so they do not establish
+the size or cause of a directly comparable regression.
+
+The previous renderer reserved a texture-cache slot before uploading, but did
+not return it if the upload failed. Repeated unsupported `0x2E` depth-texture
+requests could therefore fill the 2,048-entry table with unkeyed entries and
+repeatedly copy source bytes. The renderer now retains bounded negative
+entries for deterministic, unsupported non-P8 CPU decodes when no GPU decode
+was attempted. It still reports the unsupported format; this does not add
+depth-texture support. Other upload failures remain retryable and release
+their slots. Depth and render-target aliases are checked before the negative
+cache, and successful textures still use the existing exact snapshot checks.
+
+One instrumented movement profile on Release generation
+`20261030-142754-81f8c6e6` attributed 31.2% of NV2A-thread samples to
+`NtQueryVirtualMemory` called by `readable_guest_range`, and 19.7% of
+main-thread samples to the same system call from `guest_word`. These are
+single-run samples, not a causal or frame-time breakdown. P8 source and
+palette validation was experimentally changed to reuse a `VirtualQuery`
+result within one bind. The later comparison's periodic reports counted
+378,708, 409,446 and 411,612 actual P8 range queries in its three completed
+candidate runs and **zero** reuses. The experiment was removed; the final
+renderer independently queries both ranges as before. Page queries cannot
+prevent guest writes or protection changes racing the subsequent reads.
+
+A preliminary cache-only A/B used that generation, 12 raster threads,
+D3D11, GPU vertex programs and texture decoding, synchronous visibility,
+VSync on, and the launcher-default experimental options off. The launcher
+inherited an unset near-plane option, represented here as `0`. One old/new
+run measured stationary rates of 15.294/16.100 flips per second and
+movement rates of 30.063/30.025 flips and 28.387/28.575 whole-frame pixel
+changes per second. These do not show a measured speedup; the baseline also
+received an extra brief diagnostic capture during movement. This preliminary
+run also suppressed the launcher's normal ten-second pushbuffer reports.
+Both runs had zero known-black matches, but all 1,203/1,202 movement frames
+were otherwise unclassified.
+
+The subsequent [alternating comparison](../analysis/bench/20261030-152042/summary.json)
+used three old and three candidate runs, restored the ten-second report
+interval, and captured both the stationary hold and two movement points.
+It used isolated saves, the legacy readiness heuristic, scripted input and
+automatic panel presses. Rates below are individual runs, not world FPS:
+
+| Variant | Stationary flips/s | Movement flips/s | Whole-frame changes/s | Whole-frame change 1% low/s |
+| --- | --- | --- | --- | --- |
+| Before | 8.378, 8.465, 15.066 | 16.840, 7.849, 33.250 | 14.413, 7.010, 31.700 | 6.437, 1.217, 13.192 |
+| Candidate | 14.512, 15.396, 15.033 | 33.086, 35.080, 34.435 | 31.561, 33.755, 33.434 | 12.162, 12.902, 14.272 |
+
+The candidate combined the failed-upload fix with the subsequently removed
+P8 query-reuse experiment and its counters. Its periodic reports counted one
+unsupported descriptor and 21,165, 23,777 and 22,679 cached hits across the
+respective runs. The first attempt for the second candidate run hit the
+420-second watchdog in the world phase and succeeded on retry. Automatic
+panel presses differed between runs: 4/2/3 before and 3/3/3 for the candidate.
+The first stationary and movement captures show similar tutorial views, but
+the complete movement intervals were not independently matched. Paired
+stationary captures differed by more than 8/255 in 4,076 (1.33%), 1,202
+(0.39%) and 316 (0.10%) pixels; those differences remain unexplained, and
+there was no matched CPU-reference comparison. No movement hashes matched
+the two known-black signatures, but all 2,324/4,106 before/candidate movement
+frames remain unclassified. Captures and frame-statistics instrumentation
+can affect timing, and guest-frame captures do not establish scanout.
+
+The table suggests a possible improvement but cannot attribute it to either
+change or establish distinct visible-world FPS. The final executable was
+rebuilt **after** removing the ineffective P8 experiment and was not
+rebenchmarked; the user's reported 6 fps and the actual cause remain open.
+
+A separate one-run exact/approximate-cache diagnostic measured
+19.723/8.042 stationary flips and 30.230/16.890 movement whole-frame
+changes per second, respectively. It is not a controlled estimate of
+snapshot cost; the approximate cache can miss same-frame and sparse rewrites
+and remains an experimental opt-in. The 6 fps report and its root cause are
+not resolved by these measurements.
+
+Synthetic WARP and hardware fixtures check unsupported-cache hits with
+protected source memory, alias precedence, retryable failed uploads and
+unchanged cache occupancy. Additional fixtures protect P8 source or palette
+memory after an earlier successful bind and require a diagnostic on the next
+bind, for both stages, decoders and cache modes. The full D3D11 suite and
+related fence, pushbuffer, presentation, audit and frame-statistics tests
+passed 246 cases on the experimental candidate. After removing the P8
+experiment, the rebuilt final renderer passed 53 focused unsupported-cache,
+failed-upload, P8-reprotection and CPU-reference parity cases. These tests do
+not establish matched gameplay or hardware NV2A equivalence.
+
+### Synthetic D3D11 compatibility hardening
+
+On 2026-10-30, a synthetic texture rewrite remained red when rewritten green
+within one frame; another rewrite after 30 stable frames missed the old sparse
+samples and remained green instead of blue. The renderer now compares saved
+source and palette bytes on every ordinary texture-cache use. Retained
+snapshots have a 128 MiB budget and evicted snapshots force an upload; the
+budget excludes transient copies, decoded buffers and GPU resources. The old
+approximation is available only through `RECOMP_GPU_TEX_CACHE_APPROX=1`, emits
+a warning, and still misses those two synthetic rewrites. The new default's
+CPU and memory costs have not been isolated by a controlled comparison; no
+performance gain is claimed.
+
+The framework's `NV097_SET_TEXTURE_PALETTE` definitions and the
+[nxdk register reference](https://github.com/XboxDev/nxdk/blob/f8c52e4be65bab7d6e10455db8d86d69d232bbe3/lib/pbkit/nv_regs.h)
+specify bits 2–3 as 256, 128, 64 or 32 entries, but the executor strips
+those bits when populating `Nv2aTexture.palette`. These register definitions
+do not establish behavior for out-of-range indices. The D3D11 renderer now
+reads the raw stage register,
+checks page readability and remaining size of known allocations, snapshots
+only the programmed palette length, and validates all sampled level-0 P8
+indices before upload. Its compute and software-texture decoders consume that
+snapshot; the compute raw view has the programmed size. In synthetic scenes,
+palettes ending at a no-access page work at all four lengths, in stages 0 and
+1; invalid indices and a tracked short allocation stop with diagnostics.
+Synthetic cube faces with mip/padding bytes outside the sampled level also
+match the CPU decoder, and index, length and palette rewrites are checked.
+The framework's CPU reference renderer is unchanged.
+
+These are synthetic checks, not a title or NV2A hardware-equivalence result.
+Out-of-range P8 hardware behavior is unknown, so the renderer reports it
+rather than guessing. Page-rounded contiguous allocations and untracked
+suballocations can hide object boundaries; `VirtualQuery` does not prove
+ownership or prevent concurrent changes. Exact render-target aliases bypass
+the ordinary cache. Guest writes racing snapshot/compare operations, the
+framework CPU decoder's non-P8 guest reads, P8 aliases, and ABA races still
+need explicit synchronization or tracking. The approximate mode can also
+reuse an old, previously validated P8 texture after a guest rewrite.
+
+Separate synthetic GPU vertex fixtures cover SHORT3/4, UBYTE3/4 and packed
+11:11:10 normals in both raw and gathered streams, with all sampled GPU
+vertices compared to the CPU interpreter. Relative-constant fixtures include
+fractional address-register values and indices outside the interpreter's
+constant range. CPU, CPU-transformed D3D11 and GPU-program D3D11 fixtures
+compare culling disabled and enabled, front/back/both faces, the enable low
+bit and triangle-strip winding. The focused selection passed 24 cases on
+WARP and the default hardware D3D11 device; its adapter identity was not
+recorded. The complete D3D11 suite passed 132 cases with both device modes
+enabled. These are interpreter/renderer comparisons, not evidence of NV2A
+hardware behavior or matched gameplay.
+
+The culling fixture reproduced a diagnostic bug: after a batch culled on
+both faces, vertex verification could compare the previous same-sized GPU
+batch and report false differences. The D3D11 backend now invalidates the
+saved verification batch on each draw attempt and logs a skipped readback for
+a fully culled batch, which has no GPU vertex output. The fixture checks that
+the skips occur and that subsequent visible draws still match. Culling remains
+off by default.
+
+[Microsoft documents](https://learn.microsoft.com/en-us/windows/win32/api/d3d11/nf-d3d11-id3d11device-getdeviceremovedreason)
+removed, reset, hung, driver-internal and invalid-call device reasons.
+Renderer work, creation failures, readback, flip, keyed-mutex operations and
+visibility polling now check device health and fail-stop with the operation,
+result and removal reason. Mocked COM cases cover removed/reset/hung/driver
+results, device-reported loss and a pending query; their synthetic completion
+marker is not advanced after injected loss. This is not a real adapter
+removal or TDR. Device/resource recreation, the separate framework presenter
+device and loss races with guest-visible semaphore completion remain open.
+[Microsoft's recovery guidance](https://learn.microsoft.com/en-us/windows/uwp/gaming/handling-device-lost-scenarios)
+requires recreating the device-dependent resources; this renderer does not.
+
+The tests below used the coordinated framework tree
+`fe8216622a8195fd7a2531a7fc4f1f723f402aa3`, the synthetic XBE and generated
+test textures, not retail game code. WARP and the default hardware D3D11
+device were enabled; the fixture did not record the selected adapter identity.
+The focused compatibility selection passed 44 tests. After adding three
+guarded-range regressions, the full D3D11 run passed 100, and the separate
+fence, pushbuffer, presentation and GPU-audit suites passed 50. An earlier
+full run had 96 passes and one concurrent shader-cache publication failure
+(Windows error 5); a subsequent publication fix and its bounded tests are
+described in the [shader-cache section](#launcher-and-pixel-shader-cache).
+No gameplay or performance campaign was run.
+
+Reproduction from the project root (scratch paths remain under `build`):
+
+```powershell
+$root=(Get-Location).Path
+$env:TEMP="$root\build\compat-hardening-scratch"; $env:TMP=$env:TEMP; $env:TMPDIR=$env:TEMP
+New-Item -ItemType Directory -Force $env:TEMP | Out-Null
+cmake --build .\build\compat-hardening --config Release --target bruteforce_d3d11_test --parallel 4
+cmake --build .\build\compat-hardening --config Release --target bruteforce_fence_test bruteforce_pushbuffer_test bruteforce_present_test bruteforce_gpu_shared_present_test bruteforce_gpu_audit_test --parallel 4 -- /verbosity:quiet
+$env:BRUTEFORCE_TEST_D3D11="$root\build\compat-hardening\Release\bruteforce_d3d11_test.exe"
+$env:BRUTEFORCE_TEST_D3D11_HARDWARE='1'
+$env:BRUTEFORCE_TEST_FENCE="$root\build\compat-hardening\Release\bruteforce_fence_test.exe"
+$env:BRUTEFORCE_TEST_PUSHBUFFER="$root\build\compat-hardening\Release\bruteforce_pushbuffer_test.exe"
+$env:BRUTEFORCE_TEST_PRESENT="$root\build\compat-hardening\Release\bruteforce_present_test.exe"
+$env:BRUTEFORCE_TEST_GPU_SHARED_PRESENT="$root\build\compat-hardening\Release\bruteforce_gpu_shared_present_test.exe"
+$env:BRUTEFORCE_TEST_GPU_AUDIT="$root\build\compat-hardening\Release\bruteforce_gpu_audit_test.exe"
+python -m pytest tests\test_d3d11.py -q --tb=short --basetemp=build\compat-hardening-pytest10
+python -m pytest tests\test_fence.py tests\test_pushbuffer.py tests\test_present.py tests\test_gpu_audit.py -q --tb=short --basetemp=build\compat-hardening-pytest11
+```
+
+Framework follow-up: preserve palette length in the generic texture state and
+bound CPU P8 reads before considering an upstream fix. Existing P8 work
+[#145](https://github.com/sp00nznet/xboxrecomp/pull/145) is merged, and
+tracking index [#184](https://github.com/sp00nznet/xboxrecomp/pull/184) is
+open, as checked on 2026-10-30; coordinate rather than creating a competing
+contribution. The [UPSTREAM worklist](./UPSTREAM.md#local-patches-to-evaluate)
+records the follow-up; no pull request was filed.
 
 Known differences, by design: stencil is honoured on the GPU path and
 ignored on the CPU path; depth is D24 rather than a float buffer; textures
 are sampled at level 0 only on both paths.
 
+### Blood Wake-derived internal-resolution milestone
+
+The renderer now adopts the generic physical-resolution architecture from
+the pinned Blood Wake commit rather than continuing as isolated scale fixes.
+`src/gpu/render_scale.c` is the single scale authority and contains the
+adapted bilinear seed, box downsample and Catmull-Rom upscale passes. Tracked
+colour surfaces retain logical and physical dimensions, depth follows the
+physical target, and native output changes advance a scale epoch. Guest
+geometry and texture coordinates remain logical; viewports are physical,
+while scissors, partial clears and inclusive window clips are mapped
+explicitly.
+
+The existing Brute Force presentation protocol was extended instead of
+replacing it with Blood Wake's direct swap-chain ownership. Framework patch
+0028 allows a keyed-mutex source whose dimensions differ from the guest
+framebuffer and reports the window's current 4:3 picture. This retains
+Brute Force's flip IDs, one-slot bound, pinned-framebuffer and PVIDEO
+fallbacks, presenter-source capture refusal and mandatory guest readback.
+The final shared pass copies matching dimensions, box-averages a larger
+render or Catmull-Rom reconstructs a smaller render. Guest readback always
+comes from a guest-sized GPU resolve.
+
+Physical resizing initially exposed a backend-authority regression in the
+synthetic AA clear sequence: recreating the colour resource from guest memory
+discarded a full clear that existed only on the GPU. Scale-driven recreation
+now migrates the previous GPU surface before releasing it. Scale-two fixtures
+also established that raw D3D11 occlusion counts grow with physical area;
+sync and async reports now normalize each query by its physical/logical area
+ratio and retain the guest counts.
+
+The launcher offers Native, 2160p, 1440p, 1080p, 720p and 480p, with 480p
+still the default. Scaled modes enable shared presentation automatically.
+The existing experimental depth and packed-stencil aliases are rejected when
+scaling is active because their guest-layout seed, snapshot and sampling
+semantics are not defined at physical resolution. Scale 1 keeps the prior
+resource and readback paths.
+
+The Release fixtures and main executable built successfully. The complete
+D3D11 matrix passed 188 tests with hardware coverage enabled; the WARP-only
+selection passes 121 and skips 67 hardware cases. It includes
+scale-two render-to-texture, guest-sized readback, partial clears, window
+clips, resource migration, synchronous/asynchronous visibility, native-mode
+fallback and explicit output, incompatible-option rejection, and the HUD-safe
+near-plane split. The
+presentation fixture and shared-presenter WARP case passed; its hardware case
+also passed, and all 17 launcher tests passed. The final project-wide
+selection passed 629 tests with eight unrelated cases skipped. The verified
+framework tree is
+`9bec55267a19bf1fa54320274cb073d785a8d411`.
+
+These synthetic results do not establish retail image equivalence,
+performance, VRAM headroom, mip/LOD behavior, hardware scaled rendering or
+output on a native 4K display. No matched gameplay campaign was run. In
+particular, this milestone does not explain or fix the user's reported
+roughly 6 fps with the default 480p launcher settings.
+
 ## Current validation boundary
 
-Generation `20261029-175500-dfadbdd9` built in Release against verified
-framework tree `a4489cd69600a1489edea98ac19cf20db242b6d2`. Patch 0024
-applies independently to tree `8d57b4ceb02054f4921a88a7233e6722625c14ff`
-and reconstructs the current tree. Patch 0023
+The documented retail generation `20261029-175500-dfadbdd9` built in Release
+against verified framework tree `a4489cd69600a1489edea98ac19cf20db242b6d2`.
+Patch 0024 applies independently to tree
+`8d57b4ceb02054f4921a88a7233e6722625c14ff` and reconstructs that earlier
+tree. The coordinated current tree adds patches 0025 and 0026; neither was
+retested on that retail generation in this work.
+Patch 0023
 applies independently to tree `f2e260a5a6845c2edc0b634e82265210e47fe759`
 and reconstructs the preceding tree. Patch 0022 independently reconstructs
 that preceding tree from `3472bac8e33c1758c801fb1ca65a346a170ad8e5`.

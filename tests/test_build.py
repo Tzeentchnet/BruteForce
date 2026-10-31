@@ -364,11 +364,11 @@ def test_seed_validation_rejects_invalid_or_duplicate_entries(tmp_path, monkeypa
     not (ROOT / ".deps" / "xboxrecomp" / "tools" / "recomp").is_dir(),
     reason="run tools/toolkit.py to install the recompiler",
 )
-def test_fence_entry_hook_is_discovered_by_the_recompiler(monkeypatch):
+def test_title_entry_hooks_are_discovered_by_the_recompiler(monkeypatch):
     monkeypatch.syspath_prepend(str(ROOT / ".deps" / "xboxrecomp"))
     from tools.recomp.manual_scan import entry_hooks
 
-    assert entry_hooks(str(ROOT / "src" / "recomp_manual.c")) == {0x00371AB0}
+    assert entry_hooks(str(ROOT / "src" / "recomp_manual.c")) == {0x00371AB0, 0x0037834E}
 
 
 @pytest.mark.skipif(

@@ -508,17 +508,67 @@ output than Simple: correlation is approximately 0.878 versus 0.156 at
 elevated discontinuities at 32- or 256-sample boundaries. The emulated EEPROM
 advertises stereo (`XC_AUDIO=0`).
 
-The observation is therefore healthy host delivery with an audible Accurate
-mix defect; the specific GP/EP, voice-resampling, HRTF or routing cause remains
-a hypothesis. Simple is now the default and recommended mode. Accurate remains
-available as an explicitly labelled experimental option. Launcher settings
-versions 1-3 migrate the old `xemu` default to `fold`; a version-4 user choice
-of Accurate is retained. The final Release executable was relinked after this
-change. A five-second bounded retail boot with `RECOMP_APU_DSP` absent logged
-`RECOMP_APU_DSP=unset` and selected stereo fold-down. Six repeated Accurate
-DSP init/shutdown cycles passed, the focused audio-analysis and launcher
-selection passed 105 tests, and the integrated hardware-enabled selection
-passed 639 tests.
+For Accurate, the observation is therefore healthy host delivery with an
+audible mix defect; the specific GP/EP fault remains unidentified. The user
+then reported that the recommended Simple build still sounded mono/centred
+for dialogue and effects. That is a second failed human quality observation,
+not evidence that the Accurate and Simple paths share one root cause.
+
+The first follow-up traces did not reach gameplay. At 95 and 145 seconds they
+showed only 2D-list voices in slots 69-99 with equal bin 0/1 gains, and all
+six remaining routes set to `0xFFF`. A later framebuffer capture identified
+the displayed scene as the main menu and Campaign Type screen. Those voices
+were menu audio, so the initial conclusion that Brute Force did not exercise
+3D/HRTF was invalid. Advertising Dolby Surround through a temporary EEPROM
+diagnostic did not change that menu routing; the product still advertises
+stereo (`XC_AUDIO=0`).
+
+A corrected script selected Campaign, Quick Campaign, and skipped the campaign
+movies with A presses at 20, 23, 28, 32, 37, 42, 47, 52, 57, and 62 seconds
+and `down` at 36 seconds, measured from the first USB report. Generation
+`20261030-142754-81f8c6e6` then rendered the world by approximately 87 seconds.
+Actual world audio populated the 3D voice list in slots 25-31 and used HRTF
+routes in bins 6-10.
+
+That route exposed a generic VP defect. A mono source is duplicated for HRTF,
+which produces distinct left/right samples, but the bin mixer selected the
+filtered result with the original one-channel source width. Every route
+therefore read HRTF channel zero. A synthetic filter emitting `+1` left and
+`-1` right reproduced `+1/+1` before the fix and `+1/-1` afterward. Patch
+0035 tracks the post-filter output width and selects two channels after HRTF.
+
+Three matched 108-second Simple runs used the corrected Quick Campaign route
+and fired while rotating. In the 92-97 second firing interval, fixed,
+baseline, and fixed captures had left/right correlation
+`0.415/0.542/0.422`; their side-to-mid RMS ratios were
+`0.641/0.544/0.636`. The two clean fixed legs and the baseline reported zero
+XAudio2 underruns, APU starvation events, refused submissions, clipped
+samples, and bounded 32/256-frame hole candidates. One additional fixed
+repeat reproduced the channel metrics but incurred nine host underruns during
+a transient machine-load event; it was discarded and replaced rather than
+mixed into the clean transport evidence. The analyzer still labels periodic
+host coverage conservatively because the last one-second snapshot precedes
+watchdog close.
+
+The corrected A/B/A objectively confirms that patch 0035 restores differing
+HRTF channels in the title's real gameplay route. It does not prove that the
+result sounds correct, that all dialogue should be positional, or that the
+user's full report is resolved. The user subsequently reported that the fixed
+Simple path sounds improved but is not fully correct; no more specific
+residual symptom was recorded before audio work was deferred. Simple remains
+the default and recommended mode, but its listening gate is only partially
+met. Accurate remains available as an explicitly labelled experimental
+option. Launcher settings versions 1-3 migrate the old `xemu` default to
+`fold`; a version-4 user choice of Accurate is retained. A five-second
+bounded retail boot with
+`RECOMP_APU_DSP` absent selected stereo fold-down. Six repeated Accurate DSP
+init/shutdown cycles passed, the focused audio-analysis and launcher selection
+passed 105 tests, and the integrated hardware-enabled selection passed 639
+tests before patch 0035. Final patch validation rebuilt the Release
+executable, passed the standalone `apu_vp` regression, reproduced framework
+tree `25a2a713738b7aabb1c21ef6720765ff93ccffea`, passed 144 focused
+audio/build/launcher tests, and passed 274 integrated tests with 365
+hardware/platform cases skipped.
 
 Default-on audio changed the old timed route: `down` selected `DEMOS` on the
 title screen. The current diagnostic uses A presses at 20, 23, and 28 seconds

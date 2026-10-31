@@ -427,6 +427,9 @@ artifacts that the fixtures do not cover, and G5 is recorded.
 - The default Simple path preserves the stereo all-mixbin fold-down. Accurate
   remains an experimental option that runs the title's GP and EP programs
   through the vendored xemu v0.8.139 DSP56300 C interpreter.
+- Framework patch 0035 preserves the two channels produced when HRTF filters
+  a mono source. Its synthetic negative control produced `+1/+1`; the fixed
+  path produces `+1/-1`.
 - Physical-translation intent distinguishes aliased heap and contiguous-window
   pages. The dedicated DSP worker is signaled and joined before interpreters,
   shadows, queues, and caches are released.
@@ -457,6 +460,22 @@ artifacts that the fixtures do not cover, and G5 is recorded.
   Simple, without corresponding host underruns or 32/256-sample boundary
   discontinuities. This fails the Accurate listening gate and motivates the
   default change; it does not identify the faulty DSP/voice operation.
+- The user then reported that the prior Simple build still sounded
+  mono/centred for dialogue and effects. Initial long traces were still on
+  the main menu, not in gameplay. The corrected Quick Campaign route reaches
+  the rendered world and uses 3D-list voices 25-31 with HRTF bins 6-10.
+- Clean fixed/baseline/fixed gameplay captures measured firing-window
+  correlation `0.415/0.542/0.422` and side-to-mid RMS ratios
+  `0.641/0.544/0.636`. All three selected runs had zero starvation,
+  underruns, refused submissions, clipping, and bounded 32/256-frame holes.
+  This validates the channel-routing change but cannot replace listening.
+- The user's gameplay listening pass found the fixed Simple path improved but
+  not fully correct. The remaining symptom was not characterized before the
+  user deferred further audio work.
+- The final Release executable rebuilt with patch 0035. The standalone
+  `apu_vp` fixture and toolkit-tree verification passed; focused
+  audio/build/launcher tests passed 144 cases, and the integrated selection
+  passed 274 with 365 hardware/platform cases skipped.
 - The final Release executable was relinked after the default change. A
   five-second retail boot with `RECOMP_APU_DSP` unset selected stereo
   fold-down; the six-cycle DSP lifecycle fixture and the 639-test integrated
@@ -469,23 +488,25 @@ artifacts that the fixtures do not cover, and G5 is recorded.
 
 **Remaining validation**
 
-1. Confirm the Simple default through title/menu, campaign cinematics,
-   loading, tutorial dialogue, music, movement, weapon/effect sounds, and
-   ambience.
-2. If Accurate is pursued further, isolate whether the narrow/crackly output
-   begins in voice resampling/HRTF, GP mixbins, EP processing or FIFO routing;
-   compare matched captures rather than host counters alone.
+1. **Deferred:** resume with a focused listening report for the fixed Simple
+   build (dialogue, gunfire, panning strength/direction, crackling, missing
+   cues, balance, and ambience) and isolate the remaining symptom.
+2. If Accurate is pursued further, isolate its independent narrow/crackly
+   output in GP mixbins, EP processing, or FIFO routing; compare matched
+   captures rather than host counters alone.
 3. Record distortion, missing or duplicated cues, dialogue/music balance,
    stereo reversal, spatial/reverb behavior, and cutscene synchronization.
 4. Repeat host-continuity probes only if the listening route reaches a
    materially different audio-heavy scene or exposes a symptom.
-5. Prepare framework patches 0030-0034 for upstream review only after deciding
-   whether their generic pieces should be split further.
+5. Prepare framework patches 0030-0035 for upstream review only after deciding
+   whether their generic pieces should be split further. Do not file without
+   approval.
 
-*Done when:* a human listener signs off the Simple scene list above, the
-Accurate defect is either fixed or remains explicitly experimental, and at
-least one additional audio-heavy gameplay scene stays free of host underruns
-if it differs materially from the validated tutorial route.
+*Done when:* after audio work resumes, a human listener signs off the fixed
+Simple scene list above, the Accurate defect is either fixed or remains
+explicitly experimental, and at least one additional audio-heavy gameplay
+scene stays free of host underruns if it differs materially from the validated
+Quick Campaign route.
 
 Automated captures establish valid transport and bounded signal properties;
 they cannot establish that dialogue, effects, music, or reverb sound correct.

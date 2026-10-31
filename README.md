@@ -248,12 +248,15 @@ python tools\build.py run --experimental-tutorial
 
 The default `Simple` mode uses the stereo all-mixbin fold-down and outputs
 48 kHz stereo PCM. It is the recommended path after the accurate mode failed
-the listening gate for dialogue and gunfire. The host uses eight 512-sample
-XAudio2 buffers by default for an 85.3 ms maximum queue. It refills at the
-3,072-sample (64.0 ms) low-water mark without increasing that maximum;
-`RECOMP_AUDIO_BUF_COUNT` remains an expert override. The launcher can select
-`Accurate (experimental Xbox DSP)`, which runs the title's GP and EP programs
-on xemu v0.8.139's DSP56300 interpreter.
+the listening gate for dialogue and gunfire. It also includes a framework fix
+that preserves the distinct left/right channels produced when HRTF filters a
+mono 3D voice; the previous path copied the left HRTF result into every
+route. The host uses eight 512-sample XAudio2 buffers by default for an
+85.3 ms maximum queue. It refills at the 3,072-sample (64.0 ms) low-water
+mark without increasing that maximum; `RECOMP_AUDIO_BUF_COUNT` remains an
+expert override. The launcher can select `Accurate (experimental Xbox DSP)`,
+which runs the title's GP and EP programs on xemu v0.8.139's DSP56300
+interpreter.
 
 The last long Accurate validation, recorded while Accurate was the default,
 ran 164.47 seconds from startup through the observed 421-draw tutorial world
@@ -263,6 +266,16 @@ tutorial, and gameplay interval was non-silent, with no clipped samples or
 recurring 32/256/near-2,048-frame hole candidates. After the default changed,
 a bounded boot of the final linked executable with `RECOMP_APU_DSP` unset
 selected the stereo fold-down.
+
+A corrected Quick Campaign diagnostic reached the rendered world and
+confirmed that Brute Force uses 3D/HRTF voices for gameplay effects. In a
+matched fixed/baseline/fixed firing interval, left/right correlation measured
+0.415/0.542/0.422 and side-to-mid RMS measured 0.641/0.544/0.636. The three
+selected captures reported no starvation, underruns, refused submissions,
+clipping, or recurring 32/256-frame holes. These measurements verify channel
+routing only. A subsequent gameplay listening pass found the fixed Simple
+path improved but not fully correct; further audio work is deferred, and the
+remaining symptom has not yet been isolated.
 
 Controls:
 

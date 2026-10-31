@@ -41,7 +41,7 @@ PR.
 These are existing upstream pull requests, not new proposals. Their pinned
 commits are applied on top of xboxrecomp base
 `f0f8a461496a4f23d9b0aeaa284b8d70ba7ab82b`; the resulting selected-commit and
-local-patch tree is verified as `fe8216622a8195fd7a2531a7fc4f1f723f402aa3`.
+local-patch tree is verified as `25a2a713738b7aabb1c21ef6720765ff93ccffea`.
 The exact commit list and application order are in
 [toolkit.py](../tools/toolkit.py).
 
@@ -970,6 +970,52 @@ own GPU back end, an extended interface for it, and its own pacing fixes.
     interactions. Preserve the CPU reference path.
     *Status:* framework gap with a tested project-side workaround; not
     prepared or filed.
+
+37. **Preserve both HRTF output channels for a mono source.**
+    *Problem:* the VP records a voice's source width before filtering. HRTF
+    accepts a duplicated mono input and produces distinct left and right
+    samples, but the following bin mixer still selected with
+    `bin_index % source_channels`. For a one-channel source that always chose
+    HRTF output zero and copied its left result into every route.
+    *Evidence:* a synthetic mono multipass voice with HRTF coefficients that
+    emit `+1` left and `-1` right routed `+1/+1` before the fix. Corrected
+    Brute Force retail generation `20261030-142754-81f8c6e6` reached a
+    rendered Quick Campaign world and used 3D-list voices 25-31 with HRTF
+    routes in bins 6-10. In a clean scripted firing interval, matched
+    fixed/baseline/fixed captures had left/right correlation
+    `0.415/0.542/0.422` and side-to-mid RMS ratios
+    `0.641/0.544/0.636`. The two fixed legs and baseline reported no
+    starvation, refused submissions, underruns, clipping, or bounded 32/256
+    frame holes. These are signal measurements, not a listening verdict.
+    *Change:* [0035-preserve-mono-hrtf-stereo.patch](../patches/xboxrecomp/0035-preserve-mono-hrtf-stereo.patch)
+    tracks the post-filter output width and uses two channels after HRTF
+    succeeds. It is a generic bug fix with no title addresses or opt-in
+    switch.
+    *Tests:* the standalone `apu_vp` fixture now requires the synthetic
+    `+1/-1` result; the unpatched negative control fails as `+1/+1`.
+    The fixture passed after a final Release rebuild, and
+    `python tools/toolkit.py --verify` reproduced tree
+    `25a2a713738b7aabb1c21ef6720765ff93ccffea`. The corrected retail A/B/A
+    above exercises the real 3D/HRTF route. Focused audio/build/launcher tests
+    passed 144 cases; the integrated selection passed 274 with 365
+    hardware/platform cases skipped. The user's gameplay listening pass found
+    the fixed Simple path improved but not fully correct; the residual issue
+    was not isolated before audio work was deferred. These results do not
+    replace cross-title testing.
+    *Overlap:* checked 2026-10-30. Merged
+    [#67](https://github.com/sp00nznet/xboxrecomp/pull/67) supplies the
+    all-mixbin fallback, and merged
+    [#217](https://github.com/sp00nznet/xboxrecomp/pull/217) enables HRTF and
+    other voice fixes; neither updates the channel count after HRTF.
+    The same source-channel selection remains in current xemu and xemu
+    v0.8.139. Tracking index
+    [#184](https://github.com/sp00nznet/xboxrecomp/pull/184) has no equivalent
+    fix. No issue, pull request, or comment has been filed.
+    *Before filing:* rebase the isolated patch on current upstream, run its
+    APU suite on supported hosts, test additional HRTF titles and stereo
+    sources, and coordinate with xemu so the shared defect is not fixed in
+    incompatible ways.
+    *Status:* local framework patch; not prepared or filed.
 
 ### Open upstream work to evaluate for selection
 

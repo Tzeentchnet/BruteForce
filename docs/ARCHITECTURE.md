@@ -70,6 +70,15 @@ fold-down. The experimental `RECOMP_APU_DSP=xemu` mode instead copies each
 frame through GP and EP windows backed by xemu v0.8.139 DSP56300
 interpreters; EP FIFO 0 feeds the stereo monitor.
 
+The VP has eight routes per voice. Simple sums even-numbered mixbins to left
+and odd-numbered mixbins to right; this preserves paired bins but is not an
+emulation of the Xbox EP program. In corrected retail gameplay traces,
+Brute Force uses hardware 3D-list voices 25-31 and HRTF submix bins 6-10;
+menu effects instead use equal-gain 2D routes in bins 0/1. HRTF turns a
+duplicated mono source into two output channels. Patch 0035 records that
+post-filter width so the bin router selects both HRTF channels rather than
+copying the left filter result into every route.
+
 The accurate stage uses a dedicated worker and bounded ring. Persistent
 window shadows preserve DSP memory that is outside each changed span. APU
 physical lookups carry a RAM-versus-contiguous-window intent tag so aliased

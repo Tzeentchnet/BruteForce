@@ -63,8 +63,22 @@ Do not infer perceptual correctness from these counters. The private
 mono-sounding dialogue and gunfire in Accurate mode while music sounds
 acceptable. Matched intervals are substantially more left/right correlated
 under Accurate than Simple. The host transport gate passed; the Accurate
-quality gate failed, so Simple is the recommended default while the DSP cause
-remains open.
+quality gate failed. The user subsequently reported centred dialogue/effects
+in the then-current Simple build as well.
+
+The first Simple traces were mistakenly classified as gameplay; framebuffer
+evidence showed that they were still on the main menu. A corrected Quick
+Campaign route reached the world and exercised 3D/HRTF voices. Patch 0035
+fixes a generic mono-source channel-selection defect there. A clean scripted
+fixed/baseline/fixed comparison measured firing-window correlation
+`0.415/0.542/0.422` and side-to-mid RMS ratios
+`0.641/0.544/0.636`, with zero underruns, starvation, refusals, clipping, or
+32/256-frame holes in all three selected captures. This closes the objective
+channel-routing check, not the listening gate. Simple remains the recommended
+default. A subsequent gameplay listening pass rated the fixed Simple path
+improved but not fully correct; the residual symptom was not characterized
+before audio work was deferred. The Accurate DSP defect remains separate and
+open.
 
 The first disc-inserted xemu reference attempt verified the retail XBE and
 private read-only media setup, but foreground focus and controller response
@@ -230,8 +244,8 @@ Done before writing renderer code. All evidence stays local.
    labels and presented-image validation remain unverified. The
    console-control and WAV-finalization helpers passed a firmware-exit retail
    capture, and a bounded default-on campaign reached scripted gameplay. The
-   complete matched manual audio A/B/A workflow and subjective listening pass
-   remain open.
+   matched scripted Simple audio A/B/A is complete; the subjective listening
+   pass and manual scene review remain open.
 2. **Sampling profiler with symbols.** Port the approach of Blood Wake's
    `bw_profile.c`: suspend and sample threads about every millisecond, then
    resolve addresses with DbgHelp against `BRUTEFORCE_LINK_SYMBOLS=ON`

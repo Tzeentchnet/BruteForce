@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Windows launcher for the experimental Brute Force graphics paths."""
+"""Windows launcher for Brute Force."""
 
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
@@ -68,8 +68,8 @@ SETTINGS = (
     ),
     Setting(
         "renderer", "Graphics", "Renderer",
-        "Direct3D 11 uses hardware by default but is experimental. CPU remains available for comparison.",
-        (("cpu", "CPU reference"), ("d3d11", "Direct3D 11 (experimental)")), "d3d11",
+        "Direct3D 11 is the default hardware renderer. CPU remains available as the reference path.",
+        (("cpu", "CPU reference"), ("d3d11", "Direct3D 11 (default)")), "d3d11",
     ),
     Setting(
         "resolution", "Graphics", "Internal resolution",
@@ -250,7 +250,7 @@ class Launcher:
         self.boxes = {}
         settings = validate_settings(values)
 
-        root.title("Brute Force - Experimental Launcher")
+        root.title("Brute Force Launcher")
         root.geometry("820x650")
         root.minsize(700, 540)
         root.protocol("WM_DELETE_WINDOW", self.close)
@@ -260,7 +260,7 @@ class Launcher:
         ttk.Label(header, text="Brute Force", font=("Segoe UI", 18, "bold")).pack(anchor="w")
         ttk.Label(
             header,
-            text="Experimental tutorial path. Rendering, input and gameplay are not yet verified.",
+            text="Current bring-up path. Some rendering, input, audio, and gameplay behavior remains unverified.",
             wraplength=760,
         ).pack(anchor="w")
 

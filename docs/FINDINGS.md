@@ -31,11 +31,14 @@ in [UPSTREAM.md](./UPSTREAM.md).
   [toolkit.py](../tools/toolkit.py).
 
 The recompiler's pinned summary calls untranslated sites "no-op comments",
-but the generated sites actually call `RECOMP_UNIMPL`. This project's
-[handler](../src/recomp_manual.c) aborts except for the narrowly guarded XPP
-pair described below. Unresolved indirect calls also abort; generated
-unresolved direct-call stubs retain the framework's logged-and-continue
-behavior, so a stub hit is a correctness problem, not a successful emulation.
+but the generated sites actually call `RECOMP_UNIMPL`. Upstream
+[#299](https://github.com/sp00nznet/xboxrecomp/pull/299) corrects that
+reporting and adds focused tests without changing generated runtime behavior.
+This project's [handler](../src/recomp_manual.c) aborts except for the narrowly
+guarded XPP pair described below. Unresolved indirect calls also abort;
+generated unresolved direct-call stubs retain the framework's
+logged-and-continue behavior, so a stub hit is a correctness problem, not a
+successful emulation.
 
 ## Private xemu reference attempt (2026-10-30)
 
@@ -86,9 +89,12 @@ and the shutdown action, but the initiating event was not established.
 This disc-inserted run continued past that time and ended with
 `host-qmp-quit`; it does not explain the earlier shutdown.
 
-The local [session result](../analysis/xemu-reference-game-20261030-133140-7d1b5af7/reference-results.json),
-[QMP media verification](../analysis/xemu-reference-game-20261030-133140-7d1b5af7/run/qmp-media-verification.json)
-and [offline classification](../analysis/xemu-reference-game-20261030-133140-7d1b5af7/run/offline-classification.json)
+The local session result
+(`analysis/xemu-reference-game-20261030-133140-7d1b5af7/reference-results.json`),
+QMP media verification
+(`analysis/xemu-reference-game-20261030-133140-7d1b5af7/run/qmp-media-verification.json`)
+and offline classification
+(`analysis/xemu-reference-game-20261030-133140-7d1b5af7/run/offline-classification.json`)
 are ignored private artifacts; the disc, captures, EEPROM and HDD remain
 local. No frame-rate or rendering-equivalence measurement was made.
 
@@ -103,10 +109,10 @@ linear filtering and VSync on but did not reach a cacheable combiner shader
 before the watchdog. These are startup and window-control checks, not
 evidence of gameplay or a cache failure.
 
-Following the user's preference, new launcher settings now default to the
-experimental D3D11 renderer; existing saved renderer choices are retained.
-The command-line default remains the CPU reference. The packed alias and
-other experimental options remain off by default.
+Following the user's preference, new launcher settings and graphical
+`build.py` runs now default to D3D11; existing saved renderer choices are
+retained. The CPU renderer remains available as the reference path. The
+packed alias and other experimental options remain off by default.
 
 The opt-in cache was also measured with the same Release-build synthetic
 D3D11 scene on a hardware device, four raster threads, and three alternating
@@ -119,10 +125,11 @@ writes; process times include startup and other work. The adapter model was
 not recorded. These synthetic numbers do not establish gameplay stutter or
 world-frame performance.
 
-A subsequent [scripted stationary-tutorial comparison](../analysis/bench/shader-cache-20261030-013241/summary.json)
-used the same generation, four raster threads, D3D11 GPU vertex programs,
-VSync off, `RECOMP_PROGRAM_NEAR_ZERO=1`, isolated saves, and three alternating
-runs each with an empty cache or a cache seeded from the first cold run.
+A subsequent scripted stationary-tutorial comparison (local summary:
+`analysis/bench/shader-cache-20261030-013241/summary.json`) used the same
+generation, four raster threads, D3D11 GPU vertex programs, VSync off,
+`RECOMP_PROGRAM_NEAR_ZERO=1`, isolated saves, and three alternating runs each
+with an empty cache or a cache seeded from the first cold run.
 There were no retries. Each cold run compiled 31 combiner shaders, with
 compile-and-create sums of 387.674–457.867 ms (median 454.624 ms), excluding
 cache writes. Each warm run loaded 31, with lookup-and-create sums of
@@ -354,6 +361,28 @@ several GiB per minute, and must not be used to measure performance. Real
 scene review, window visibility and integration with the benchmark labels
 remain open.
 
+A separate host-buffer race was submitted upstream as
+[#300](https://github.com/sp00nznet/xboxrecomp/pull/300), commit `e17123c`
+against v0.16.0 base `f0f8a461496a4f23d9b0aeaa284b8d70ba7ab82b`.
+The Windows presenter has two converted-frame buffers. Without ownership
+synchronization, a window-thread copy from buffer 0 can overlap two flips:
+the first publishes buffer 1 and the second reuses buffer 0. The submitted
+change holds one SRW lock across conversion/publication and across the
+snapshot copy. Its Windows Release CTest passed 1/1 and covers both formats,
+presentation gates, 2x AA sampling, deterministic reader/writer exclusion
+and concurrent whole-frame consistency.
+
+The full-frame lock cost was checked synthetically on an AMD Ryzen 7 9800X3D
+with MSVC 19.44, x64 Release optimization and one thread. No game generation
+or runtime options were involved. Each operation performed 480 row copies to
+publish a 640x480x32 frame and one whole-frame snapshot copy. Three
+alternating baseline/locked pairs of 300 operations each ran in
+A/B/A/B/A/B order. Baseline times were 0.035446, 0.035630 and 0.037276 ms per
+operation; locked times were 0.035480, 0.035403 and 0.036693 ms. The ranges
+overlap, so the result establishes no measurable uncontended regression, not
+a speedup. It does not measure lock contention, gameplay, flips per second or
+distinct world frames.
+
 ## GPU fence and presentation
 
 **Observed:** `sub_00371CE0` waited for GPU progress during early bring-up.
@@ -393,8 +422,8 @@ masking, event registration, and failure cases.
 
 Unless a section says otherwise, the opt-in graphics path below uses the
 framework's CPU pushbuffer rasterizer and Direct3D 11 presentation; the
-experimental GPU path (`RECOMP_GPU=d3d11`) is described in the performance
-section. Isolated runs of the verified build reached the
+D3D11 GPU path (`RECOMP_GPU=d3d11`) is described in the performance section.
+Isolated runs of the verified build reached the
 campaign tutorial and rendered a 3D environment. A scripted A press followed
 by left-stick input visibly moved the character; injected Z and W window-key
 events exercised the same keyboard-to-pad path. In another run, a later
@@ -1032,8 +1061,9 @@ rendered 63.3 flips per second with 20.8 distinct frames per second (1% low
 
 ### GPU offload milestone (2026-10-29)
 
-The [combined campaign](../analysis/bench/gpu-offload-20261029-fixed/summary.json)
-used generation `20261029-175500-dfadbdd9`, framework tree
+The combined campaign (local summary:
+`analysis/bench/gpu-offload-20261029-fixed/summary.json`) used generation
+`20261029-175500-dfadbdd9`, framework tree
 `ec3fa862999fa1f2bd58d5eaffbaee04d7baf68d`, 12 raster threads, scripted
 movement with a stationary hold, flip captures, profiles, and three
 alternating runs per variant. Both use `RECOMP_GPU=d3d11` with GPU vertex
@@ -1215,8 +1245,9 @@ angles are not frame-locked, so these captures do not identify the cause or
 prove that either new option fixes or causes the effect. The character is
 visible in the inspected gameplay captures, but not every frame was checked.
 
-The [six-run comparison](../analysis/bench/20261030-005113/summary.json)
-used generation `20261029-175500-dfadbdd9`, tree
+The six-run comparison (local summary:
+`analysis/bench/20261030-005113/summary.json`) used generation
+`20261029-175500-dfadbdd9`, tree
 `a4489cd69600a1489edea98ac19cf20db242b6d2`, 12 raster threads, isolated
 saves, scripted movement, captures and a gated profiler. Each variant ran
 three times in alternating order without retries. Both used D3D11, GPU depth
@@ -1434,9 +1465,10 @@ run also suppressed the launcher's normal ten-second pushbuffer reports.
 Both runs had zero known-black matches, but all 1,203/1,202 movement frames
 were otherwise unclassified.
 
-The subsequent [alternating comparison](../analysis/bench/20261030-152042/summary.json)
-used three old and three candidate runs, restored the ten-second report
-interval, and captured both the stationary hold and two movement points.
+The subsequent alternating comparison (local summary:
+`analysis/bench/20261030-152042/summary.json`) used three old and three
+candidate runs, restored the ten-second report interval, and captured both
+the stationary hold and two movement points.
 It used isolated saves, the legacy readiness heuristic, scripted input and
 automatic panel presses. Rates below are individual runs, not world FPS:
 
@@ -1863,7 +1895,8 @@ and asynchronous visibility cases. After the retry-reporting change, the
 focused benchmark suite passed 14 tests. An earlier run passed 14 upstream
 wrapper and dispatch tests. Generation still reports 12 unresolved call
 targets and 34 untranslated instruction sites. One candidate boot stalled and
-required a retry. For current commands, see [README.md](../README.md#tests).
+required a retry. For current commands, see
+[DEVELOPMENT.md](./DEVELOPMENT.md#tests).
 
 Open work includes broader gameplay and input, physical controllers, audio,
 graphics compatibility, unresolved calls and instructions, and safe device

@@ -25,6 +25,13 @@ work. Modified LGPL components also carry their applicable source,
 notice, and relinking obligations. This notice is an engineering summary,
 not legal advice.
 
+The GP/EP integration in `src/audio/recomp_apu_xdsp.c` adapts
+bloodwake-recomp's standalone integration, which in turn derives from xemu
+v0.8.139 `hw/xbox/mcpx/apu/dsp/gp_ep.c`. The authoritative xemu source is
+LGPL-2.0-or-later, not GPL; the local file retains that license and the
+original xemu copyright attribution. Blood Wake's MIT-licensed adaptation is
+credited here, and its license is reproduced below.
+
 The build and audio integration were informed by
 [bloodwake-recomp](https://github.com/minimalice92/bloodwake-recomp), whose
 project-owned files are MIT-licensed. Its game-specific hooks and assets are
@@ -36,9 +43,6 @@ Generic code adapted from bloodwake-recomp at commit
 `e631edddfe56d22344e9f696923aeb6d78a9e7ba`, under its MIT license below:
 
 - `src/profile.c`, from `src/bw_profile.c` (sampling profiler).
-- `src/audio/recomp_apu_xdsp.c`, from the generic GP/EP integration in
-  `src/bw_apu_xdsp.c`, adapted for Brute Force's physical-memory resolver,
-  stereo output, lifecycle, diagnostics, and `RECOMP_*` controls.
 - `src/xemu_dsp/bw_dsp.c` and `.h`, from Blood Wake's standalone wrapper
   around xemu's GPL DSP interpreter. These wrapper files are distributed
   with the GPL-linked DSP target; xemu's own source headers remain

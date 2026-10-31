@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: GPL-2.0-or-later
 # xemu's MCPX DSP interpreter (v0.8.139, hw/xbox/mcpx/apu/dsp,
 # GPL-2.0-or-later), adapted from bloodwake-recomp's standalone build.
 add_library(recomp_xemu_dsp STATIC

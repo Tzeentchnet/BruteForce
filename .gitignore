@@ -7,13 +7,40 @@
 /generated/
 /xbox_kernel.log
 
+# Local credentials and signing material.
+.env
+.env.*
+!.env.example
+*.key
+*.pem
+*.p12
+*.pfx
+
 # Downloaded dependencies and build products.
 /.deps/
 /.venv/
 /build/
 /.pytest_cache/
+/.vs/
 __pycache__/
 *.py[cod]
+*.dll
+*.exe
+*.ilk
+*.lib
+*.obj
+*.pdb
+*.suo
+*.user
+CMakeUserPresets.json
+
+# Local captures, profiles, and crash/audio diagnostics.
+/captures/
+/profiles/
+/screenshots/
+*.dmp
+*.mdmp
+*.wav
 
 # The workspace also contains an unrelated disc-image source note.
 /Vimm's Lair.txt

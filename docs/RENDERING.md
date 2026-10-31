@@ -375,7 +375,7 @@ point/linear display filter applies to the CPU route and scale-1 fallback;
 the scaled GPU final pass owns its reconstruction. None of these controls
 adds widescreen or unlocks the title's frame rate. Presentation VSync and
 the optional guest flip-pacing mechanism are distinct. See
-[README.md](../README.md#graphics-launcher) for current controls and
+[USER_GUIDE.md](./USER_GUIDE.md#launcher) for current controls and
 [PERFPLAN.md](./PERFPLAN.md) for unimplemented on-demand readback and pacing
 work.
 
@@ -388,7 +388,7 @@ setting-to-environment mapping.
 
 | Setting | Fresh launcher default | Notes |
 | --- | --- | --- |
-| Renderer | D3D11 hardware | Experimental; direct command-line runs default to CPU when `RECOMP_GPU` is unset. `RECOMP_GPU=null` is a probe, not a renderer. `RECOMP_D3D11_WARP=1` selects the D3D11 software device. |
+| Renderer | D3D11 hardware | The launcher and graphical `build.py` runs select D3D11 unless `RECOMP_GPU` explicitly selects `cpu` or `null`. CPU remains the correctness reference; `null` is a probe, not a renderer. `RECOMP_D3D11_WARP=1` selects the D3D11 software device. |
 | Internal resolution | 480p guest (`RECOMP_GPU_SCALE=1`) | Native, 2160p, 1440p, 1080p and 720p are available for D3D11. The CPU renderer remains at guest resolution. |
 | Vertex programs / texture decoding | GPU / GPU where supported | CPU fallbacks remain; `RECOMP_GPU_VSH=0` and `RECOMP_GPU_TEX_DECODE=0` are comparison switches. |
 | Visibility | Synchronous | `RECOMP_GPU_ZPASS=async` is opt-in. |
@@ -401,7 +401,7 @@ The launcher starts the tutorial configuration. To compare the renderers
 from the command line after building, set `RECOMP_GPU` to `cpu` or `d3d11`
 and run `python tools\build.py run --experimental-tutorial`; keep all other
 settings and the scene controlled. Full setup and options are in the
-[README](../README.md#experimental-gpu-renderer-and-benchmark).
+[user guide](./USER_GUIDE.md#d3d11-renderer-and-benchmark-diagnostics).
 
 ## Diagnostics and validation
 
@@ -430,7 +430,7 @@ settings and the scene controlled. Full setup and options are in the
   parts of the guest synchronization contract.
 
 For example, after building and setting the native fixture paths as described
-in [README tests](../README.md#tests):
+in [development tests](./DEVELOPMENT.md#tests):
 
 ```powershell
 python -m pytest -q tests\test_d3d11.py tests\test_present.py tests\test_frame_stats.py

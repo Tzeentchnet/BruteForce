@@ -16,12 +16,19 @@ current tree. It still reports 12 unresolved call targets and 34 untranslated
 instruction sites; the new build and presenter-source patch 0027 have not
 been validated in reviewed retail gameplay.
 
-Framework patches 0001 and 0035 were filed upstream as
-[sp00nznet/xboxrecomp#297](https://github.com/sp00nznet/xboxrecomp/pull/297)
+Framework patches 0001, 0035 and 0005 were filed upstream as
+[sp00nznet/xboxrecomp#297](https://github.com/sp00nznet/xboxrecomp/pull/297),
+[sp00nznet/xboxrecomp#298](https://github.com/sp00nznet/xboxrecomp/pull/298),
 and
-[sp00nznet/xboxrecomp#298](https://github.com/sp00nznet/xboxrecomp/pull/298).
-Patches 0007, 0013, 0019 and 0032 remain the strongest next PRs to prepare.
-Do not file another PR, amend these PRs or comment upstream without approval.
+[sp00nznet/xboxrecomp#300](https://github.com/sp00nznet/xboxrecomp/pull/300).
+[sp00nznet/xboxrecomp#299](https://github.com/sp00nznet/xboxrecomp/pull/299)
+is the standalone reporting correction. The raw
+`XC_VIDEO` layout and policy are filed as
+[sp00nznet/xboxrecomp#301](https://github.com/sp00nznet/xboxrecomp/issues/301).
+The firmware-exit half of patch 0032, patch 0013, and the current-main half
+of patch 0019 are the strongest next PRs to prepare. Patch 0007 is held until
+its accounting covers or deliberately excludes every exported allocator. Do
+not file another PR, amend these PRs or comment upstream without approval.
 
 ## Current boundary
 
@@ -66,8 +73,8 @@ Do not file another PR, amend these PRs or comment upstream without approval.
   in 285 pixels (0.09%). An older D3D11/CPU-vertex capture differs from the
   CPU by 21.64%, with much darker background regions. The causes are not
   established, and the comparisons span different framework trees. G4 is
-  not met. The CPU remains the reference and command-line default; the
-  launcher now defaults to experimental D3D11.
+  not met. The CPU remains the reference; the launcher and graphical
+  `build.py` runs now default to D3D11.
 - Common swizzled, linear, and P8 textures now decode on the GPU; compressed
   textures with stale pitch state can upload as BC blocks. The compute
   decoder matches the CPU decoder on synthetic WARP and hardware cases.

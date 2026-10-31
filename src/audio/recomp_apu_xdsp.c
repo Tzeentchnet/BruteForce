@@ -1,9 +1,17 @@
 /*
+ * SPDX-License-Identifier: LGPL-2.0-or-later
+ *
+ * Copyright (c) 2012 espes
+ * Copyright (c) 2018-2019 Jannik Vogel
+ * Copyright (c) 2019-2025 Matt Borgerson
+ *
  * GP and EP DSP integration adapted from bloodwake-recomp D-012 at
- * e631edddfe56d22344e9f696923aeb6d78a9e7ba (MIT project glue).
+ * e631edddfe56d22344e9f696923aeb6d78a9e7ba (MIT changes on xemu's
+ * LGPL-2.0-or-later source; see THIRD_PARTY_NOTICES.md).
  * RECOMP_APU_DSP=fold selects xboxrecomp's stereo fold-down instead.
  *
- * Ported from xemu v0.8.139 hw/xbox/mcpx/apu/dsp/gp_ep.c (GPL-2.0-or-later),
+ * Ported from xemu v0.8.139 hw/xbox/mcpx/apu/dsp/gp_ep.c
+ * (LGPL-2.0-or-later),
  * with the toolkit's differences:
  *   - The GP/EP memory windows (guest 0xFE830000 / 0xFE850000) are plain RAM
  *     here, not MMIO, so DirectSound's writes land in guest memory. Each frame

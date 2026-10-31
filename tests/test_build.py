@@ -457,7 +457,7 @@ def test_run_isolates_each_runtime_working_directory(tmp_path, monkeypatch):
     monkeypatch.setenv("RECOMP_VBLANK", "0")
     for name in (
         "RECOMP_USB", "RECOMP_PB_WALK", "RECOMP_PGRAPH_IRQ", "RECOMP_KEYBOARD",
-        "RECOMP_AC97_READY", "RECOMP_AUDIO",
+        "RECOMP_AC97_READY", "RECOMP_AUDIO", "RECOMP_GPU",
     ):
         monkeypatch.delenv(name, raising=False)
 
@@ -484,6 +484,8 @@ def test_run_isolates_each_runtime_working_directory(tmp_path, monkeypatch):
     monkeypatch.setenv("RECOMP_SAVE_DIR", "previous user-data root")
     assert build.run_game() == 0
     assert build.run_game(experimental_tutorial=True, isolated_saves=save_root) == 0
+    monkeypatch.setenv("RECOMP_GPU", "cpu")
+    assert build.run_game(graphics=True) == 0
     assert len({cwd for _, cwd, _ in calls}) == len(calls)
     assert all(cwd.parent == build.ANALYSIS_DIR / "runs" / run_id / "boots" for _, cwd, _ in calls)
     assert all(command == [str(executable), str(build.GAME_DIR)] for command, _, _ in calls)
@@ -495,6 +497,9 @@ def test_run_isolates_each_runtime_working_directory(tmp_path, monkeypatch):
     graphics_flags = ("RECOMP_PB_EXEC", "RECOMP_FB_WINDOW", "RECOMP_D3D_PRESENT")
     assert all(calls[1][2][name] == "1" for name in graphics_flags)
     assert all(calls[2][2][name] == "1" for name in graphics_flags)
+    assert "RECOMP_GPU" not in calls[0][2]
+    assert calls[1][2]["RECOMP_GPU"] == "d3d11"
+    assert calls[2][2]["RECOMP_GPU"] == "d3d11"
     assert all(
         name not in calls[0][2] and name not in calls[1][2]
         for name in ("RECOMP_USB", "RECOMP_PB_WALK", "RECOMP_PGRAPH_IRQ", "RECOMP_KEYBOARD")
@@ -514,11 +519,13 @@ def test_run_isolates_each_runtime_working_directory(tmp_path, monkeypatch):
     assert calls[7][2]["RECOMP_SAVE_DIR"] == "previous user-data root"
     assert calls[8][2]["BRUTEFORCE_SAVE_ROOT"] == str(save_root.resolve())
     assert "RECOMP_SAVE_DIR" not in calls[8][2]
+    assert calls[9][2]["RECOMP_GPU"] == "cpu"
     assert build.os.environ["RECOMP_D3D_PRESENT"] == "0"
     assert "RECOMP_USB" not in build.os.environ
     assert build.os.environ["RECOMP_AC97_READY"] == "existing"
     assert build.os.environ["BRUTEFORCE_SAVE_ROOT"] == "previous partition root"
     assert build.os.environ["RECOMP_SAVE_DIR"] == "previous user-data root"
+    assert build.os.environ["RECOMP_GPU"] == "cpu"
 
 
 def test_audio_compatibility_flag_conflicts_with_explicit_off():

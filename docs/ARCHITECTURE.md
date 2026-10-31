@@ -54,12 +54,13 @@ systems have not yet been established.
 At a high level, the current host validates and maps `default.xbe`, initializes
 the framework's kernel and guest paths, and enters the statically recompiled
 guest. The guest opens disc bundles and cached resources; with graphics
-enabled, the command-line path defaults to the CPU rasterizer; the launcher
-defaults to the experimental D3D11 GPU backend. The window can use D3D11 presentation, including
-an experimental shared-GPU path that retains guest readback. USB support is
-optional. This describes the present recompilation environment, not the
-original Xbox's complete engine design. See [FINDINGS.md](./FINDINGS.md)
-for observed guest entry points and limitations.
+enabled, the launcher and `build.py` default to the D3D11 GPU backend. The
+CPU rasterizer remains available as the reference path. The window can use
+D3D11 presentation, including an experimental shared-GPU path that retains
+guest readback. USB support is optional. This describes the present
+recompilation environment, not the original Xbox's complete engine design.
+See [FINDINGS.md](./FINDINGS.md) for observed guest entry points and
+limitations.
 
 Audio is enabled by default unless `--no-audio` or `RECOMP_AUDIO=0` is
 selected. The host initializes xboxrecomp's MCPX APU, installs a full-shutdown
@@ -133,7 +134,8 @@ under `Z:\common\...` on `\Device\Harddisk0\Partition5`, and later opens
 disc-bundle-to-cache workflow for that run, not proof that every resource
 follows it or that a file open means successful decoding. `Z:` is a guest
 path, not a path an importer should hardcode on the host. Save and cache
-isolation is described in [README.md](../README.md#isolated-controller-diagnostic).
+isolation is described in
+[USER_GUIDE.md](./USER_GUIDE.md#isolated-controller-diagnostic).
 
 ## Resource families inside the game bundles
 
@@ -172,7 +174,8 @@ vertices or indices.
 ## Reproduce the archive inventory
 
 After extracting an owned disc with the project's
-[build workflow](../README.md#requirements), run this from the project root.
+[build workflow](./USER_GUIDE.md#requirements-and-build-workflow), run this
+from the project root.
 It reads archive metadata without extracting or writing members:
 
 ```powershell

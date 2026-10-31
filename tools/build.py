@@ -577,6 +577,7 @@ def prepare_game_run(config="Release", graphics=False, experimental_tutorial=Fal
             "RECOMP_FB_WINDOW": "1",
             "RECOMP_D3D_PRESENT": "1",
         })
+        env.setdefault("RECOMP_GPU", "d3d11")
     boot_id = time.strftime("%Y%m%d-%H%M%S") + "-" + uuid.uuid4().hex[:8]
     boot_dir = run_dir / "boots" / boot_id
     boot_dir.mkdir(parents=True, exist_ok=False)
@@ -615,11 +616,11 @@ def main(argv=None):
     run.add_argument("--config", choices=("Release", "Debug", "RelWithDebInfo"), default="Release")
     run.add_argument(
         "--graphics", action="store_true",
-        help="enable experimental pushbuffer execution and Direct3D 11 presentation",
+        help="enable graphics with the default Direct3D 11 renderer and presentation",
     )
     run.add_argument(
         "--experimental-tutorial", action="store_true",
-        help="enable the experimental graphics, USB, and keyboard tutorial path",
+        help="enable graphics, USB, and keyboard for the current tutorial path",
     )
     run.add_argument(
         "--experimental-audio", action="store_true",

@@ -27,9 +27,11 @@ their own licenses; see THIRD_PARTY_NOTICES.md and LICENSES/.
 
 The MCPX DSP56300 interpreter under src/xemu_dsp is GPL-2.0-or-later, except
 for dsp_dma.c, dsp_dma.h, and dsp_dma_regs.h, whose headers specify
-LGPL-2.0-or-later. The xboxrecomp APU contains LGPL-2.1-or-later code. Because
-the GPL DSP is linked into the game executable, an executable built with it
-is distributed, if at all, under GPL-2.0-or-later as a whole.
+LGPL-2.0-or-later. The xemu-derived GP/EP integration in
+src/audio/recomp_apu_xdsp.c is also LGPL-2.0-or-later. The xboxrecomp APU
+contains LGPL-2.1-or-later code. Because the GPL DSP is linked into the game
+executable, an executable built with it is distributed, if at all, under
+GPL-2.0-or-later as a whole.
 
 The original game, its translated code, data, art, sound, music, and text
 belong to their rights holders. They are not included in this license and

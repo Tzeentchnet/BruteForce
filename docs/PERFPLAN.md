@@ -216,9 +216,8 @@ Make the GPU authoritative for rendering and decouple the game thread from it:
    the console's CPU and GPU overlap.
 
 The CPU rasterizer stays as the reference path (`RECOMP_GPU=cpu`) for A/B
-correctness comparisons and remains the command-line default. Per user
-preference, the launcher defaults to the experimental D3D11 path even though
-G4 remains unmet.
+correctness comparisons. The launcher and graphical `build.py` runs default
+to D3D11 even though G4 remains unmet.
 
 ## Phase 0: measurement and ceiling probes
 

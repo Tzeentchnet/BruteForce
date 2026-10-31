@@ -17,6 +17,9 @@ status. Update them in the same change as the work, not afterward:
   CPU/GPU reference behavior, presentation, scaling, and widescreen design.
 - `docs/PERFPLAN.md`: the performance plan, its gates, and phase status. Mark
   a phase's progress there, and record its measurements in FINDINGS.
+- `docs/USER_GUIDE.md`: detailed user-facing build, launcher, runtime,
+  diagnostic, and benchmark instructions.
+- `docs/DEVELOPMENT.md`: synthetic test and developer validation commands.
 
 Distinguish observations from hypotheses and unverified behavior; identify the
 game revision, evidence, and test coverage when relevant. Update `README.md`
@@ -62,7 +65,7 @@ the same problems.
 ## Validation
 
 - Use the smallest relevant checks described in
-  [README.md](README.md#tests).
+  [docs/DEVELOPMENT.md](docs/DEVELOPMENT.md#tests).
 - After changing a framework patch or selected upstream commit, run its
   focused synthetic fixture and `python tools/toolkit.py --verify`; update
   the expected toolkit tree in the same change.

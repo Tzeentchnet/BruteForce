@@ -55,6 +55,7 @@ def test_batch_starts_launcher_from_another_directory(tmp_path):
 def test_settings_round_trip_and_missing_defaults(tmp_path):
     path = tmp_path / "BruteForce" / "settings.json"
     assert launcher.load_settings(path) == launcher.DEFAULTS
+    assert launcher.DEFAULTS["renderer"] == "d3d11"
     values = {**launcher.DEFAULTS, "renderer": "d3d11", "shader_cache": "1", "vsync": "0"}
     launcher.save_settings(path, values)
     assert launcher.load_settings(path) == values
@@ -230,7 +231,7 @@ def test_window_controls_and_game_lifecycle(tmp_path, monkeypatch):
     )
     app = launcher.Launcher(root, tmp_path / "settings.json", launcher.DEFAULTS)
     try:
-        assert app.variables["renderer"].get() == "Direct3D 11 (experimental)"
+        assert app.variables["renderer"].get() == "Direct3D 11 (default)"
         assert app.variables["resolution"].get() == "480p (guest)"
         assert str(app.boxes["shader_cache"]["state"]) == "readonly"
         assert str(app.boxes["resolution"]["state"]) == "readonly"
@@ -241,7 +242,7 @@ def test_window_controls_and_game_lifecycle(tmp_path, monkeypatch):
         assert str(app.boxes["resolution"]["state"]) == "disabled"
         assert str(app.boxes["stencil_alias"]["state"]) == "disabled"
         app.defaults()
-        assert app.variables["renderer"].get() == "Direct3D 11 (experimental)"
+        assert app.variables["renderer"].get() == "Direct3D 11 (default)"
         assert app.variables["resolution"].get() == "480p (guest)"
         app.variables["shader_cache"].set("On")
         app.variables["program_near_zero"].set("Screen-zero (HUD and glow)")

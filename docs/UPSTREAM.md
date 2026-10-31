@@ -36,6 +36,82 @@ example, Blood Wake's carried toolkit patches), name the source. Check
 whether its authors are already upstreaming it before preparing a separate
 PR.
 
+## Current comparison snapshot
+
+As of 2026-10-31, upstream `main` is still release v0.16.0 at
+`f0f8a461496a4f23d9b0aeaa284b8d70ba7ab82b`, exactly the base pinned by this
+project. The comparison covered metadata for all 286 upstream pull requests
+through #298 (58 open), the current heads and changed files of those open
+pull requests, and all 35 local framework patches. It was a targeted semantic
+review of overlapping work, not a line-by-line review of every unrelated PR.
+Of the PRs newer than the previous review, only draft #286 materially
+overlaps local framework work; #287-#296 do not duplicate a local patch or
+planned framework gap. #297 and #298 are the two submissions recorded below.
+
+`git apply --check` against a clean current `main` found that 15 local patches
+apply independently: 0001-0008, 0012, 0023, 0030 and 0032-0035. The other 20
+are based on earlier local patches; their standalone failures are stack
+dependencies, not evidence of upstream conflicts. Any contribution from that
+set must first be extracted from the local series and rebased independently.
+
+### Submission queue
+
+The first two rows have now been *filed*. The remaining rows are the strongest
+non-overlapping patches to turn into focused PRs next; they still need
+extraction or test migration and are not submit-ready yet.
+
+| Priority | Local change | Current evidence | Next action |
+| --- | --- | --- | --- |
+| 1 | [0035: preserve mono HRTF stereo](../patches/xboxrecomp/0035-preserve-mono-hrtf-stereo.patch) | Applies independently to current `main`; its upstream `apu_vp` CTest passes on MSVC, while the same new test fails against unmodified `main` as `+1/+1` instead of `+1/-1`. No matching change was found in current open PR metadata or code, and #184 still has the defect. | Filed as [#298](https://github.com/sp00nznet/xboxrecomp/pull/298); open and mergeable, with no automated checks reported at filing time. Coordinate the same correction with xemu separately. |
+| 2 | [0001: bound extra-thunk ordinals](../patches/xboxrecomp/0001-bound-extra-thunks.patch) | Applies independently to current `main`; its upstream `kernel_bridge` CTest passes on MSVC, while the same test-only change fails three invalid-word cases on unmodified `main`. No matching PR was found. | Filed as [#297](https://github.com/sp00nznet/xboxrecomp/pull/297); open and mergeable, with no automated checks reported at filing time. The PR explicitly does not claim to solve in-range ordinal-shaped data at the lookbehind boundary. |
+| 3 | [0007: account guest memory](../patches/xboxrecomp/0007-account-guest-memory.patch) | Applies independently; merged #158 supplies the allocation substrate but current `MmQueryStatistics` still derives Xbox availability from host RAM. The project fixture covers retail/devkit, shared heap pages, contiguous reuse, extended commit/decommit and saturation. | Move the fixture into upstream CTest and reconcile the accounting with the physical-alias work in #261, #269 and draft #286. |
+| 4 | [0013: software texture-sampling fast paths](../patches/xboxrecomp/0013-optimize-texture-sampling.patch) | No matching arithmetic change exists in #231 or #253. The project fixture checks edge and random coordinates plus one million DXT cache-index cases. | Extract it from the local stack, include the fixture and report an isolated benchmark. |
+| 5 | [0019: cache hot-path environment reads](../patches/xboxrecomp/0019-cache-hot-getenv.patch) | No matching PR found; current `main` still calls `getenv` per draw, and `strchr` from `getenv` measured 4.5% of the NV2A thread in the recorded D3D11 profile. | Extract it from the local stack, document startup-only configuration semantics and re-profile the isolated patch. |
+| 6 | [0032: run cleanup hooks before firmware exits](../patches/xboxrecomp/0032-run-hooks-before-firmware-exit.patch) | Applies independently; merged #161/#215 provide exit-hook foundations but not multiple hooks or firmware-exit execution. Project tests cover registration, replacement, deduplication, reasons and ordering scope. | Port the fixture, document startup-only additional registration and define whether repeated or bugcheck exits run the hooks. |
+
+### Complete local-patch disposition
+
+| Patch or range | Current-main isolation | Upstream overlap and disposition |
+| --- | --- | --- |
+| 0001 | Clean | Filed as #297 with failing-before/passing-after upstream coverage. It intentionally does not solve in-range ordinal-shaped data at the lookbehind boundary. |
+| 0002 | Clean | No exact `WBINVD` change found. Hold for a documented cross-host memory/device-ordering contract; the C11 fence is intentionally only a partial model. |
+| 0003 | Clean | Coordinate with #184's executor/backend work. Add a real cross-thread executor test and define reset/release behavior before filing. |
+| 0004 | Clean | Non-overlapping small diagnostic candidate, behind the stronger queue above. Correct its comment, port the real-bridge test and coordinate environment documentation with #251. |
+| 0005 | Clean | Prepare next as a Windows presenter race fix. #285 is related ordering work, not a duplicate. |
+| 0006 | Clean | #252 changes Linux MMIO/OHCI support but is not a lifecycle duplicate. Split API migration from title-side guards and add cross-platform lifecycle tests. |
+| 0007 | Clean | Merged #158 provides the allocation substrate but not guest statistics. Prepare a focused PR with the existing fixture, while reconciling #261/#269/#286 alias accounting. |
+| 0008 | Clean, but monolithic | Do not submit as one patch. Split staged walking, PGRAPH trap delivery, event shadows and IRQ/timer changes, then coordinate with #209, #222, #231 and #184. |
+| 0009-0010 | Stack-dependent | Fold tests and any demonstrated union/strip corrections into #222; #249 is also relevant to strip winding. Do not file competing clipping/culling implementations. |
+| 0011 | Stack-dependent | No exact PR found. Keep experimental until original-hardware depth/viewport behavior is established. |
+| 0012 | Clean | #258 establishes the upstream SIMD-helper and cross-architecture pattern but does not vectorize this combiner path. Benchmark first and add compiler/architecture coverage. |
+| 0013 | Stack-dependent | #231 and #253 are complementary, not duplicates. Extract the arithmetic fast paths, include the existing million-case fixture and benchmark them as a focused PR. |
+| 0014-0015 | Stack-dependent | No exact frame-statistics or GPU-census PR found. Decide runtime versus tooling ownership, port standalone tests and quantify disabled-path cost before filing. |
+| 0016-0018 | Stack-dependent | Backend-seam, vertex-program and visibility work belongs in coordination with #184, #272 and #285. Amend one agreed interface rather than opening a parallel backend series. |
+| 0019 | Stack-dependent | No exact duplicate found and the motivating profile measured a 4.5% `getenv`/`strchr` hotspot. Extract, document startup-only configuration and re-profile as a focused PR. |
+| 0020-0022 | Stack-dependent | Texture metadata, window-clip state and depth-clear callbacks overlap the #184 interface and #222 state model. Contribute tests or fields to those designs instead of filing the local extension unchanged. |
+| 0023 | Clean | Merged #156 partially overlaps capture suppression. Reconcile the capture UX, port the fixture and coordinate documentation with #251 before proposing another switch. |
+| 0024 | Stack-dependent | Shared presentation is part of the broader #184/#285 ownership contract. Split the generic presenter seam from the project backend before further review. |
+| 0025-0027 | Stack-dependent | Audit and capture tooling has no exact duplicate, but it crosses #184/#285 executor and presenter seams. Extract standalone framework fixtures and coordinate before proposing it. |
+| 0028 | Stack-dependent | Separate arbitrary source dimensions from Brute Force output policy; coordinate the generic contract with #184 and #285. |
+| 0029 | Stack-dependent | Brute Force blend heuristic, not established NV2A behavior. Keep local; do not submit as a generic fix. |
+| 0030-0031 | 0030 clean; 0031 depends on it | Draft #286 supersedes 0030's cached physical-intent tags with mirror-alias naming across APU/NV2A/OHCI. Select that model if accepted; separate any still-needed external-DSP hook/lifecycle API from GPL project code. |
+| 0032 | Clean | Strong next candidate after its fixture is moved upstream and startup-only registration plus repeated-exit behavior are documented. |
+| 0033-0034 | Clean | Scheduling and queue-depth policy overlaps the symptoms in issue #259, not an exact PR. Measure more titles/devices and prefer validated opt-in settings or MMCSS over changing global defaults. |
+| 0035 | Clean | Filed as #298; no exact earlier open-PR implementation was found. |
+
+### Already filed from this project's account
+
+These are existing upstream contributions and must not be duplicated by a new
+local proposal.
+
+| PR | Purpose | Status checked 2026-10-31 | Follow-up |
+| --- | --- | --- | --- |
+| [#283](https://github.com/sp00nznet/xboxrecomp/pull/283) | Build the MMX integer test on ARM64 and report skips. | Open | Await review and CI. |
+| [#284](https://github.com/sp00nznet/xboxrecomp/pull/284) | Define scalar `PMADDWD` wraparound. | Open | Await review and CI. |
+| [#285](https://github.com/sp00nznet/xboxrecomp/pull/285) | Allow backend readback before frame snapshots. | Open | Amend this PR, rather than opening a second hook proposal, if items 12 or 15 change the callback contract. |
+| [#297](https://github.com/sp00nznet/xboxrecomp/pull/297) | Validate extra-thunk lookbehind ordinals before rewriting them. | Open, mergeable; no checks reported | Await review; preserve the intentionally narrow scope. |
+| [#298](https://github.com/sp00nznet/xboxrecomp/pull/298) | Preserve both HRTF output channels for a mono source. | Open, mergeable; no checks reported | Await review and coordinate the shared correction with xemu separately. |
+
 ## Already selected upstream work
 
 These are existing upstream pull requests, not new proposals. Their pinned
@@ -45,12 +121,13 @@ local-patch tree is verified as `25a2a713738b7aabb1c21ef6720765ff93ccffea`.
 The exact commit list and application order are in
 [toolkit.py](../tools/toolkit.py).
 
-| PR | Purpose | Status checked 2026-10-29 |
+| PR | Purpose | Status checked 2026-10-31 |
 | --- | --- | --- |
 | [#262](https://github.com/sp00nznet/xboxrecomp/pull/262) | Preserve alias bodies during the disassembler gap sweep. | Open |
 | [#280](https://github.com/sp00nznet/xboxrecomp/pull/280) | Publish general EBP across guest calls. | Open |
 | [#277](https://github.com/sp00nznet/xboxrecomp/pull/277) | Correct shift counts, narrow products, and x87 save/restore. | Open |
 | [#278](https://github.com/sp00nznet/xboxrecomp/pull/278) | Read narrow immediates at the destination width. | Open |
+| [#264](https://github.com/sp00nznet/xboxrecomp/pull/264) | Hold the APU frame while SSL restarts the sequencer. | Open |
 
 These statuses can change. They do not imply that any candidate below has been
 filed or accepted.
@@ -61,9 +138,15 @@ filed or accepted.
    [0001-bound-extra-thunks.patch](../patches/xboxrecomp/0001-bound-extra-thunks.patch)
    rejects zero and out-of-range ordinals rather than rewriting arbitrary
    high-bit-set data. The patch includes a synthetic kernel-bridge regression
-   for valid and invalid candidates. Before filing, check current upstream
-   behavior and whether in-range ordinary data can still be mistaken for an
-   import; add any stronger table-boundary evidence that is available.
+   for valid and invalid candidates. On 2026-10-31 the isolated patch applied
+   to current upstream `main` and its Release `kernel_bridge` CTest passed on
+   MSVC; the same test-only change on unmodified `main` failed all three
+   invalid-word preservation cases. Scope the contribution as ordinal
+   validation: in-range ordinary data can still look like an import, and this
+   patch does not claim to solve that separate boundary problem.
+   *Status:* filed as
+   [#297](https://github.com/sp00nznet/xboxrecomp/pull/297) on 2026-10-31;
+   open.
 
 2. **Model `WBINVD` ordering for the lifted guest.**
    [0002-model-wbinvd.patch](../patches/xboxrecomp/0002-model-wbinvd.patch)
@@ -120,6 +203,67 @@ filed or accepted.
    this project's title-specific XPP instruction guard into a USB lifecycle
    fix.
 
+6a. **Report guest memory pressure rather than host memory pressure.**
+    *Problem:* `MmQueryStatistics` derives the available Xbox pages from host
+    physical memory, so its result does not reflect the title's 64 MB or
+    128 MB guest allocation space. The bridge also translated a null output
+    pointer before the kernel implementation could reject it.
+    *Evidence:* two retail x87 entries needed the corrected result during
+    tutorial-resource bring-up. This establishes title dependence on the
+    value, not that the current accounting exactly models every Xbox
+    allocator.
+    *Change:*
+    [0007-account-guest-memory.patch](../patches/xboxrecomp/0007-account-guest-memory.patch)
+    conservatively counts the image, declared initial stack commitment,
+    scratch reservation, heap-page union, contiguous allocations and extended
+    virtual-memory commitments, then reports the remainder of configured
+    guest RAM. It also preserves null-pointer validation.
+    *Tests:* the [memory-statistics fixture](../tests/memory_stats_test.c) and
+    [Python wrapper](../tests/test_memory_stats.py) cover retail, devkit,
+    extended-map and retained-memory configurations. They do not establish
+    allocator fragmentation, every alias combination, or concurrent
+    reset/reinitialization behavior.
+    *Overlap:* checked 2026-10-31. Merged #158 supplies the reclaim and
+    extended-VMA allocation substrate but leaves `MmQueryStatistics` tied to
+    host RAM. Open #261, #269 and draft #286 change physical-page naming and
+    alias ownership but do not implement guest memory statistics.
+    *Before filing:* port the fixture to upstream, reconcile the accounting
+    with those alias changes, add reset/concurrency cases and validate a
+    second title without treating the conservative estimate as hardware
+    proof.
+    *Status:* local patch; applies independently to current `main`; not
+    prepared or filed.
+
+6b. **Split staged pushbuffer walking from PGRAPH software-trap delivery.**
+    *Problem:* the default walker does not preserve all JUMP/CALL/RETURN
+    control flow needed by the observed stream, while a nonzero subchannel-0
+    NOP can require an ordered PGRAPH software-method interrupt and guest
+    acknowledgement. Advancing GET or clearing the flush early would violate
+    the guest-visible protocol.
+    *Evidence:* the staged path uses PFIFO
+    `CACHE1_DMA_SUBROUTINE` as authoritative call state, stops invalid streams
+    with diagnostics, and holds the GPU until the registered guest handler
+    acknowledges a trap. The observed retail vector, miniport and event
+    relationship is title evidence; the framework mechanism is generic.
+    *Change:*
+    [0008-experimental-pgraph-and-staged-walker.patch](../patches/xboxrecomp/0008-experimental-pgraph-and-staged-walker.patch)
+    currently bundles an opt-in staged walker, PGRAPH trap delivery,
+    event-shadow lifecycle and supporting IRQ/timer changes. The exact event
+    registration remains in title code.
+    *Tests:* [test_pushbuffer.py](../tests/test_pushbuffer.py) covers
+    control flow and invalid streams; [test_pgraph.py](../tests/test_pgraph.py)
+    and [test_fence.py](../tests/test_fence.py) cover masking, trap ordering,
+    event registration, acknowledgement and failure paths. Cross-platform
+    scheduling and broader hardware trap semantics remain unverified.
+    *Overlap:* checked 2026-10-31. #209 changes timer/interrupt behavior,
+    #222 changes PGRAPH state, #231 pipelines the walker/rasterizer boundary,
+    and #184 indexes the pending backend series.
+    *Before filing:* do not propose the monolith. Extract independently
+    reviewable walker and trap/event changes, preserve the flush, semaphore
+    and flip handshakes, then rebase each onto the accepted upstream pieces.
+    *Status:* local opt-in framework experiment; applies as a monolith to
+    current `main`; not prepared or filed.
+
 7. **Experiment with NV2A window clipping.**
    [0009-experimental-window-clipping.patch](../patches/xboxrecomp/0009-experimental-window-clipping.patch)
    adds opt-in software-rasterizer clipping with eight propagated rectangles,
@@ -132,7 +276,7 @@ filed or accepted.
    Compare with more hardware tests and real game captures before proposing it
    upstream or enabling it by default. **Overlap:**
    [#222](https://github.com/sp00nznet/xboxrecomp/pull/222) (open, checked
-   2026-10-29) records the eight rectangles but folds only slot 0 into a
+   2026-10-31) records the eight rectangles but folds only slot 0 into a
    scissor and passes multi-rectangle unions unclipped. It also models the
    clear rectangle. Reconcile with #222 rather than filing a competing
    implementation. This patch's union handling and fixture may be the useful
@@ -206,6 +350,14 @@ filed or accepted.
     checks wrap, mirror, clamp, edge coordinates, and cache-slot equivalence;
     the [raster fixture](../tests/window_clip_test.c) checks DXT1/3/5 decoding
     and blocks rewritten at the same address.
+    *Overlap:* checked 2026-10-31. #231 pipelines raster work and #253 changes
+    texture filtering; neither implements these coordinate or cache-index
+    arithmetic fast paths.
+    *Before filing:* extract the patch from the local walker-dependent stack,
+    move the math fixture into upstream CTest and report an isolated software
+    rasterizer benchmark.
+    *Status:* strong preparation candidate; local patch, not yet prepared or
+    filed.
 
 ## Performance and GPU back-end candidates
 
@@ -215,11 +367,12 @@ pinned framework and Blood Wake at
 Blood Wake pins the same base (`f0f8a461`) and carries most of these as
 patched toolkit files under `src/toolkit_patches/`. Unless an item says
 otherwise, its status is *planned*: no local patch exists yet. Upstream
-overlap was checked on 2026-10-29 with a keyword search of all 273 PR titles
-(newest #285), not an exhaustive review of their contents. Adapted Blood
-Wake code is listed in [THIRD_PARTY_NOTICES.md](../THIRD_PARTY_NOTICES.md);
-before preparing any of these, ask its authors whether they are upstreaming
-the same parts.
+overlap was refreshed on 2026-10-31 against the comparison snapshot above:
+284 PR records through #296, all 56 current open heads and targeted content
+for intersecting changes. This was not an exhaustive line-by-line review of
+unrelated PRs. Adapted Blood Wake code is listed in
+[THIRD_PARTY_NOTICES.md](../THIRD_PARTY_NOTICES.md); before preparing any of
+these, ask its authors whether they are upstreaming the same parts.
 
 The common problem is that the framework's GPU path is built around the CPU
 rasterizer. Every title that needs playable frame rates currently writes its
@@ -278,7 +431,7 @@ own GPU back end, an extended interface for it, and its own pacing fixes.
     *Overlap:* [#184](https://github.com/sp00nznet/xboxrecomp/pull/184)
     indexes a D3D11 and Metal pushbuffer back-end series awaiting maintainer
     direction. [#285](https://github.com/sp00nznet/xboxrecomp/pull/285)
-    (open, this project's account, checked 2026-10-29) adds
+    (open, this project's account, checked 2026-10-31) adds
     `nv2a_backend_register_with_present_sync(backend, void (*)(void))`, a
     pre-snapshot callback without the presented address or a result.
     `readback` here does the same job and additionally tells the frame
@@ -381,7 +534,7 @@ own GPU back end, an extended interface for it, and its own pacing fixes.
     *Overlap:* #184's D3D11 back end, and
     [#274](https://github.com/sp00nznet/xboxrecomp/pull/274) (compile once
     per HLSL text), which applies the same keying idea to the D3D8 layer;
-    overlap checked 2026-10-30.
+    overlap checked 2026-10-31.
     Ordinary cache use now compares retained texture and palette snapshots,
     addressing the synthetic same-frame and sparse-hash rewrite cases. The
     optional approximate mode can still miss those rewrites. Failed uploads
@@ -419,7 +572,7 @@ own GPU back end, an extended interface for it, and its own pacing fixes.
     Existing guest readback fixtures still pass.
     *Overlap:* #285 covers ordering the readback against snapshots;
     [#215](https://github.com/sp00nznet/xboxrecomp/pull/215) (merged) added
-    the D3D11 presenter and #220 covers PVIDEO work (checked 2026-10-30).
+    the D3D11 presenter and #220 covers PVIDEO work (checked 2026-10-31).
     *Before filing:* separate the generic arbitrary-source contract from the
     project-specific output-size policy; investigate the variable combined title performance
     and frequent busy slots; test device loss, other drivers and window
@@ -540,7 +693,7 @@ own GPU back end, an extended interface for it, and its own pacing fixes.
     counting intervals on WARP and hardware. CPU and D3D counts differ on
     the shared triangle edge, as expected from their rasterization rules.
     *Overlap:* #184's GPU series; no matching visibility-report PR was found
-    in the upstream PR listing checked 2026-10-29.
+    in the upstream PR listing checked 2026-10-31.
     *Before filing:* measure on the title; verify report lifetime, device
     reset, and polling behavior across drivers.
     *Status:* local patch and opt-in project implementation.
@@ -555,7 +708,13 @@ own GPU back end, an extended interface for it, and its own pacing fixes.
     [0019-cache-hot-getenv.patch](../patches/xboxrecomp/0019-cache-hot-getenv.patch)
     reads both once. Plain efficiency fix; no behaviour change.
     *Tests:* existing pushbuffer and executor fixtures; not yet re-profiled.
-    *Status:* local patch.
+    *Overlap:* checked 2026-10-31. No matching open or merged PR was found;
+    current `main` still performs the per-draw lookup.
+    *Before filing:* extract the change from the local staged-walker stack,
+    state that these switches are startup configuration, and re-profile the
+    isolated patch.
+    *Status:* strong preparation candidate; local patch, not yet prepared or
+    filed.
 
 24. **Expose palette and cube-layout metadata to render back ends.**
     *Problem:* `Nv2aTexture` omitted the P8 palette, and a stale linear
@@ -585,7 +744,7 @@ own GPU back end, an extended interface for it, and its own pacing fixes.
     suballocations, concurrent guest writes or render-target aliases.
     *Overlap:* [#145](https://github.com/sp00nznet/xboxrecomp/pull/145)
     added CPU P8 sampling; #184 tracks the GPU interface. Checked
-    2026-10-30. [xemu's texture code](https://github.com/xemu-project/xemu/blob/dc10b4cea96e403d30c17ed53551fdaf023bc17f/hw/xbox/nv2a/pgraph/texture.c)
+    2026-10-31. [xemu's texture code](https://github.com/xemu-project/xemu/blob/dc10b4cea96e403d30c17ed53551fdaf023bc17f/hw/xbox/nv2a/pgraph/texture.c)
     derives a 32/64/128/256-entry palette length from the register; its
     OpenGL backend hashes and bounds-checks that selected range. Its
     conversion directly indexes the palette, so it does not establish
@@ -675,7 +834,7 @@ own GPU back end, an extended interface for it, and its own pacing fixes.
     stencil, AA coordinates and query continuity. The executor fixture checks
     CPU, draw-only, clear-only and complete backend ownership.
     *Overlap:* [#222](https://github.com/sp00nznet/xboxrecomp/pull/222)
-    also models clear rectangles (open, checked 2026-10-29).
+    also models clear rectangles (open, checked 2026-10-31).
     *Before filing:* establish hardware reset semantics for unwritten clear
     axes, reconcile CPU rectangle behavior and test other backends, formats
     and titles. Backend registration is assumed to occur before title work.
@@ -731,7 +890,7 @@ own GPU back end, an extended interface for it, and its own pacing fixes.
     cases also passed. Hardware mode did not log its adapter identity.
     Coverage and limitations are in
     [FINDINGS](./FINDINGS.md#gpu-audit-instrumentation).
-    *Overlap:* public PR-title and tracking-index metadata checked 2026-10-30:
+    *Overlap:* public PR-title and tracking-index metadata checked 2026-10-31:
     merged [#152](https://github.com/sp00nznet/xboxrecomp/pull/152) and
     [#162](https://github.com/sp00nznet/xboxrecomp/pull/162) touch related
     executor/backend work; open tracking index
@@ -767,7 +926,7 @@ own GPU back end, an extended interface for it, and its own pacing fixes.
     existing-file protection. Benchmark fixtures check that a tagged image
     cannot be attributed to a different reviewed flip, while legacy
     reviewer-validated captures remain usable.
-    *Overlap:* checked 2026-10-30. Merged
+    *Overlap:* checked 2026-10-31. Merged
     [#156](https://github.com/sp00nznet/xboxrecomp/pull/156) introduced gated
     flip dumps; open [#285](https://github.com/sp00nznet/xboxrecomp/pull/285)
     addresses readback before snapshots and coordinates with the separate
@@ -802,7 +961,7 @@ own GPU back end, an extended interface for it, and its own pacing fixes.
     tests yet. A model needs index, channel ordering, partial updates,
     concurrent snapshots, unchanged guest memory, and presentation-path
     coverage.
-    *Overlap:* checked 2026-10-30. Merged
+    *Overlap:* checked 2026-10-31. Merged
     [#46](https://github.com/sp00nznet/xboxrecomp/pull/46) handles gamma
     through the D3D8 wrapper, not demonstrated guest DAC writes; merged
     [#215](https://github.com/sp00nznet/xboxrecomp/pull/215) concerns the
@@ -835,7 +994,7 @@ own GPU back end, an extended interface for it, and its own pacing fixes.
     CPU-upload; other submissions were no-client or occluded. The successful
     submissions may predate minimization. Matched scenes, physical visibility,
     shared-GPU capture and SDL validation remain open.
-    *Overlap:* checked 2026-10-30. Merged
+    *Overlap:* checked 2026-10-31. Merged
     [#156](https://github.com/sp00nznet/xboxrecomp/pull/156) covers flip
     dumps, [#220](https://github.com/sp00nznet/xboxrecomp/pull/220) PVIDEO,
     and [#215](https://github.com/sp00nznet/xboxrecomp/pull/215) the Windows
@@ -866,13 +1025,16 @@ own GPU back end, an extended interface for it, and its own pacing fixes.
     *Tests:* the `apu_phys` fixture covers RAM/window tags. The project
     lifecycle fixture completed six accurate-DSP init/shutdown cycles with no
     leaked thread handles. Release builds and bounded retail captures passed.
-    *Overlap:* upstream PR #264 is selected separately for the SSL restart
-    gap. Open #261/#286 concern RAM aliases; #266/#270 concern sequencer-off
-    frames. They were not adopted because the observed issues are narrower.
-    *Before filing:* separate generic physical-intent and lifecycle changes
-    from the GPL project DSP, add non-Windows concurrency coverage, and
-    coordinate the alias model with #261/#286. The accurate mix defect must
-    also be isolated before proposing the project DSP as a quality path.
+    *Overlap:* checked 2026-10-31. Upstream #264 is selected separately for
+    the SSL restart gap. Draft #286's mirror-alias page naming supersedes the
+    cached physical-translation intent in 0030 and covers APU, NV2A and OHCI;
+    #261 and #269 are related allocation steps. #266/#270 concern
+    sequencer-off frames and are not substitutes for an external DSP.
+    *Before filing:* select #286's physical-identity model if it is accepted
+    and remove the superseded local tags. Separate any still-needed generic
+    hook and lifecycle API from the GPL project DSP, add non-Windows
+    concurrency coverage, and isolate the accurate-mix defect before
+    proposing that DSP as a quality path.
     *Status:* local framework patches; Accurate is experimental and no longer
     the project default; not prepared or filed.
 
@@ -890,10 +1052,15 @@ own GPU back end, an extended interface for it, and its own pacing fixes.
     *Tests:* a native fixture covers registration, deduplication, primary
     replacement, ordering scope, and reason propagation; the retail exit path
     finalized and shut down cleanly.
-    *Before filing:* review registration concurrency and whether bugcheck
-    paths need an additional-only hook runner without duplicating the missing
-    summary.
-    *Status:* local framework patch; not prepared or filed.
+    *Overlap:* checked 2026-10-31. Merged #161 and #215 provide the primary
+    exit-hook/window foundations but do not add independent hooks or run them
+    before firmware exits.
+    *Before filing:* move the fixture upstream, document additional
+    registration as startup-only, define repeated-run behavior, and decide
+    whether bugcheck paths need an additional-only runner without duplicating
+    the missing summary.
+    *Status:* strong preparation candidate; local framework patch, not yet
+    prepared or filed.
 
 34. **Prioritize the Windows APU frame worker.**
     *Problem:* the accurate DSP stayed below one quarter of a host core, but
@@ -955,7 +1122,7 @@ own GPU back end, an extended interface for it, and its own pacing fixes.
     and with a later GPU overlay. The complete D3D11 matrix passes 190 cases
     on hardware and 123 with 67 hardware cases skipped under WARP. Bounded
     scale-1 and 4.5x retail opening probes retained visible movie content.
-    *Overlap:* checked 2026-10-30. Open
+    *Overlap:* checked 2026-10-31. Open
     [#285](https://github.com/sp00nznet/xboxrecomp/pull/285) establishes
     backend readback before snapshots but does not define guest writes after a
     GPU clear. Tracking index
@@ -993,7 +1160,10 @@ own GPU back end, an extended interface for it, and its own pacing fixes.
     switch.
     *Tests:* the standalone `apu_vp` fixture now requires the synthetic
     `+1/-1` result; the unpatched negative control fails as `+1/+1`.
-    The fixture passed after a final Release rebuild, and
+    On 2026-10-31 the isolated patch applied to current upstream `main` and
+    its Release `apu_vp` CTest passed on MSVC; the same test-only change on
+    unmodified `main` failed with the expected `+1/+1` diagnostic. The
+    project fixture also passed after a final Release rebuild, and
     `python tools/toolkit.py --verify` reproduced tree
     `25a2a713738b7aabb1c21ef6720765ff93ccffea`. The corrected retail A/B/A
     above exercises the real 3D/HRTF route. Focused audio/build/launcher tests
@@ -1002,34 +1172,144 @@ own GPU back end, an extended interface for it, and its own pacing fixes.
     the fixed Simple path improved but not fully correct; the residual issue
     was not isolated before audio work was deferred. These results do not
     replace cross-title testing.
-    *Overlap:* checked 2026-10-30. Merged
+    *Overlap:* checked 2026-10-31. Merged
     [#67](https://github.com/sp00nznet/xboxrecomp/pull/67) supplies the
     all-mixbin fallback, and merged
     [#217](https://github.com/sp00nznet/xboxrecomp/pull/217) enables HRTF and
     other voice fixes; neither updates the channel count after HRTF.
     The same source-channel selection remains in current xemu and xemu
-    v0.8.139. Tracking index
-    [#184](https://github.com/sp00nznet/xboxrecomp/pull/184) has no equivalent
-    fix. No issue, pull request, or comment has been filed.
-    *Before filing:* rebase the isolated patch on current upstream, run its
-    APU suite on supported hosts, test additional HRTF titles and stereo
-    sources, and coordinate with xemu so the shared defect is not fixed in
-    incompatible ways.
-    *Status:* local framework patch; not prepared or filed.
+    v0.8.139. No matching HRTF correction was found in current open PR
+    metadata or affected code; tracking index
+    [#184](https://github.com/sp00nznet/xboxrecomp/pull/184) still selects
+    bins with the pre-HRTF source width.
+    *Follow-up:* let upstream review and CI exercise supported host builds,
+    and coordinate a separate xemu correction so the shared defect is not
+    fixed incompatibly. Additional HRTF titles and stereo-source coverage
+    remain desirable follow-up, not a reason to bundle unrelated audio
+    changes.
+    *Status:* filed as
+    [#298](https://github.com/sp00nznet/xboxrecomp/pull/298) on 2026-10-31;
+    open.
 
-### Open upstream work to evaluate for selection
+38. **Correct and configure the `XC_VIDEO` EEPROM setting layout.**
+    *Problem:* the framework defines `XC_VIDEO` flags as low-bit values and
+    returns them directly. Xbox title wrappers commonly read the video-user
+    settings from the high word; a framework comment currently describes the
+    value as widescreen and HDTV enabled even though such a wrapper observes
+    neither.
+    *Evidence:* Brute Force retail generation
+    `20261030-142754-81f8c6e6` queries setting index 8 at guest
+    `0x002F2AF6`, shifts the result right by 16 and masks it with `0x5F`.
+    The selected framework returns `0x00000003`, so the wrapper reads zero.
+    Its checked direct readers do not use the widescreen bit, so this defect
+    does not itself explain or enable Brute Force widescreen.
+    *Change:* no patch yet. Model the EEPROM/user-preference bit positions
+    separately from AV-pack capabilities and expose an explicit `RECOMP_*`
+    policy rather than silently forcing every title into widescreen. A plain
+    layout correction is generic; Brute Force camera hooks remain
+    title-specific.
+    *Tests:* query `XC_VIDEO` directly and through a synthetic
+    shift-and-mask wrapper; cover `XC_MAX_OS`, buffer-too-small behavior and
+    4:3/widescreen policies. Preserve unrelated settings and result types.
+    *Overlap:* checked 2026-10-31. Merged
+    [#216](https://github.com/sp00nznet/xboxrecomp/pull/216) adds other EEPROM
+    settings but does not correct or configure this `XC_VIDEO` layout. No
+    open issue or PR implementing that correction was found.
+    [#137](https://github.com/sp00nznet/xboxrecomp/pull/137) is a closed
+    launcher option to hide a widescreen setting, not an EEPROM-layout fix.
+    *Before filing:* confirm the exact retail EEPROM layout and HDTV flag
+    meanings from independent documentation and multiple title wrappers,
+    then decide compatibility defaults. Recheck current upstream.
+    *Status:* framework gap; planned, not patched or filed.
 
-These existing PRs may help Brute Force directly. Measure each with the
+39. **Make GPU output-picture sizing aspect-aware.**
+    *Problem:* the shared D3D11 presenter can fit an independently sized
+    source by its own dimensions, but `gpu_present_output_size()` always
+    reports the largest 4:3 rectangle. Native render sizing therefore has no
+    generic way to request the physical dimensions for a 16:9 or ultrawide
+    picture.
+    *Evidence:* patch 0028 added independent shared-source dimensions and the
+    4:3 query for Brute Force internal scaling. The proposed widescreen path
+    can submit a wide source, but using that query to size it would retain
+    the 4:3 bound. Blood Wake computes one requested picture aspect and uses
+    it consistently for target sizing and presentation.
+    *Change:* no patch yet. Add an aspect-aware output-size query or
+    presenter contract, keeping 4:3 as the default. The backend supplies its
+    requested picture aspect; window fitting, resize and dimension limits are
+    framework-owned. Guest readback dimensions remain a separate backend
+    contract.
+    *Tests:* synthetic client rectangles at 4:3, 16:9, 64:27, portrait and
+    zero/minimized sizes; resize transitions; invalid aspects; submitted
+    source dimensions; exact regression coverage for the existing 4:3
+    output and CPU fallback.
+    *Overlap:* checked 2026-10-31.
+    [#215](https://github.com/sp00nznet/xboxrecomp/pull/215) supplies the
+    merged scalable D3D11 presenter, while tracking
+    [#184](https://github.com/sp00nznet/xboxrecomp/pull/184) discusses
+    D3D11/Metal backend seams and a separate project's 2D safe-area fill.
+    Neither provides a general requested-picture aspect. Closed
+    [sp00nznet/xboxrecomp#137](https://github.com/sp00nznet/xboxrecomp/pull/137)
+    is not a presentation implementation.
+    *Before filing:* design this with #184's multi-backend ownership, define
+    whether the API uses a ratio or validated dimensions, and retain GDI,
+    PVIDEO and pinned-framebuffer fallbacks.
+    *Status:* planned framework extension; not patched or filed.
+
+40. **Deliver ordered application metadata through the pushbuffer executor.**
+    *Problem:* a backend cannot reliably infer title-defined 2D, movie and
+    special-copy boundaries from raster state alone. The executor has no
+    generic opt-in path for inert, title-generated metadata that stays
+    ordered with surrounding draws.
+    *Evidence:* Blood Wake wraps its verified overlay flush and movie quad
+    with tagged `NV097_NO_OPERATION` parameters. Its carried executor sends
+    those values to a singleton callback, allowing the backend to pillarbox
+    only protected 2D while transparent 3D in the same high-level layer stays
+    wide. Brute Force currently has no equivalent path.
+    *Change:* no patch yet. Generalize the idea into a namespaced,
+    registered metadata/filter hook or an optional backend entry. The
+    framework owns ordering and dispatch; each title owns its tag, emission
+    sites and meaning. With no registration, ordinary behavior remains
+    unchanged. The backend bounds a lost end marker by resetting state at
+    flip.
+    *Tests:* synthetic streams with metadata before, between and after draws;
+    JUMP, CALL/RETURN and ring-wrap order; absent and rejected registrations;
+    ordinary NOP values; multiple frames and reset behavior. The fixture
+    must not contain game addresses or data.
+    *Overlap:* checked 2026-10-31. #222 records NOP state but does not expose
+    an ordered title-metadata callback, and #184's backend seam does not
+    document one. Closed
+    [#219](https://github.com/sp00nznet/xboxrecomp/pull/219) is related
+    pushbuffer scan/wrap work, not the classification protocol. No public PR
+    implementing Blood Wake's exact Hor+ chain was found.
+    *Before filing:* choose a collision-resistant registration contract,
+    confirm how the walker treats NOPs on every path, coordinate with #184,
+    and keep the Blood Wake-specific `0xB1D3` tag out of the framework.
+    *Status:* planned framework extension; not patched or filed.
+
+### Open upstream work to select or coordinate with
+
+These existing PRs may help Brute Force directly or own an interface touched
+by a local candidate. The snapshot and statuses were checked on 2026-10-31.
+Measure performance changes with the
 [benchmark protocol](./PERFPLAN.md#phase-0-measurement-and-ceiling-probes)
-before adding it to the selected list above. The performance PRs below were
-checked on 2026-10-30; #222 was last checked on 2026-10-29:
+before adding them to the selected list. Coordination-only rows should not be
+selected as if they were interchangeable implementations.
 
 | PR | Purpose | Relevance | Status |
 | --- | --- | --- | --- |
+| [#184](https://github.com/sp00nznet/xboxrecomp/pull/184) | Index the portability, kernel and GPU-backend series | Coordination point for 0008 and 0014-0029; explicitly not intended to merge | Open draft index |
+| [#222](https://github.com/sp00nznet/xboxrecomp/pull/222) | Re-sent NV2A state, window clip, clear rect and face culling | Fold demonstrated 0009/0010 corrections and fixtures here instead of competing | Open |
 | [#231](https://github.com/sp00nznet/xboxrecomp/pull/231) | Pipeline the CPU rasterizer behind the executor | CPU reference path; overlaps 0008 and 0013 | Open, stacked on merged #228; not measured |
-| [#272](https://github.com/sp00nznet/xboxrecomp/pull/272) | Decode vertex programs once per upload | CPU reference and GPU vertex fallback | Open; not measured |
+| [#249](https://github.com/sp00nznet/xboxrecomp/pull/249) | Keep one winding for triangle strips | Directly relevant to 0010's strip-winding tests | Open; compare with #222 |
+| [#251](https://github.com/sp00nznet/xboxrecomp/pull/251) | Catalog every `RECOMP_*` switch | Documentation home for 0004 and 0023 if they are filed | Open |
+| [#253](https://github.com/sp00nznet/xboxrecomp/pull/253) | Opt-in CPU bilinear and anisotropic filtering | CPU reference only; no mip levels and no D3D11 effect | Open; not a substitute for B10 |
+| [#258](https://github.com/sp00nznet/xboxrecomp/pull/258) | Use intrinsics for MMX and SSE float helpers | Establishes cross-architecture SIMD patterns relevant to 0012 | Open; not an exact duplicate |
+| [#261](https://github.com/sp00nznet/xboxrecomp/pull/261), [#269](https://github.com/sp00nznet/xboxrecomp/pull/269), [#286](https://github.com/sp00nznet/xboxrecomp/pull/286) | Correct physical-page naming and alias ownership | Must be reconciled with 0007 and 0030 | Open; #286 is draft |
+| [#266](https://github.com/sp00nznet/xboxrecomp/pull/266), [#270](https://github.com/sp00nznet/xboxrecomp/pull/270) | Treat sequencer-off intervals as active rather than silent | Audio alternatives adjacent to selected #264 and local 0030-0034 | Open; do not stack without title A/B/A |
+| [#272](https://github.com/sp00nznet/xboxrecomp/pull/272) | Decode vertex programs once per upload | CPU reference and GPU vertex fallback; coordinate with 0017 | Open; not measured |
 | [#273](https://github.com/sp00nznet/xboxrecomp/pull/273) | Fast path for constant uploads | Walk cost, whichever renderer is used | Open; not measured |
-| [#222](https://github.com/sp00nznet/xboxrecomp/pull/222) | Window clip, clear rect, face culling, re-sent state | Overlaps 0009 and 0010; may reduce the 149 unhandled methods | Open |
+| [#274](https://github.com/sp00nznet/xboxrecomp/pull/274) | Reuse compiled combiner shaders by HLSL text | Similar stutter goal in the D3D8 path; overlaps project cache concepts | Open; compare rather than select directly |
+| [#285](https://github.com/sp00nznet/xboxrecomp/pull/285) | Run backend readback before frame snapshots | Existing filed seam for items 12 and 15; related but not identical to 0005 | Open; amend rather than duplicate |
 
 Read-only applicability checks showed that #231, #272 and #273 do not apply
 cleanly to the selected pre-audit tree `a4489cd`; rebase and recheck them
@@ -1075,12 +1355,11 @@ fidelity, not flips alone.
   upstream already fixed the wording, then add a synthetic reporting test if
   needed.
 
-Public searches on 2026-10-29 also found
-[#285](https://github.com/sp00nznet/xboxrecomp/pull/285), filed from this
-project's account, concerning backend readback before frame snapshots. Its
-relationship to the Windows snapshot race (item 5) needs review, and it bears
-on items 12 and 15. These searches were limited and are not an exhaustive
-duplicate check.
+The 2026-10-31 comparison confirms that #285 is separate from the Windows
+snapshot race in item 5: it orders backend readback before consumers, while
+0005 protects CPU presentation buffers from being reused during the window
+thread's copy. Items 12 and 15 must amend #285 if they need a richer callback
+contract; they should not open a second readback-hook PR.
 
 For reproducing the project's configured native fixtures and tests, see the
 [README test instructions](../README.md#tests). Keep any disc-derived

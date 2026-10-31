@@ -46,9 +46,13 @@ an older CPU-vertex GPU capture differs substantially. Rendering correctness
 and the title's native frame rate remain unverified. Blood Wake-derived
 native and fixed internal-resolution switches now pass synthetic WARP tests,
 but have not been validated in retail gameplay or on a native 4K display.
-True widescreen and unlocked frame rates are not implemented. The user's
-reported roughly 6 fps while moving at the default 480p D3D11 settings remains
-unresolved; selecting a higher resolution is not a performance fix.
+True widescreen and unlocked frame rates are not implemented. A source and
+executable investigation of a genuine Hor+ path is recorded in
+[FINDINGS](docs/FINDINGS.md#blood-wake-feature-review-and-true-widescreen-investigation)
+and staged in [NEXTSTEPS](docs/NEXTSTEPS.md#e-true-hor-widescreen-investigation-complete-implementation-pending).
+The user's reported roughly 6 fps while moving at the default 480p D3D11
+settings remains unresolved; selecting a higher resolution is not a
+performance fix.
 
 The pipeline recognizes one North American retail `default.xbe` (title ID
 `0x4D53001E`, SHA-256 recorded in `fingerprints/retail.json`). That fingerprint
@@ -65,7 +69,7 @@ and tested before they can be supported.
 - [Brute Force findings](docs/FINDINGS.md), including executable-specific
   addresses, diagnostics, and bring-up limits.
 - [Upstream candidates](docs/UPSTREAM.md), including existing selected PRs and
-  possible contributions that have not yet been filed.
+  filed contributions, overlap decisions, and remaining candidates.
 - [Performance plan](docs/PERFPLAN.md), the phased move from the CPU
   rasterizer to a GPU-authoritative D3D11 renderer.
 
@@ -757,6 +761,21 @@ the resulting Git tree:
   counts, narrow multiplication, and x87 save/restore.
 - [#278](https://github.com/sp00nznet/xboxrecomp/pull/278): correct narrow
   arithmetic immediates and flags.
+- [#264](https://github.com/sp00nznet/xboxrecomp/pull/264): hold the APU frame
+  while SSL restarts the sequencer.
+
+Two generic fixes that remain in the local patch stack have now been submitted
+upstream:
+
+- [#297](https://github.com/sp00nznet/xboxrecomp/pull/297): validate
+  extra-thunk lookbehind ordinals before rewriting them.
+- [#298](https://github.com/sp00nznet/xboxrecomp/pull/298): preserve both HRTF
+  output channels after filtering a mono voice.
+
+Both PRs are open. The local patches remain authoritative for this project
+until an accepted upstream revision is selected and the pinned tree is
+revalidated. The complete selected, filed, overlapping, and planned worklist
+is in [UPSTREAM](docs/UPSTREAM.md).
 
 Local patches reject out-of-range kernel ordinals when scanning before the
 import table, lift `WBINVD` to a host memory fence, synchronize publication of

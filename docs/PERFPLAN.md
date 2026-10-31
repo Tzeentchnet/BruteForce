@@ -23,7 +23,7 @@ features do not apply and must not be copied.
 ## Status (2026-10-30)
 
 Measurements are in [FINDINGS.md](./FINDINGS.md#performance-plan-phase-0-and-the-first-gpu-path-results);
-next steps are in [NEXTSTEPS.md](../NEXTSTEPS.md).
+next steps are in [NEXTSTEPS.md](./NEXTSTEPS.md).
 
 | Phase | Status |
 | --- | --- |
@@ -488,8 +488,34 @@ skipped, including CPU-written frames before scaled presentation. Bounded
 matched retail gameplay campaign, VRAM headroom, mip/LOD behavior and a native
 4K display remain untested. G4 comparisons continue at scale 1. G5 requires
 the controlled 1080p/4K A/B/A campaign in
-[NEXTSTEPS.md](../NEXTSTEPS.md), and the reported default-settings movement
+[NEXTSTEPS.md](./NEXTSTEPS.md), and the reported default-settings movement
 regression remains a separate blocker.
+
+## True-widescreen correctness workstream
+
+Widescreen is now an active investigation in
+[NEXTSTEPS E](./NEXTSTEPS.md#e-true-hor-widescreen-investigation-complete-implementation-pending),
+but it is not a performance phase. Success means genuine Hor+ geometry with
+matching title culling, protected 2D and movies, centred guest readback and
+aspect-aware presentation. A wider framebuffer by itself fails that gate.
+
+The first implementation remains default-off and D3D11-only. The CPU path
+stays at 4:3 as the correctness reference. Validate the new path in this
+order:
+
+1. Alternating 4:3 A/B/A on one generation, scene and scripted input, with no
+   intended output or timing change.
+2. Alternating 16:9 and 21:9 runs that compare the centre 4:3 region and
+   inspect newly visible side geometry, culling, effects, HUD, movies and
+   split screen.
+3. Performance reporting only after correctness: record the aspect, render
+   scale, GPU, thread count and options, and report distinct world frames
+   separately from flips. Wider output naturally increases pixel work and
+   must not be compared with 4:3 as if the workload were equal.
+
+The mode does not relax G4, does not justify skipping guest readback before
+its consumers are replaced, and must not skip or prematurely satisfy flush,
+semaphore, report or flip synchronization.
 
 ## Not in scope, or explicitly rejected
 
@@ -502,10 +528,12 @@ regression remains a separate blocker.
 - Mipmaps are wanted for the 4K target (NEXTSTEPS B10) and are no longer
   deferred for scaled modes; other LOD-transition work stays deferred.
   Preserve existing behavior at scale 1.
-- MSAA, widescreen, and frame interpolation. The Phase 1–3 architecture is
-  what makes these possible later, but none of them are performance work.
-  Higher internal resolution is implemented synthetically as workstream B in
-  [NEXTSTEPS.md](../NEXTSTEPS.md), but G5 remains its performance gate.
+- MSAA and frame interpolation remain deferred. True widescreen is now a
+  separate correctness workstream, not a performance optimization. The
+  Phase 1–3 architecture makes all three possible, but none may be justified
+  by frame-rate figures alone. Higher internal resolution is implemented
+  synthetically as workstream B in [NEXTSTEPS.md](./NEXTSTEPS.md), but G5
+  remains its performance gate.
 
 ## Risks
 

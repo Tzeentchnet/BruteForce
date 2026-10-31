@@ -1,10 +1,10 @@
 # Next steps
 
-The rendering architecture is in [docs/RENDERING.md](docs/RENDERING.md),
-the performance plan is in [docs/PERFPLAN.md](docs/PERFPLAN.md), measured
-results are in [docs/FINDINGS.md](docs/FINDINGS.md), and framework work is
-tracked in [docs/UPSTREAM.md](docs/UPSTREAM.md). State as of 2026-10-30:
-current framework tree `0d2dbaf3daa7daaccdd9771068ae6c89f1639c8f`. The
+The rendering architecture is in [RENDERING.md](RENDERING.md),
+the performance plan is in [PERFPLAN.md](PERFPLAN.md), measured
+results are in [FINDINGS.md](FINDINGS.md), and framework work is
+tracked in [UPSTREAM.md](UPSTREAM.md). State as of 2026-10-31:
+current framework tree `25a2a713738b7aabb1c21ef6720765ff93ccffea`. The
 documented retail generation `20261029-175500-dfadbdd9` was tested against
 the preceding tree `a4489cd69600a1489edea98ac19cf20db242b6d2`; patches 0025
 and 0026 have not been retested on that generation. Generation
@@ -16,13 +16,20 @@ current tree. It still reports 12 unresolved call targets and 34 untranslated
 instruction sites; the new build and presenter-source patch 0027 have not
 been validated in reviewed retail gameplay.
 
+Framework patches 0001 and 0035 were filed upstream as
+[sp00nznet/xboxrecomp#297](https://github.com/sp00nznet/xboxrecomp/pull/297)
+and
+[sp00nznet/xboxrecomp#298](https://github.com/sp00nznet/xboxrecomp/pull/298).
+Patches 0007, 0013, 0019 and 0032 remain the strongest next PRs to prepare.
+Do not file another PR, amend these PRs or comment upstream without approval.
+
 ## Current boundary
 
 - A private xemu 0.8.139 attempt verified the retail XBE and read-only disc
   setup, but the target window did not acquire verified focus. No input was
   sent, no requested tutorial/fade scene was independently matched, and the
   window captures are not pixel-exact. An operator-assisted reference run
-  remains needed; see [FINDINGS](docs/FINDINGS.md#private-xemu-reference-attempt-2026-10-30).
+  remains needed; see [FINDINGS](FINDINGS.md#private-xemu-reference-attempt-2026-10-30).
 - Default-off presenter-source capture links Windows GDI and CPU-upload
   D3D11 submissions to verified flip records in synthetic tests, including
   PVIDEO composition. In two short, unmatched retail probes it verified one
@@ -31,7 +38,7 @@ been validated in reviewed retail gameplay.
   shared-GPU capture and does not establish physical scanout, visibility or
   matching guest-snapshot pixels. Matched-scene validation and benchmark
   integration remain open; see
-  [FINDINGS](docs/FINDINGS.md#presenter-source-capture-alignment).
+  [FINDINGS](FINDINGS.md#presenter-source-capture-alignment).
 - The previous stationary campaign measured about 3.2 rendered frames per
   second on the CPU and 30.4 on D3D11 with GPU vertex programs, three runs
   each. The hold is visually static, so these are **rendered**, not distinct,
@@ -46,7 +53,7 @@ been validated in reviewed retail gameplay.
   experiment. The final binary was not rebenchmarked. Unreviewed whole-frame
   changes do not establish world fps; the reported case and matched visual
   correctness remain open. See
-  [FINDINGS](docs/FINDINGS.md#default-d3d11-movement-regression-2026-10-30).
+  [FINDINGS](FINDINGS.md#default-d3d11-movement-regression-2026-10-30).
 - An alternating three-run GPU comparison reported stationary rendered fps
   from 32.60 to 45.06 and movement pixel-change fps from 25.15 to 35.23
   with GPU texture decoding and async visibility together. A subsequent
@@ -188,14 +195,17 @@ been validated in reviewed retail gameplay.
 By the user's direction the current rendering and frame rate are accepted as
 a working baseline. The next goal is playable quality: fewer render
 artifacts, internal upscaling so the game can run at 4K, and audio. The G1,
-G2 and G4 gates in [PERFPLAN.md](docs/PERFPLAN.md) are not formally met; the
+G2 and G4 gates in [PERFPLAN.md](PERFPLAN.md) are not formally met; the
 acceptance is a judgement, so keep them as regression guards. Do not trade
 the baseline away while working on the items below.
 
-The three workstreams are largely independent. Audio touches only the APU and
+The four workstreams are largely independent. Audio touches only the APU and
 host output, so it can proceed alongside the renderer work. Upscaling should
 follow the artifact inventory (A1), because a larger render target makes any
 existing state-tracking error harder to separate from a scaling error.
+True widescreen is a separate correctness feature: it can reuse the physical
+surface and shared-presentation foundation, but it must not be folded into
+the internal-resolution scale or treated as a framebuffer stretch.
 
 The user selected xemu as the rendering reference and wants mipmapping at 4K.
 Audio is default-on. The xemu DSP path was implemented, but the user's
@@ -243,8 +253,8 @@ GPU methods in the CPU-path census.
    their visible impact is unknown. A matched run still needs to rank
    unhandled and mirror-only methods and compare CPU/GPU/xemu captures rather
    than treating method counts as defects. See
-   [FINDINGS](docs/FINDINGS.md#unmatched-retail-gpu-audit-and-vertex-probe)
-   and [UPSTREAM item 28](docs/UPSTREAM.md#performance-and-gpu-back-end-candidates)
+   [FINDINGS](FINDINGS.md#unmatched-retail-gpu-audit-and-vertex-probe)
+   and [UPSTREAM item 28](UPSTREAM.md#performance-and-gpu-back-end-candidates)
    for report semantics and limitations.
 2. **Use xemu as the reference (decided).** The CPU path models no
    stencil, so it cannot settle the brightness, stencil and bloom questions.
@@ -281,7 +291,7 @@ GPU methods in the CPU-path census.
    writers or establish the ramp at the matched opening fade. The opt-in
    probe's snapshots are not atomic and do not prove completed writes or
    displayed pixels. See
-   [FINDINGS](docs/FINDINGS.md#static-gamma-ramp-investigation). Obtain matched
+   [FINDINGS](FINDINGS.md#static-gamma-ramp-investigation). Obtain matched
    runtime evidence before changing presentation. Only if the title writes a
    relevant ramp, apply its own ramp at present behind a switch, as Blood Wake
    does; that differs from a global adjustment.
@@ -337,9 +347,10 @@ run, so G4/G5 and the reported default 6 fps remain open.
 1. **Implemented: add the scale to the D3D11 back end.** Adapt the generic parts only:
    the single place that decides the scale, the surface sizing, the epoch
    that triggers resizing, and the final scale pass. Skip Blood Wake's
-   widescreen, texture restoration, HUD-edge, AO and HDR features. Provide
-   `RECOMP_GPU_SCALE=<f>` or an output size, default 1. At scale 1 the
-   output must be unchanged from today, bit for bit.
+   texture restoration, HUD-edge, AO and HDR features. Keep widescreen
+   isolated in workstream E. Provide `RECOMP_GPU_SCALE=<f>` or an output
+   size, default 1. At scale 1 the output must be unchanged from today, bit
+   for bit.
 2. **Implemented: keep readback at the guest's size.** The back end reads each presented
    surface back to guest memory at every flip for the CPU consumers. At 4K
    output, the centered 4:3 picture is 2880×2160; a four-byte-per-pixel read
@@ -374,7 +385,7 @@ run, so G4/G5 and the reported default 6 fps remain open.
 6. **Implemented controls and handoff.** The existing resizable window and
    swap chain fit a 4:3 picture. The renderer queries that live picture for
    Native mode; fixed 720p, 1080p, 1440p and 4K presets are in the launcher.
-   Widescreen is out of scope and 480p remains the default.
+   Workstream E owns true widescreen; 480p 4:3 remains the default here.
 7. **Partly implemented: memory and robustness.** Budget VRAM for scaled targets and reject
    unsupported scales or allocation failures with a clear error; do not
    silently reduce the scale. Numeric values and D3D11 dimensions are
@@ -498,9 +509,11 @@ artifacts that the fixtures do not cover, and G5 is recorded.
    stereo reversal, spatial/reverb behavior, and cutscene synchronization.
 4. Repeat host-continuity probes only if the listening route reaches a
    materially different audio-heavy scene or exposes a symptom.
-5. Prepare framework patches 0030-0035 for upstream review only after deciding
-   whether their generic pieces should be split further. Do not file without
-   approval.
+5. Patch 0035 is isolated and filed as
+   [sp00nznet/xboxrecomp#298](https://github.com/sp00nznet/xboxrecomp/pull/298);
+   do not bundle follow-up changes with the external-DSP series. Patches
+   0030-0034 still require the generic pieces and policy changes to be split
+   before upstream review.
 
 *Done when:* after audio work resumes, a human listener signs off the fixed
 Simple scene list above, the Accurate defect is either fixed or remains
@@ -515,7 +528,7 @@ Stereo remains the acceptance target.
 ## D. Remaining pipeline and compatibility work
 
 These items are unchanged in substance from earlier plans; they matter now
-mainly where they gate 4K and audio.
+mainly where they gate 4K, widescreen and audio.
 
 - Continue the guest surface-read investigation with the null backend and
   `BRUTEFORCE_SURFACE_GUARD`, covering stationary and movement in one
@@ -564,6 +577,70 @@ mainly where they gate 4K and audio.
   boot. Re-check upstream overlap and coordinate with Blood Wake's authors
   before preparing a contribution; do not file or comment without approval.
 
+## E. True Hor+ widescreen (investigation complete; implementation pending)
+
+**Static evidence.** The complete source review is in
+[FINDINGS](FINDINGS.md#blood-wake-feature-review-and-true-widescreen-investigation)
+and the proposed ownership boundary is in
+[RENDERING](RENDERING.md#proposed-true-widescreen-boundary). Blood Wake
+uses coordinated Hor+ projection, culling, world visibility, projected-marker
+correction, ordered 2D/movie markers, selective wide targets, centred guest
+readback and wide presentation. Brute Force has a conventional perspective
+builder and camera aspect/tangent state that appear suitable, but their
+runtime roles and all culling paths are not yet classified.
+
+1. **Add a diagnostic-only camera trace.** Wrap the central perspective
+   builder behind a default-off title switch and record a bounded set of
+   caller, output, aspect, tangent, viewport and camera-owner classes. Cover
+   gameplay, menus, movies, in-engine cutscenes and every available
+   split-screen layout. Do not alter the matrix in this step. Regenerate
+   because the manual-source fingerprint changes.
+2. **Establish title ownership before choosing hooks.** Confirm where each
+   gameplay camera's aspect and horizontal/vertical tangent are finalized,
+   which routine rebuilds dependent frustum planes, and whether another
+   camera class bypasses that path. Identify object, static-world/grid and
+   effect culling that can reject newly visible side geometry. A projection
+   patch is not complete without this.
+3. **Add one aspect authority.** Plan an opt-in `RECOMP_*` control for 4:3,
+   16:9, 64:27/21:9 and display matching, with 4:3 the default and invalid
+   input rejected. Keep `K` independent of `RECOMP_GPU_SCALE`; CPU rendering
+   remains 4:3. Decide an ultrawide cap only after side-region validation.
+4. **Implement title Hor+.** Preserve vertical FOV, widen horizontal
+   projection and matching culling by `K`, and correct world-to-screen
+   markers. Keep addresses and structure knowledge in `src/`, not a framework
+   patch. Validate every camera class found by E1.
+5. **Classify 2D in stream order.** Locate verified HUD/text flush and movie
+   submission functions. Emit title-tagged inert methods around only those
+   draws. Add a generic executor/backend marker callback with a synthetic
+   order fixture; reset backend classification at every flip. Explicitly
+   classify full-view fades, flashes and scene-copy backdrops.
+6. **Widen only proven screen targets.** Census the title's colour and depth
+   surfaces across the same scenes. Apply `K` only to device-sized targets
+   whose role is established; leave glow/downsample, shadow, reflection and
+   other off-screen targets on the existing `S` rule unless evidence says
+   otherwise. Use a per-view x remap to pillarbox protected 2D.
+7. **Preserve guest and presenter semantics.** Resolve the centred 4:3 region
+   into guest memory and existing CPU-facing captures. Publish the full wide
+   source through shared presentation. Generalize the framework's current
+   4:3 output-size query without changing its default and retain the
+   CPU/PVIDEO/pinned fallbacks.
+8. **Validate in gates, not by appearance alone.** First run 4:3 A/B/A and
+   require unchanged output and behavior. Then run at least three alternating
+   16:9 and 21:9 runs on the same generation, scene and scripted input.
+   Compare the 4:3 centre against the reference and inspect the added side
+   regions for missing objects, pop-in, effects, shadows and invalid
+   geometry. Exercise menus, all movie paths, fades, HUD, projected markers,
+   cutscenes and split screen. Report distinct world frames separately from
+   flips and do not weaken flush, semaphore, report or flip ordering.
+9. **Defer HUD-edge relocation.** A centred 4:3 HUD is the first correctness
+   target. Moving selected panels to outer corners is optional title layout
+   work after the base mode passes.
+
+*Done when:* 4:3 remains unchanged, the 16:9 and 21:9 centre matches the
+reference within the existing renderer's listed differences, newly visible
+side geometry survives matching title culling, HUD and movies retain their
+shape, guest readback remains 4:3, and split-screen behavior is documented.
+
 ## Decisions (settled 2026-10-30)
 
 1. **Rendering reference:** xemu, run on the same disc at matched states (A2).
@@ -582,17 +659,23 @@ mainly where they gate 4K and audio.
 6. **Scale failures:** reject unsupported scales and allocation failures
    explicitly; fixed preset changes require restarting, while Native follows
    output-size changes through the scale epoch (B7).
+7. **Widescreen:** pursue genuine Hor+ with matching culling and protected
+   2D, not stretched output. Keep it default-off, D3D11-only and separate
+   from internal resolution until E's gates pass.
 
 Still open: access to a native 4K display. Optional 5.1 output is deferred.
 
 ## Order
 
-1. Complete A1, then A2-A4 as the reference and gamma-ramp question allow.
-2. Continue B1-B10 behind switches with scale 1 unchanged.
-3. Run C's human listening pass against the stable scene from A; repeat
+1. Complete A1 and E1-E2, then A2-A4 as the reference and gamma-ramp question
+   allow. The widescreen trace is diagnostic and must not change output.
+2. Implement E3-E8 behind one default-off mode, with a 4:3 regression gate
+   before wide output. Keep HUD relocation deferred.
+3. Continue B1-B10 behind switches with scale 1 unchanged.
+4. Run C's human listening pass against the stable scene from A; repeat
    automated audio probes only for a new symptom or materially different
    audio-heavy scene.
-4. Continue D's compatibility work without weakening audio or GPU ordering.
+5. Continue D's compatibility work without weakening audio or GPU ordering.
 
 Update FINDINGS, UPSTREAM, PERFPLAN, ARCHITECTURE and the README in the same
 change as each milestone, as AGENTS requires.

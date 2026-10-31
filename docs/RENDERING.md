@@ -176,6 +176,60 @@ picture. Invalid values, dimensions beyond D3D11's 16384-pixel limit and
 resource-creation failures are reported; the renderer does not silently lower
 the selected resolution.
 
+### Proposed true-widescreen boundary
+
+True widescreen is not implemented. The static investigation in
+[FINDINGS](./FINDINGS.md#blood-wake-feature-review-and-true-widescreen-investigation)
+establishes a viable architecture, not validated runtime behavior.
+Framebuffer widening alone is explicitly insufficient because it would
+stretch 2D content and leave title culling and guest readback undefined.
+
+The proposed model keeps render scale and aspect independent:
+
+```text
+S = physical pixels per guest pixel in both axes
+K = requested picture aspect / (4/3), K >= 1
+
+eligible screen target:  pw ~= logical_width * S * K
+                         ph ~= logical_height * S
+ordinary off-screen target: existing S-only rule
+```
+
+Only a runtime-proven set of device-sized colour/depth targets may use `K`.
+Downsample, glow, shadow, reflection and other render-to-texture surfaces
+retain their existing aspect unless title evidence establishes otherwise.
+The current CPU renderer stays at 4:3 and scale 1 as the comparison path.
+
+Title code must preserve vertical field of view while expanding horizontal
+projection and every corresponding visibility structure. A final-matrix-only
+hook is not enough: objects rejected by 4:3 title culling never reach either
+renderer. World-to-screen markers also need correction if their consumers
+remain in the pillarboxed guest coordinate system.
+
+The renderer needs ordered classification of title-known 2D and movie
+batches. The proposed generic framework surface is an application-metadata
+callback for tagged, otherwise inert pushbuffer methods; the tag and the
+functions that emit it remain title-specific. For a view centred at NDC x
+`c`, wide 3D keeps the normal x mapping while protected 2D uses:
+
+```text
+x' = x / K + c * (1 - 1 / K)
+```
+
+This preserves HUD, text and movie proportions inside full-screen and
+split-screen views. Full-view fades, flashes and copies of an already-wide
+scene need explicit classification rather than a blanket 2D rule. Marker
+state is reset at every flip so a missing end marker is bounded to one
+frame.
+
+At flip, the shared GPU source keeps the wide dimensions and the presenter
+fits that source aspect inside the client area. Guest memory, CPU captures
+and guest-facing frame statistics continue to receive a guest-sized centre
+crop, downsampled first when `S` is not one. The presenter's current
+`gpu_present_output_size` query computes only a 4:3 rectangle, so native
+wide sizing requires an aspect-aware framework API even though the shared
+presenter already respects submitted source dimensions.
+
 ### Textures and caching
 
 [texture_decode.c](../src/gpu/texture_decode.c) and the backend handle
@@ -395,6 +449,10 @@ replace matched gameplay or original-hardware validation.
   change rates are not validated world FPS.
 - Matched-scene image equivalence remains open, including brightness, glow,
   HUD and depth/stencil behavior. The CPU reference has its own known gaps.
+- True widescreen remains an unimplemented, default-off workstream. It needs
+  coordinated title projection/culling, ordered 2D classification, selective
+  target widening, centred guest readback and aspect-aware presentation;
+  changing the framebuffer dimensions alone is not an acceptable mode.
 - Guest reads and writes of GPU-owned surfaces, concurrent texture changes,
   generalized fence completion, and safe removal of per-flip readback need
   further investigation. A clean surface-guard diagnostic alone is
@@ -410,4 +468,4 @@ replace matched gameplay or original-hardware validation.
 
 Keep disc content, generated game code, screenshots, runtime captures and
 logs local. Use synthetic fixtures for shareable reproduction. Current
-priorities are in [NEXTSTEPS.md](../NEXTSTEPS.md).
+priorities are in [NEXTSTEPS.md](./NEXTSTEPS.md).

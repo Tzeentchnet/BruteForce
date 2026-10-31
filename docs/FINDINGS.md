@@ -1681,6 +1681,156 @@ output on a native 4K display. No matched gameplay campaign was run. In
 particular, this milestone does not explain or fix the user's reported
 roughly 6 fps with the default 480p launcher settings.
 
+### Blood Wake feature review and true-widescreen investigation
+
+This was a source and static-executable review, not a widescreen
+implementation or runtime validation. The Blood Wake evidence is from public
+release v0.2.4 at commit
+[`e631eddd`](https://github.com/minimalice92/bloodwake-recomp/tree/e631edddfe56d22344e9f696923aeb6d78a9e7ba);
+the Brute Force evidence is from North American retail generation
+`20261030-142754-81f8c6e6`. No game-derived code, captures or payloads were
+added to the repository. Blood Wake's published performance and completion
+claims were not independently reproduced.
+
+#### Blood Wake's end-to-end design
+
+Blood Wake implements genuine Hor+ widescreen rather than stretching a 4:3
+frame. Its
+[`bw_widescreen.c`](https://github.com/minimalice92/bloodwake-recomp/blob/e631edddfe56d22344e9f696923aeb6d78a9e7ba/src/bw_widescreen.c)
+chooses a picture aspect from 4:3 through 2.39:1 and defines
+`k = picture_aspect / (4/3)`. The mode requires its D3D11 renderer. The title
+and menu boot remain 4:3 inside the wide window, while gameplay uses `k`.
+
+The implementation coordinates all of these parts:
+
+- A title hook widens only the left and right off-centre projection planes.
+  Vertical field of view and depth terms are unchanged.
+- Camera culling data is widened to match. Separate title hooks enlarge the
+  static-world cell walk so objects newly inside the side regions are
+  considered before ordinary per-item frustum tests.
+- World-to-screen x coordinates are expanded around the view centre so
+  reticles and other projected markers continue to align with the widened
+  world.
+- Exact overlay-flush and movie-quad functions emit tagged
+  `NV097_NO_OPERATION` methods into the guest pushbuffer. A carried executor
+  callback delivers those markers to the backend in draw order. Marked HUD,
+  text and movies are therefore distinguishable from transparent 3D that
+  happens to share an overlay layer.
+- Only title-known device targets (`640x480` and the horizontally
+  anti-aliased `1280x480` target) become physically wider. Shadow,
+  reflection and other off-screen targets keep their original aspect.
+- Guest positions remain in 640-wide logical units. Wide 3D uses the normal
+  x mapping and fills the physical target. Marked 2D uses
+  `x' = x/k + c(1 - 1/k)`, where `c` is the current view's NDC centre, which
+  preserves its proportions and pillarboxes it inside each split-screen
+  view. Full-view fades, flashes and screen-copy backdrops are classified
+  separately and may deliberately fill the wide view.
+- Guest readback still receives the centred 4:3 portion at the original
+  guest dimensions. Presentation uses the wide source aspect. A missing 2D
+  end marker cannot poison later frames because the backend clears the state
+  at every flip.
+- Moving HUD panels to the outer screen edges is an optional, later
+  title-layout feature; it is not required for correct Hor+ geometry.
+
+The public source has no standalone widescreen fixture or CI workflow, and
+some classification is explicitly title-informed. Its exact hook addresses,
+camera structures, launch-data rules, world grid and HUD layouts cannot be
+copied to Brute Force. The reusable pieces are the aspect authority,
+logical/physical target split, per-view x remap, ordered metadata protocol,
+centred readback and aspect-aware presentation.
+
+#### Brute Force static evidence
+
+The title's `XGetVideoFlags` equivalent at guest `0x002F2AF6` queries
+`XC_VIDEO` (index 8), shifts the returned DWORD right by 16 and masks it with
+`0x5F`. The selected framework currently returns its widescreen and HDTV
+values in the low bits, so this wrapper observes zero. Static review of its
+direct readers found compatibility use of bit `0x40`, but no test of the
+widescreen bit. Correcting the framework's EEPROM layout is therefore a
+generic bug candidate, not a native-widescreen switch for this title.
+
+The central perspective builder at `0x0006EE30` has two direct callers,
+`0x0006BE90` and `0x0006D240`. Its matrix has the conventional relationship
+`m00 = cot(half_fov) / aspect` and `m11 = cot(half_fov)`. Static
+interpretation of the camera state used by the surrounding routines is:
+
+- `+0x14` and `+0x18`: stored half-FOV values in degrees;
+- `+0x24` and `+0x28`: horizontal and vertical half-FOV tangents;
+- `+0x2C`: aspect ratio.
+
+`0x00172CA0` explicitly restores `4/3` and derives the vertical tangent from
+the horizontal tangent with a `0.75` multiplier. `0x00172D70` updates aspect
+and recomputes the vertical tangent. This is strong evidence for a Hor+
+camera path: preserve the vertical tangent, multiply the horizontal tangent
+and aspect by `k`, then let the title rebuild its dependent camera state.
+It is not yet evidence for the correct hook boundary, every camera class, or
+complete culling. Patching only the final projection matrix could render the
+wider geometry while the title still omits objects outside its 4:3 culling
+volume.
+
+The current D3D11 backend has a separate but compatible foundation:
+guest-logical coordinates, physical resources, scaled viewports, shared
+presentation and guest-sized resolves. Its current scale `S` changes width
+and height uniformly, however, and the presenter's output-size query is
+hard-coded to a 4:3 picture. There is no ordered 2D/3D classification path.
+Simply widening a target now would stretch HUD and movie draws and would not
+define the guest readback crop.
+
+#### Required Brute Force boundary
+
+A first functional mode must be opt-in, D3D11-only and default to unchanged
+4:3. It needs all of the following as one correctness feature:
+
+1. An aspect factor `K` independent of render scale `S`.
+2. Runtime classification of both perspective-builder callers and the
+   camera update path across gameplay, menus, movies, in-engine cutscenes and
+   split screen.
+3. Hor+ projection plus matching frustum/object/world visibility. Projected
+   HUD markers need an equivalent correction if the title uses them.
+4. A runtime census that identifies which full-screen colour/depth targets
+   may widen; arbitrary render-to-texture, glow, shadow and reflection
+   targets must not inherit the display aspect.
+5. Title-specific markers around verified 2D and movie submission
+   boundaries, delivered by a generic executor/backend metadata hook.
+6. Per-view 2D remapping, including explicit treatment of full-view fades,
+   copied scene backdrops and split-screen centres.
+7. Centred guest-sized readback and a wide shared presentation source.
+   Frame dumps, frame statistics and any guest surface readers continue to
+   receive their documented 4:3 guest view.
+8. An unchanged CPU 4:3 reference. First validate 4:3 A/B/A, then 16:9 and
+   21:9 at matched scenes and scripted input. List side-region geometry,
+   culling, effects, HUD, movies and split-screen differences rather than
+   hiding them.
+
+The safest first code slice is diagnostic only: an opt-in trace at the
+camera/projection boundary that records bounded call-site and camera-state
+classes without changing matrices. It requires regeneration because
+`recomp_manual.c` participates in the generated-source fingerprint. No such
+hook has been added yet.
+
+#### Other Blood Wake candidates
+
+| Candidate | Brute Force assessment |
+| --- | --- |
+| Persistent shader-cache warm-up | High-value next step after the existing cache is accepted for normal use. Blood Wake boots a measured, minimal set of hidden and silent scenes during setup. Brute Force can reuse the concept and its own scripted routes, but not Blood Wake's launch-page offsets or scene list. Warm-up failures and cache identity must remain explicit. |
+| Event-driven short waits, idle NV2A sleep and segment-at-a-time walking | Potentially high performance value. Blood Wake preserves the flush acknowledgement and wakes the waiter promptly instead of skipping it. This overlaps the existing pipeline plan, but is synchronization-sensitive and needs executor fixtures plus matched A/B/A measurements. |
+| Mip upload followed by anisotropic filtering | High visual value for scaled output, in that order. Blood Wake enables anisotropy only for eligible mipped samplers. Open [sp00nznet/xboxrecomp#253](https://github.com/sp00nznet/xboxrecomp/pull/253) is CPU-rasterizer filtering without mip levels and does not implement the D3D11 path. |
+| Original/enhanced fix registry and generated settings schema | Useful release-engineering patterns, but lower priority. Brute Force already has default-off `RECOMP_*` experiments and a table-driven launcher; an edition boundary becomes valuable only when a coherent enhanced preset and save-compatibility policy exist. |
+| Pinned build-from-disc pipeline, expected toolkit tree, profiler and GPU audit | Already present in equivalent or stricter form. Brute Force verifies the retail XBE, generation inputs and patched toolkit tree, and has adapted the profiler and audit. |
+| Persistent host window across title self-reboots | Conditional. It would improve continuity only after Brute Force's real self-reboot flow is exercised and shown to need it. |
+| MSAA, FXAA and higher-precision targets | Conditional after G4 and the wide/readback path are stable. MSAA changes target and resolve ownership; FXAA can soften HUD text; precision changes need matched visual evidence. |
+| Gamma, bloom, sharpening, AO, HDR and OLED care | Do not import as a quality bundle. Only the title's own captured nonidentity gamma ramp is a current hypothesis. The other effects deliberately change the authored picture while Brute Force still has unresolved brightness and bloom differences. |
+| High-frame-rate interpolation, draw-distance hooks, split-screen detail restoration, HUD-edge relocation, water rewrites and game fixes | Predominantly title-specific. Reuse investigation methods, not Blood Wake addresses or structures. HUD-edge relocation can be reconsidered after base widescreen is correct. |
+| Sinc resampling, makeup gain/limiting, surround and low-latency audio | Separate, deferred audio work. The relevant APU/DSP files carry LGPL/GPL obligations and Brute Force still has an unresolved listening-quality gate; lowering buffering now would conflict with observed scheduling gaps. |
+
+Blood Wake's project-owned widescreen and tooling files are MIT-licensed.
+Its carried xboxrecomp files retain their own MIT notices, while patched APU
+files are LGPL-2.1-or-later and most of its vendored xemu DSP is
+GPL-2.0-or-later. Existing project attribution already covers adapted
+generic code. Any newly copied code still requires a corresponding
+`THIRD_PARTY_NOTICES.md` update; title code, generated C, assets and captures
+remain local.
+
 ## Current validation boundary
 
 The documented retail generation `20261029-175500-dfadbdd9` built in Release

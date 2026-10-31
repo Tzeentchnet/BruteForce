@@ -5,18 +5,23 @@
 Keep these documents current when related work changes the evidence or
 status. Update them in the same change as the work, not afterward:
 
-- `docs/UPSTREAM.md`: framework contribution candidates, overlap, tests, and
-  remaining work before filing.
+- `docs/NEXTSTEPS.md`: active workstreams, ordering, settled decisions, and
+  completion gates.
+- `docs/UPSTREAM.md`: selected and filed upstream work, contribution
+  candidates, overlap, tests, and remaining follow-up.
 - `docs/FINDINGS.md`: Brute Force-specific executable, runtime, and bring-up
   findings, including measured performance results.
 - `docs/ARCHITECTURE.md`: game and resource organization, asset-format
   evidence, and the future Blender-importer investigation.
+- `docs/RENDERING.md`: renderer ownership and synchronization boundaries,
+  CPU/GPU reference behavior, presentation, scaling, and widescreen design.
 - `docs/PERFPLAN.md`: the performance plan, its gates, and phase status. Mark
   a phase's progress there, and record its measurements in FINDINGS.
 
 Distinguish observations from hypotheses and unverified behavior; identify the
-game revision, evidence, and test coverage when relevant. Update the README
-when user-facing build instructions or status change.
+game revision, evidence, and test coverage when relevant. Update `README.md`
+when user-facing build instructions or status change. Keep relative links
+valid when documentation moves.
 
 ## Framework changes and upstream candidates
 
@@ -39,15 +44,30 @@ the same problems.
   when the local fix is only a title-side workaround: record the framework
   gap that made it necessary.
 - **Check upstream before writing a fix.** Search open and merged PRs (for
-  example, `gh pr list -R sp00nznet/xboxrecomp --state all`) and the tracking
-  index #184. Prefer selecting or improving an existing PR over a competing
-  one, and record the overlap and the date checked.
+  example,
+  `gh pr list -R sp00nznet/xboxrecomp --state all --limit 500`) and the
+  tracking index #184. Prefer selecting or improving an existing PR over a
+  competing one, and record the overlap and the date checked.
 - **Credit prior art.** When adapting another project's code, such as Blood
   Wake's, keep its licence notice, add it to `THIRD_PARTY_NOTICES.md`, and
   name the source in the UPSTREAM entry. Copy only generic code, never its
   title-specific hooks, addresses, or assets.
-- **Never file without approval.** Do not file issues or pull requests, or
-  comment upstream, without the user's approval.
+- **Never interact upstream without approval.** Do not file issues or pull
+  requests, push amendments to filed PRs, or comment upstream without the
+  user's explicit approval for that action.
+- **Record filed work immediately.** After an approved submission, record its
+  PR number, commit, validation, and status in `docs/UPSTREAM.md`; update
+  `docs/NEXTSTEPS.md` and `README.md` when their status or ordering changes.
+
+## Validation
+
+- Use the smallest relevant checks described in
+  [README.md](README.md#tests).
+- After changing a framework patch or selected upstream commit, run its
+  focused synthetic fixture and `python tools/toolkit.py --verify`; update
+  the expected toolkit tree in the same change.
+- For documentation-only changes, run `git diff --check` and verify affected
+  relative links.
 
 ## Performance work
 
@@ -63,7 +83,7 @@ Follow `docs/PERFPLAN.md`.
   CPU path at matched frames, or its differences are listed.
 - **Don't skip synchronization for speed.** Do not skip or prematurely
   satisfy the PFB flush handshake, semaphore releases, or flip holds to gain
-  frame rate. See FINDINGS for why.
+  frame rate. See `docs/FINDINGS.md` for why.
 
 ## Local data
 

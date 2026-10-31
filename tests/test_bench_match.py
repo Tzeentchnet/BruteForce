@@ -89,8 +89,8 @@ def campaign_run(campaign, number, audio, tagged=True):
         "readiness": {"mode": "manual", "state": "reviewed tutorial", "acknowledged": True},
         "automatic_panel_presses": False,
         "audio": wav_info,
-        "env": ({"RECOMP_GPU": "d3d11", "RECOMP_AC97_READY": "1"} if audio
-                else {"RECOMP_GPU": "d3d11"}),
+        "env": ({"RECOMP_GPU": "d3d11", "RECOMP_AUDIO": "1"} if audio
+                else {"RECOMP_GPU": "d3d11", "RECOMP_AUDIO": "0"}),
         "world_capture": {
             "files": files,
             **({"alignment": bench_world.FLIP_ID_ALIGNMENT} if tagged else {}),

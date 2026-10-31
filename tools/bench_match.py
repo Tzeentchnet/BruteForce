@@ -228,7 +228,7 @@ def _compare(path, movement_input):
         run_numbers.extend([(off_number, "off"), (on_number, "on")])
         options = {
             tuple(sorted((key.upper(), value) for key, value in item["env"].items()
-                         if key.upper() != "RECOMP_AC97_READY"))
+                         if key.upper() not in ("RECOMP_AUDIO", "RECOMP_AC97_READY")))
             for item in (off, on)
         }
         identity = {(item.get("generation"), item.get("toolkit_tree"), item.get("threads"))

@@ -1,24 +1,48 @@
 # Third-party notices
 
 This project downloads [xboxrecomp](https://github.com/sp00nznet/xboxrecomp)
-at a pinned revision and applies the public pull requests listed in the README.
-It also applies the project-local kernel-thunk fix in `patches/xboxrecomp`.
-The framework and its contributions are under the MIT license below. Its
-checkout also includes xemu-derived components under LGPL-2.1-or-later; see the
-framework's `NOTICE`, individual source headers, and `LICENSES` directory for
-the full notices and license terms. Distributing a linked executable can impose
-additional obligations, including those concerning modified LGPL components
-and relinking.
+at a pinned revision and applies the public commits and project-local patches
+listed in the README and `tools/toolkit.py`. The framework and its
+contributions are under the MIT license below. Its checkout also includes
+xemu-derived MCPX APU components under LGPL-2.1-or-later; see the framework's
+`NOTICE`, individual source headers, and `LICENSES` directory for the full
+notices and license terms.
 
-The build workflow was informed by
+This repository also vendors the MCPX DSP56300 interpreter from
+[xemu v0.8.139](https://github.com/xemu-project/xemu/tree/v0.8.139/hw/xbox/mcpx/apu/dsp)
+under `src/xemu_dsp`. Its interpreter sources are GPL-2.0-or-later, except
+`dsp_dma.c`, `dsp_dma.h`, and `dsp_dma_regs.h`, whose source headers specify
+LGPL-2.0-or-later. The local standalone shims and wrapper are described in
+`src/xemu_dsp/NOTICE.md`. License texts are provided in:
+
+- `LICENSES/GPL-2.0.txt`
+- `LICENSES/LGPL-2.0.txt`
+- `LICENSES/LGPL-2.1.txt`
+
+The GPL DSP is linked into the game executable. Consequently, a built
+executable is distributed, if at all, under GPL-2.0-or-later as a combined
+work. Modified LGPL components also carry their applicable source,
+notice, and relinking obligations. This notice is an engineering summary,
+not legal advice.
+
+The build and audio integration were informed by
 [bloodwake-recomp](https://github.com/minimalice92/bloodwake-recomp), whose
-project-owned files are MIT-licensed. Its game-specific code, assets, and
-additional GPL components are not included here.
+project-owned files are MIT-licensed. Its game-specific hooks and assets are
+not included here. Its standalone xemu DSP build was used as the adaptation
+reference; the corresponding GPL/LGPL xemu sources are included under their
+own terms above rather than under Blood Wake's MIT license.
 
 Generic code adapted from bloodwake-recomp at commit
 `e631edddfe56d22344e9f696923aeb6d78a9e7ba`, under its MIT license below:
 
 - `src/profile.c`, from `src/bw_profile.c` (sampling profiler).
+- `src/audio/recomp_apu_xdsp.c`, from the generic GP/EP integration in
+  `src/bw_apu_xdsp.c`, adapted for Brute Force's physical-memory resolver,
+  stereo output, lifecycle, diagnostics, and `RECOMP_*` controls.
+- `src/xemu_dsp/bw_dsp.c` and `.h`, from Blood Wake's standalone wrapper
+  around xemu's GPL DSP interpreter. These wrapper files are distributed
+  with the GPL-linked DSP target; xemu's own source headers remain
+  authoritative for the vendored interpreter files.
 - `src/gpu/d3d11_backend.c`, from the generic parts of `src/gpu/bw_d3d11.c`
   (surfaces, depth buffers, texture cache, state objects, vertex ring,
   vertex-program shaders, their verification readback, and stale texture-pitch

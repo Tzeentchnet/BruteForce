@@ -1,0 +1,48 @@
+diff --git a/src/apu/apu_xaudio2.h b/src/apu/apu_xaudio2.h
+index 583fc70..593f1b8 100644
+--- a/src/apu/apu_xaudio2.h
++++ b/src/apu/apu_xaudio2.h
+@@ -45,7 +45,9 @@ void xa2_expect_drain(void);
+  * high, so high is capped where that period could fill a buffer the voice
+  * has no slot for: queued + period must stay below (count + 1) buffers
+  * (count on the voice, one staging). Exact in samples, so buffer sizes that
+- * are not multiples of the period work too. low is half of high. */
++ * are not multiples of the period work too. low is three quarters of high,
++ * retaining enough lead for a host scheduling stall without increasing the
++ * maximum queue. */
+ static inline void xa2_pacing_marks(int buf_samples, int count, int period,
+                                     int *low, int *high)
+ {
+@@ -54,7 +56,7 @@ static inline void xa2_pacing_marks(int buf_samples, int count, int period,
+     if (h > cap) h = cap;
+     if (h < 1) h = 1;
+     *high = h;
+-    *low = h / 2;
++    *low = h * 3 / 4;
+ }
+ 
+ /* Times the voice ran dry after audio started ([XA2] underrun x%u). */
+diff --git a/tests/xaudio2/test_main.c b/tests/xaudio2/test_main.c
+index 3d1be99..9e18c7e 100644
+--- a/tests/xaudio2/test_main.c
++++ b/tests/xaudio2/test_main.c
+@@ -269,7 +269,7 @@ int main(void)
+             int low;
+             xa2_pacing_marks(xa2_get_buffer_size(), xa2_get_buffer_count(),
+                              256, &low, &high);
+-            CHECK(high == 2048 && low == 1024);
++            CHECK(high == 2048 && low == 1536);
+         }
+         for (int step = 0; step < 300; step++) {
+             /* The voice starts playing once the queue has filled (a
+@@ -330,8 +330,8 @@ int main(void)
+      * loss). */
+     {
+         struct { const char *s, *n; int b, cnt, low, high, fed; } c[] = {
+-            { "RECOMP_AUDIO_BUF_SAMPLES=320", "RECOMP_AUDIO_BUF_COUNT=3", 320, 3, 480, 960, 1 },
+-            { "RECOMP_AUDIO_BUF_SAMPLES=128", "RECOMP_AUDIO_BUF_COUNT=2", 128, 2,  64, 128, 0 },
++            { "RECOMP_AUDIO_BUF_SAMPLES=320", "RECOMP_AUDIO_BUF_COUNT=3", 320, 3, 720, 960, 1 },
++            { "RECOMP_AUDIO_BUF_SAMPLES=128", "RECOMP_AUDIO_BUF_COUNT=2", 128, 2,  96, 128, 0 },
+         };
+         static int16_t period[256][2];
+         for (int k = 0; k < 2; k++) {

@@ -1,0 +1,114 @@
+diff --git a/src/kernel/kernel_hal.c b/src/kernel/kernel_hal.c
+index 7140285..e7a2d3f 100644
+--- a/src/kernel/kernel_hal.c
++++ b/src/kernel/kernel_hal.c
+@@ -12,6 +12,7 @@
+  */
+ 
+ #include "kernel.h"
++#include "recomp_exit_hook.h"
+ #include "kernel_missing.h"
+ #include "xbox_memory_layout.h"   /* RECOMP_TLS, g_fs_base */
+ #include <stdio.h>
+@@ -1276,6 +1277,7 @@ VOID __stdcall xbox_HalReturnToFirmware(ULONG Routine)
+     /* stderr too: the kernel log file is rewritten on every run, so a title
+      * that ends itself otherwise leaves no trace in the run's own log. */
+     fprintf(stderr, "[EXIT] HalReturnToFirmware routine=%u\n", (unsigned)Routine);
++    recomp_exit_hook_run("firmware");
+     ExitProcess(0);
+ }
+ 
+@@ -1283,6 +1285,7 @@ VOID __stdcall xbox_HalInitiateShutdown(void)
+ {
+     xbox_log(XBOX_LOG_INFO, XBOX_LOG_HAL, "HalInitiateShutdown (exiting)");
+     fprintf(stderr, "[EXIT] HalInitiateShutdown\n");
++    recomp_exit_hook_run("shutdown");
+     ExitProcess(0);
+ }
+ 
+diff --git a/src/platform/recomp_exit_hook.c b/src/platform/recomp_exit_hook.c
+index fe0dc8d..6df4fb5 100644
+--- a/src/platform/recomp_exit_hook.c
++++ b/src/platform/recomp_exit_hook.c
+@@ -1,5 +1,5 @@
+ /*
+- * recomp_exit_hook.c - the hook a window runs before ExitProcess
++ * recomp_exit_hook.c - hooks run before ExitProcess
+  * (recomp_exit_hook.h).
+  */
+ #include "recomp_exit_hook.h"
+@@ -9,15 +9,41 @@
+ /* Set by whichever thread notes the first miss, read by the window thread:
+  * an aligned pointer store, so the reader sees the old or the new hook. */
+ static recomp_exit_hook_fn volatile s_hook;
++#define RECOMP_EXIT_HOOK_MAX 8
++static recomp_exit_hook_fn s_additional[RECOMP_EXIT_HOOK_MAX];
+ 
+ void recomp_exit_hook_set(recomp_exit_hook_fn fn)
+ {
+     s_hook = fn;
+ }
+ 
++int recomp_exit_hook_add(recomp_exit_hook_fn fn)
++{
++    size_t i;
++
++    if (fn == NULL)
++        return 0;
++    for (i = 0; i < RECOMP_EXIT_HOOK_MAX; ++i) {
++        if (s_additional[i] == fn)
++            return 1;
++        if (s_additional[i] == NULL) {
++            s_additional[i] = fn;
++            return 1;
++        }
++    }
++    return 0;
++}
++
+ void recomp_exit_hook_run(const char *why)
+ {
+     recomp_exit_hook_fn fn = s_hook;
++    size_t i;
++
+     if (fn != NULL)
+         fn(why);
++    for (i = 0; i < RECOMP_EXIT_HOOK_MAX; ++i) {
++        fn = s_additional[i];
++        if (fn != NULL)
++            fn(why);
++    }
+ }
+diff --git a/src/platform/recomp_exit_hook.h b/src/platform/recomp_exit_hook.h
+index 437c6a0..b98d561 100644
+--- a/src/platform/recomp_exit_hook.h
++++ b/src/platform/recomp_exit_hook.h
+@@ -1,11 +1,11 @@
+ /*
+- * recomp_exit_hook.h - work that must run when a window ends the process.
++ * recomp_exit_hook.h - work that must run before ExitProcess.
+  *
+  * The Win32 windows end the run with ExitProcess, which skips atexit. The
+  * kernel's exit-time reports (the missing-file summary) register here, and
+- * each window calls recomp_exit_hook_run before ExitProcess. It lives in the
+- * platform layer because the D3D library is linked without the kernel in
+- * its standalone tests, so it cannot call the kernel by name.
++ * each window and the firmware-exit bridge call recomp_exit_hook_run before
++ * ExitProcess. It lives in the platform layer because the D3D library is
++ * linked without the kernel in its standalone tests.
+  */
+ #ifndef RECOMP_EXIT_HOOK_H
+ #define RECOMP_EXIT_HOOK_H
+@@ -19,7 +19,11 @@ typedef void (*recomp_exit_hook_fn)(const char *why);
+ /* One hook; a second call replaces the first. Any thread. */
+ void recomp_exit_hook_set(recomp_exit_hook_fn fn);
+ 
+-/* Calls the hook, if one is set, with why ("window"). */
++/* Add an independent hook without replacing the primary hook. Returns zero
++ * when the bounded registry is full. Register during startup. */
++int recomp_exit_hook_add(recomp_exit_hook_fn fn);
++
++/* Calls the registered hooks with why ("window", "firmware", or "shutdown"). */
+ void recomp_exit_hook_run(const char *why);
+ 
+ #ifdef __cplusplus

@@ -59,19 +59,27 @@ def test_settings_round_trip_and_missing_defaults(tmp_path):
     launcher.save_settings(path, values)
     assert launcher.load_settings(path) == values
     data = json.loads(path.read_text(encoding="utf-8"))
-    assert data == {"version": 2, "settings": values}
+    assert data == {"version": 4, "settings": values}
     path.write_text('{"version": 1, "settings": {"renderer": "cpu"}}', encoding="utf-8")
     assert launcher.load_settings(path) == {**launcher.DEFAULTS, "renderer": "cpu"}
     path.write_text(
         '{"version": 1, "settings": {"program_near_zero": "inherit"}}', encoding="utf-8"
     )
     assert launcher.load_settings(path)["program_near_zero"] == "hud"
+    path.write_text(
+        '{"version": 3, "settings": {"audio_dsp": "xemu"}}', encoding="utf-8"
+    )
+    assert launcher.load_settings(path)["audio_dsp"] == "fold"
+    path.write_text(
+        '{"version": 4, "settings": {"audio_dsp": "xemu"}}', encoding="utf-8"
+    )
+    assert launcher.load_settings(path)["audio_dsp"] == "xemu"
 
 
 @pytest.mark.parametrize("data", [
     "not json",
     "[]",
-    '{"version": 3, "settings": {}}',
+    '{"version": 5, "settings": {}}',
     '{"version": true, "settings": {}}',
     '{"version": 1, "settings": {"unexpected": "1"}}',
     '{"version": 1, "settings": {"vsync": true}}',
@@ -109,6 +117,7 @@ def test_launcher_maps_every_setting_and_preserves_unrelated_environment():
         "UNRELATED": "keep", "RECOMP_GPU": "d3d11", "RECOMP_FULLSCREEN": "1",
         "RECOMP_WINDOW_SCALE": "3", "RECOMP_PRESENT_FILTER": "point",
         "RECOMP_PRESENT_VSYNC": "0", "RECOMP_GPU_VSH": "0",
+        "RECOMP_AUDIO": "1", "RECOMP_APU_DSP": "fold",
         "RECOMP_GPU_TEX_DECODE": "0", "RECOMP_GPU_PSCACHE": "1",
         "RECOMP_WINDOW_CLIP": "1", "RECOMP_PROGRAM_NEAR_ZERO": "1", "RECOMP_GPU_ZPASS": "async",
         "RECOMP_GPU_DEPTH_TEXTURE": "1", "RECOMP_GPU_STENCIL_ALIAS": "1",
@@ -119,6 +128,8 @@ def test_launcher_maps_every_setting_and_preserves_unrelated_environment():
     assert defaults["RECOMP_GPU"] == "d3d11"
     assert "RECOMP_D3D11_WARP" not in defaults
     assert defaults["RECOMP_GPU_PSCACHE"] == "0"
+    assert defaults["RECOMP_AUDIO"] == "1"
+    assert defaults["RECOMP_APU_DSP"] == "fold"
     assert defaults["RECOMP_GPU_SCALE"] == "1"
     assert defaults["RECOMP_GPU_DIRECT_PRESENT"] == "0"
     assert defaults["RECOMP_GPU_STENCIL_ALIAS"] == "0"
@@ -127,6 +138,9 @@ def test_launcher_maps_every_setting_and_preserves_unrelated_environment():
     native = launcher.game_environment({"resolution": "native", "direct_present": "0"}, {})
     assert native["RECOMP_GPU_SCALE"] == "native"
     assert native["RECOMP_GPU_DIRECT_PRESENT"] == "1"
+    simple = launcher.game_environment({"audio": "0", "audio_dsp": "fold"}, {})
+    assert simple["RECOMP_AUDIO"] == "0"
+    assert simple["RECOMP_APU_DSP"] == "fold"
     with pytest.raises(launcher.LauncherError, match="depth or stencil aliases"):
         launcher.game_environment({"resolution": "2.25", "depth_texture": "1"}, {})
 
@@ -172,6 +186,8 @@ def test_start_uses_validated_tutorial_launch_and_separate_log(tmp_path, monkeyp
     assert calls["prepare"]["experimental_tutorial"] is True
     assert calls["popen"]["env"]["RECOMP_GPU"] == "d3d11"
     assert calls["popen"]["env"]["RECOMP_GPU_PSCACHE"] == "1"
+    assert calls["popen"]["env"]["RECOMP_AUDIO"] == "1"
+    assert calls["popen"]["env"]["RECOMP_APU_DSP"] == "fold"
     assert calls["popen"]["env"]["KEEP"] == "yes"
     assert calls["command"] == ["game.exe", "disc"]
     assert calls["popen"]["cwd"] == boot

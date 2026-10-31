@@ -7,6 +7,7 @@
 
 #include <xbox/xboxrecomp.h>
 #include <ohci.h>
+#include <recomp_exit_hook.h>
 
 #include "bruteforce_config.h"
 #include "crash_diagnostics.h"
@@ -26,6 +27,17 @@ static LONG CALLBACK handle_mmio(PEXCEPTION_POINTERS exception)
 {
     return xbox_VehMmioFault(exception) ? EXCEPTION_CONTINUE_EXECUTION
                                         : EXCEPTION_CONTINUE_SEARCH;
+}
+
+static void finalize_audio_before_exit(const char *why)
+{
+    MCPXAPUState *apu = g_apu_state;
+
+    if (apu == NULL)
+        return;
+    fprintf(stderr, "[APU] Finalizing before %s exit\n", why);
+    g_apu_state = NULL;
+    mcpx_apu_shutdown(apu);
 }
 
 static char *absolute_path(const char *path, const char *kind)
@@ -151,6 +163,40 @@ static int configure_renderer(void)
     return 0;
 }
 
+static int configure_audio(int *enabled)
+{
+    const char *value = getenv("RECOMP_AUDIO");
+    int on = 1;
+
+    if (value != NULL && *value != '\0') {
+        if (strcmp(value, "1") == 0 || _stricmp(value, "on") == 0 ||
+            _stricmp(value, "true") == 0 || _stricmp(value, "yes") == 0) {
+            on = 1;
+        } else if (strcmp(value, "0") == 0 || _stricmp(value, "off") == 0 ||
+                   _stricmp(value, "false") == 0 || _stricmp(value, "no") == 0) {
+            on = 0;
+        } else {
+            fprintf(stderr, "RECOMP_AUDIO must be 1/on/true/yes or 0/off/false/no, not \"%s\"\n",
+                    value);
+            return 0;
+        }
+    }
+    if (_putenv_s("RECOMP_AC97_READY", on ? "1" : "") != 0) {
+        fprintf(stderr, "Cannot configure the framework audio readiness flag\n");
+        return 0;
+    }
+    if (on) {
+        const char *buffers = getenv("RECOMP_AUDIO_BUF_COUNT");
+        if ((buffers == NULL || *buffers == '\0') &&
+            _putenv_s("RECOMP_AUDIO_BUF_COUNT", "8") != 0) {
+            fprintf(stderr, "Cannot configure the default audio queue depth\n");
+            return 0;
+        }
+    }
+    *enabled = on;
+    return 1;
+}
+
 static int matches_fingerprint(const unsigned char *data, size_t size)
 {
     static const char digits[] = "0123456789abcdef";
@@ -256,6 +302,7 @@ int main(int argc, char **argv)
     int kernel_ready = 0;
     int usb_attempted = 0;
     int usb_requested = getenv("RECOMP_USB") != NULL;
+    int audio_requested = 0;
     PVOID mmio_handler = NULL;
 
     setvbuf(stdout, NULL, _IONBF, 0);
@@ -264,6 +311,8 @@ int main(int argc, char **argv)
         fprintf(stderr, "Usage: bruteforce.exe [game directory]\n");
         return 2;
     }
+    if (!configure_audio(&audio_requested))
+        return 2;
     if ((getenv("RECOMP_VBLANK") == NULL && _putenv_s("RECOMP_VBLANK", "1") != 0) ||
         (getenv("RECOMP_STUB_LOG") == NULL && _putenv_s("RECOMP_STUB_LOG", "1") != 0) ||
         (usb_requested && getenv("RECOMP_DISPATCH_GATE") == NULL &&
@@ -285,7 +334,7 @@ int main(int argc, char **argv)
     }
     memory_ready = 1;
     g_xbox_mem_offset = xbox_GetMemoryOffset();
-    if (usb_requested || getenv("RECOMP_AC97_READY") != NULL) {
+    if (usb_requested || audio_requested) {
         mmio_handler = AddVectoredExceptionHandler(1, handle_mmio);
         if (mmio_handler == NULL) {
             fprintf(stderr, "Cannot register the MMIO handler (Windows error %lu)\n",
@@ -293,10 +342,14 @@ int main(int argc, char **argv)
             goto cleanup;
         }
     }
-    if (getenv("RECOMP_AC97_READY") != NULL) {
+    if (audio_requested) {
         g_apu_state = mcpx_apu_init_standalone((uint8_t *)xbox_GetMemoryBase());
         if (g_apu_state == NULL) {
             fprintf(stderr, "Cannot initialize the requested APU model\n");
+            goto cleanup;
+        }
+        if (!recomp_exit_hook_add(finalize_audio_before_exit)) {
+            fprintf(stderr, "Cannot register audio exit finalization\n");
             goto cleanup;
         }
     }

@@ -60,8 +60,20 @@ class ManualReadiness:
 
 
 def audio_enabled(env):
-    """The host checks variable presence, including a value of '0'."""
-    return any(key.upper() == "RECOMP_AC97_READY" for key in env)
+    """Return the public default-on audio policy for an environment."""
+    value = next(
+        (value for key, value in env.items() if key.upper() == "RECOMP_AUDIO"),
+        None,
+    )
+    if value is None or not str(value).strip():
+        return True
+    normalized = str(value).strip().lower()
+    if normalized in ("1", "on", "true", "yes"):
+        return True
+    if normalized in ("0", "off", "false", "no"):
+        return False
+    raise BenchControlError(
+        f"RECOMP_AUDIO must be 1/on/true/yes or 0/off/false/no, not {value!r}")
 
 
 def reserve_audio_capture(out_dir, env):

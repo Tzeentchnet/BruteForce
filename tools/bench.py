@@ -57,8 +57,8 @@ import bench_control
 import bench_match
 import bench_world
 
-MENU_SCRIPT = "20000:a:200,23000:a:200,26000:down:100,28000:a:200"
-WORLD_DRAWS = 700
+MENU_SCRIPT = "20000:a:200,23000:a:200,28000:a:200"
+WORLD_DRAWS = 400
 WORLD_RUN = 5
 HOLD_DETECT = 20
 STATIONARY_FRAMES = 120
@@ -101,7 +101,7 @@ class BenchError(Exception):
 
 
 def clean_environment(parent):
-    """Do not inherit title/framework switches, including a present audio-on flag."""
+    """Do not inherit title/framework switches; audio defaults on afterward."""
     return {key: value for key, value in parent.items()
             if not key.upper().startswith(("RECOMP_", "BRUTEFORCE_"))}
 
@@ -939,8 +939,8 @@ def main(argv=None):
         for _, env in variants:
             for key, value in env.items():
                 if key.upper() == "RECOMP_AC97_READY" and value.strip() in ("", "0"):
-                    message = ("RECOMP_AC97_READY is enabled by presence, even for 0; "
-                               "omit it for audio off")
+                    message = ("legacy RECOMP_AC97_READY is enabled by presence, even for 0; "
+                               "use RECOMP_AUDIO=0 for audio off")
                     if args.readiness == "manual":
                         raise BenchError(message)
                     print(f"[bench] warning: {message}", file=sys.stderr, flush=True)
@@ -950,7 +950,7 @@ def main(argv=None):
                        for name, env in variants}
         mixed_audio = len(set(audio_modes.values())) > 1
         if args.capture_audio and "on" not in audio_modes.values():
-            raise BenchError("--capture-audio needs an audio-on variant (RECOMP_AC97_READY=1)")
+            raise BenchError("--capture-audio needs an audio-on variant (RECOMP_AUDIO=1)")
         if mixed_audio:
             if args.readiness != "manual" or not args.no_auto_panels:
                 raise BenchError("audio-on/off runs require --readiness manual and --no-auto-panels")
@@ -960,7 +960,7 @@ def main(argv=None):
                 raise BenchError("audio-on/off runs require at least three runs per variant")
             other_options = {
                 tuple(sorted((key.upper(), value) for key, value in env.items()
-                             if key.upper() != "RECOMP_AC97_READY"))
+                             if key.upper() not in ("RECOMP_AUDIO", "RECOMP_AC97_READY")))
                 for _, env in variants
             }
             if len(other_options) != 1:

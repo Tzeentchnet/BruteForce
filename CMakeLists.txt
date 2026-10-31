@@ -29,6 +29,10 @@ string(JSON BRUTEFORCE_XBE_ENTRY_POINT GET "${BRUTEFORCE_FINGERPRINT}" entry_poi
 configure_file(src/bruteforce_config.h.in bruteforce_config.h @ONLY)
 
 add_subdirectory("${XBOXRECOMP_DIR}" "${CMAKE_BINARY_DIR}/xboxrecomp")
+add_subdirectory(src/xemu_dsp)
+target_sources(xbox_apu PRIVATE src/audio/recomp_apu_xdsp.c)
+target_compile_definitions(xbox_apu PRIVATE RECOMP_EXTERNAL_APU_DSP=1)
+target_link_libraries(xbox_apu PUBLIC recomp_xemu_dsp)
 
 file(GLOB RECOMP_SOURCES CONFIGURE_DEPENDS "${BRUTEFORCE_GEN_DIR}/*.c")
 set(BRUTEFORCE_GPU_SOURCES src/gpu/d3d11_backend.c src/gpu/render_scale.c src/gpu/rc_hlsl.c
@@ -130,6 +134,22 @@ target_include_directories(bruteforce_frame_stats_test PRIVATE
     "${XBOXRECOMP_DIR}/src/kernel"
 )
 target_link_libraries(bruteforce_frame_stats_test PRIVATE xboxrecomp)
+
+add_executable(bruteforce_exit_hook_test EXCLUDE_FROM_ALL tests/exit_hook_test.c)
+target_include_directories(bruteforce_exit_hook_test PRIVATE
+    "${XBOXRECOMP_DIR}/src/platform"
+)
+target_link_libraries(bruteforce_exit_hook_test PRIVATE recomp_exit_hook)
+
+add_executable(bruteforce_apu_dsp_lifecycle_test EXCLUDE_FROM_ALL
+    tests/apu_dsp_lifecycle_test.c)
+target_compile_definitions(bruteforce_apu_dsp_lifecycle_test PRIVATE
+    WIN32_LEAN_AND_MEAN NOMINMAX _CRT_SECURE_NO_WARNINGS)
+target_include_directories(bruteforce_apu_dsp_lifecycle_test PRIVATE
+    "${XBOXRECOMP_DIR}/src"
+    "${XBOXRECOMP_DIR}/src/apu"
+)
+target_link_libraries(bruteforce_apu_dsp_lifecycle_test PRIVATE xboxrecomp)
 
 add_executable(bruteforce_gpu_audit_test EXCLUDE_FROM_ALL tests/gpu_audit_test.c)
 target_compile_definitions(bruteforce_gpu_audit_test PRIVATE

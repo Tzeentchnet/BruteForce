@@ -13,7 +13,7 @@ ROOT = Path(__file__).resolve().parents[1]
 TOOLKIT_DIR = ROOT / ".deps" / "xboxrecomp"
 TOOLKIT_URL = "https://github.com/sp00nznet/xboxrecomp.git"
 TOOLKIT_BASE = "f0f8a461496a4f23d9b0aeaa284b8d70ba7ab82b"
-TOOLKIT_TREE = "9bec55267a19bf1fa54320274cb073d785a8d411"
+TOOLKIT_TREE = "0d2dbaf3daa7daaccdd9771068ae6c89f1639c8f"
 LOCAL_PATCHES = (
     ROOT / "patches" / "xboxrecomp" / "0001-bound-extra-thunks.patch",
     ROOT / "patches" / "xboxrecomp" / "0002-model-wbinvd.patch",
@@ -44,9 +44,14 @@ LOCAL_PATCHES = (
     ROOT / "patches" / "xboxrecomp" / "0027-presenter-source-captures.patch",
     ROOT / "patches" / "xboxrecomp" / "0028-scaled-gpu-presentation.patch",
     ROOT / "patches" / "xboxrecomp" / "0029-hud-safe-near-plane.patch",
+    ROOT / "patches" / "xboxrecomp" / "0030-accurate-apu-dsp-hooks.patch",
+    ROOT / "patches" / "xboxrecomp" / "0031-external-apu-dsp-lifecycle.patch",
+    ROOT / "patches" / "xboxrecomp" / "0032-run-hooks-before-firmware-exit.patch",
+    ROOT / "patches" / "xboxrecomp" / "0033-prioritize-apu-frame-worker.patch",
+    ROOT / "patches" / "xboxrecomp" / "0034-raise-apu-queue-low-water.patch",
 )
 
-# PRs #262, #280, #277, and #278, in their tested application order.
+# PRs #262, #280, #277, #278, and #264, in their tested application order.
 PATCH_COMMITS = (
     "19871ddc1324e0b448cb4e94ed89608b86a69078",
     "8aadd8e768de8d3292789fc02aee7a0ae8bc7016",
@@ -55,6 +60,7 @@ PATCH_COMMITS = (
     "4998bcbb9cc97c044df4eca4ea372dfcac466d2a",
     "60d1456910f3d65bc599cf240bc0e1282770dec5",
     "0dff83abd7bab6a0ebb899ef5c2be63317dae228",
+    "eb7b1f5833205a24fcc0eda6eb4ed2df4f2bc2e3",
 )
 
 

@@ -526,10 +526,11 @@ def build(config="Release", parallel=4, extra_targets=()):
 
 
 def prepare_game_run(config="Release", graphics=False, experimental_tutorial=False,
-                     experimental_audio=False, isolated_saves=None, base_env=None):
+                     experimental_audio=False, isolated_saves=None, base_env=None,
+                     no_audio=False):
     """Validate the build and return (command, working directory, environment)."""
-    if experimental_audio and not experimental_tutorial:
-        raise BuildError("--experimental-audio currently requires --experimental-tutorial")
+    if experimental_audio and no_audio:
+        raise BuildError("--experimental-audio and --no-audio cannot be combined")
     save_root = None
     if isolated_saves is not None:
         save_root = Path(isolated_saves).resolve()
@@ -553,6 +554,7 @@ def prepare_game_run(config="Release", graphics=False, experimental_tutorial=Fal
     env = dict(os.environ if base_env is None else base_env)
     env.setdefault("RECOMP_VBLANK", "1")
     env.setdefault("RECOMP_STUB_LOG", "1")
+    env.setdefault("RECOMP_AUDIO", "1")
     if experimental_tutorial:
         env.update({
             "RECOMP_USB": "1",
@@ -562,7 +564,9 @@ def prepare_game_run(config="Release", graphics=False, experimental_tutorial=Fal
         })
         env.setdefault("RECOMP_KEYBOARD", "1")
     if experimental_audio:
-        env["RECOMP_AC97_READY"] = "1"
+        env["RECOMP_AUDIO"] = "1"
+    if no_audio:
+        env["RECOMP_AUDIO"] = "0"
     if save_root is not None:
         env["BRUTEFORCE_SAVE_ROOT"] = str(save_root)
         # The host derives RECOMP_SAVE_DIR from the wide path as UTF-8.
@@ -584,9 +588,10 @@ def prepare_game_run(config="Release", graphics=False, experimental_tutorial=Fal
 
 
 def run_game(config="Release", graphics=False, experimental_tutorial=False,
-             experimental_audio=False, isolated_saves=None):
+             experimental_audio=False, isolated_saves=None, no_audio=False):
     command, boot_dir, env = prepare_game_run(
-        config, graphics, experimental_tutorial, experimental_audio, isolated_saves
+        config, graphics, experimental_tutorial, experimental_audio, isolated_saves,
+        no_audio=no_audio,
     )
     return subprocess.run(command, cwd=boot_dir, env=env, check=False).returncode
 
@@ -618,7 +623,11 @@ def main(argv=None):
     )
     run.add_argument(
         "--experimental-audio", action="store_true",
-        help="enable the unverified APU audio path; requires --experimental-tutorial",
+        help=argparse.SUPPRESS,
+    )
+    run.add_argument(
+        "--no-audio", action="store_true",
+        help="disable the default-on APU and host audio path",
     )
     run.add_argument(
         "--isolated-saves", metavar="DIR", type=Path,
@@ -637,7 +646,7 @@ def main(argv=None):
         elif args.command == "run":
             return run_game(
                 args.config, args.graphics, args.experimental_tutorial, args.experimental_audio,
-                args.isolated_saves,
+                args.isolated_saves, args.no_audio,
             )
         else:
             setup_toolkit()

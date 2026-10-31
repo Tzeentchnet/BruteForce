@@ -1,0 +1,32 @@
+diff --git a/src/apu/apu_dsp.c b/src/apu/apu_dsp.c
+index 2170d9b..618847a 100644
+--- a/src/apu/apu_dsp.c
++++ b/src/apu/apu_dsp.c
+@@ -31,6 +31,7 @@
+ #if defined(RECOMP_EXTERNAL_APU_DSP)
+ extern int recomp_xdsp_enabled(void);
+ extern void recomp_xdsp_init(MCPXAPUState *d);
++extern void recomp_xdsp_finalize(MCPXAPUState *d);
+ extern int recomp_xdsp_frame(MCPXAPUState *d,
+                              float mixbins[NUM_MIXBINS][NUM_SAMPLES_PER_FRAME]);
+ #else
+@@ -44,6 +45,11 @@ static void recomp_xdsp_init(MCPXAPUState *d)
+     (void)d;
+ }
+ 
++static void recomp_xdsp_finalize(MCPXAPUState *d)
++{
++    (void)d;
++}
++
+ static int recomp_xdsp_frame(MCPXAPUState *d,
+                              float mixbins[NUM_MIXBINS][NUM_SAMPLES_PER_FRAME])
+ {
+@@ -247,6 +253,7 @@ void mcpx_apu_dsp_init(MCPXAPUState *d)
+  * Safe to call twice. */
+ void mcpx_apu_dsp_finalize(MCPXAPUState *d)
+ {
++    recomp_xdsp_finalize(d);
+     free(d->gp.dsp);
+     free(d->ep.dsp);
+     d->gp.dsp = NULL;

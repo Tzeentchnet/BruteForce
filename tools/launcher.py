@@ -14,7 +14,7 @@ from tkinter import messagebox, ttk
 import build
 
 
-SETTINGS_VERSION = 2
+SETTINGS_VERSION = 4
 
 
 @dataclass(frozen=True)
@@ -55,6 +55,16 @@ SETTINGS = (
         "vsync", "Display", "Presentation VSync",
         "Wait for the display when presenting; this does not unlock the game frame rate.",
         (("1", "On"), ("0", "Off")), "1",
+    ),
+    Setting(
+        "audio", "Audio", "Game audio",
+        "Play the title's music, dialogue, effects, menu, and cinematic audio.",
+        (("1", "On"), ("0", "Off")), "1",
+    ),
+    Setting(
+        "audio_dsp", "Audio", "Sound processor",
+        "Simple is the recommended wide-stereo path. Accurate runs the Xbox GP/EP programs but remains experimental.",
+        (("fold", "Simple (recommended)"), ("xemu", "Accurate (experimental Xbox DSP)")), "fold",
     ),
     Setting(
         "renderer", "Graphics", "Renderer",
@@ -152,13 +162,16 @@ def load_settings(path):
     with path.open("r", encoding="utf-8") as stream:
         data = json.load(stream)
     if (not isinstance(data, dict) or set(data) != {"version", "settings"}
-            or type(data["version"]) is not int or data["version"] not in (1, SETTINGS_VERSION)):
+            or type(data["version"]) is not int
+            or data["version"] not in (1, 2, 3, SETTINGS_VERSION)):
         raise LauncherError("Unsupported settings file format or version")
     settings = data["settings"]
-    if data["version"] == 1 and isinstance(settings, dict):
+    if data["version"] < SETTINGS_VERSION and isinstance(settings, dict):
         settings = dict(settings)
-        if settings.get("program_near_zero", "inherit") == "inherit":
+        if data["version"] == 1 and settings.get("program_near_zero", "inherit") == "inherit":
             settings["program_near_zero"] = "hud"
+        if settings.get("audio_dsp", "xemu") == "xemu":
+            settings["audio_dsp"] = "fold"
     return validate_settings(settings)
 
 
@@ -181,6 +194,8 @@ def game_environment(values, base_env=None):
         "RECOMP_WINDOW_SCALE": settings["window_scale"],
         "RECOMP_PRESENT_FILTER": settings["present_filter"],
         "RECOMP_PRESENT_VSYNC": settings["vsync"],
+        "RECOMP_AUDIO": settings["audio"],
+        "RECOMP_APU_DSP": settings["audio_dsp"],
         "RECOMP_GPU_VSH": settings["gpu_vsh"],
         "RECOMP_GPU_TEX_DECODE": settings["gpu_textures"],
         "RECOMP_GPU_PSCACHE": settings["shader_cache"],
@@ -253,7 +268,7 @@ class Launcher:
         notebook.pack(fill="both", expand=True, padx=12, pady=8)
         frames = {}
         rows = {}
-        for tab in ("Display", "Graphics", "Experimental"):
+        for tab in ("Display", "Audio", "Graphics", "Experimental"):
             frame = ttk.Frame(notebook, padding=12)
             frame.columnconfigure(0, weight=1)
             notebook.add(frame, text=tab)

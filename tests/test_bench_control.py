@@ -16,15 +16,17 @@ import bench_control  # noqa: E402
 
 
 @pytest.mark.parametrize("inherited", ["1", "0", ""])
-def test_audio_off_unsets_inherited_presence_and_on_is_explicit(inherited):
+def test_audio_default_on_and_explicit_off_ignore_inherited_internal_flag(inherited):
     parent = {
         "RECOMP_AC97_READY": inherited, "RECOMP_AUDIO_WAV": "existing-user.wav",
         "recomp_audio_host": "1", "BRUTEFORCE_PROFILE": "old.txt", "OTHER": "keep",
     }
     off = bench.clean_environment(parent)
     assert off == {"OTHER": "keep"}
-    assert not bench_control.audio_enabled(off)
-    on = {**off, "RECOMP_AC97_READY": "1"}
+    assert bench_control.audio_enabled(off)
+    disabled = {**off, "RECOMP_AUDIO": "0"}
+    assert not bench_control.audio_enabled(disabled)
+    on = {**off, "RECOMP_AUDIO": "1"}
     assert bench_control.audio_enabled(on)
     assert bench_control.audio_enabled({"RECOMP_AC97_READY": "0"})
     assert parent["RECOMP_AUDIO_WAV"] == "existing-user.wav"
@@ -34,13 +36,13 @@ def test_audio_paths_are_unique_reserved_and_never_overwrite(tmp_path, monkeypat
     first, second = tmp_path / "first", tmp_path / "second"
     first.mkdir()
     second.mkdir()
-    env1, env2 = {"RECOMP_AC97_READY": "1"}, {"RECOMP_AC97_READY": "1"}
+    env1, env2 = {"RECOMP_AUDIO": "1"}, {"RECOMP_AUDIO": "1"}
     one = bench_control.reserve_audio_capture(first, env1)
     two = bench_control.reserve_audio_capture(second, env2)
     assert one != two and one.is_file() and two.is_file()
     assert "RECOMP_AUDIO_HOST" not in env1 and "RECOMP_AUDIO_HOST" not in env2
     assert env1["RECOMP_AUDIO_WAV"] == str(one)
-    assert bench_control.reserve_audio_capture(first, {}) is None
+    assert bench_control.reserve_audio_capture(first, {"RECOMP_AUDIO": "0"}) is None
 
     class Fixed:
         hex = "occupied"
@@ -49,14 +51,14 @@ def test_audio_paths_are_unique_reserved_and_never_overwrite(tmp_path, monkeypat
     existing = first / "audio-occupied.wav"
     existing.write_bytes(b"user audio")
     with pytest.raises(bench_control.BenchControlError, match="non-overwriting"):
-        bench_control.reserve_audio_capture(first, {"RECOMP_AC97_READY": "1"})
+        bench_control.reserve_audio_capture(first, {"RECOMP_AUDIO": "1"})
     assert existing.read_bytes() == b"user audio"
 
 
 def test_audio_capture_rejects_external_path_and_early_cap(tmp_path):
     for key in ("RECOMP_AUDIO_WAV", "recomp_audio_wav_secs"):
         with pytest.raises(bench_control.BenchControlError, match="owns"):
-            bench_control.reserve_audio_capture(tmp_path, {"RECOMP_AC97_READY": "1", key: "x"})
+            bench_control.reserve_audio_capture(tmp_path, {"RECOMP_AUDIO": "1", key: "x"})
 
 
 def write_wav(path, frames=5, channels=2):
@@ -130,13 +132,13 @@ def test_readiness_uses_unique_token_and_bounded_failure(tmp_path):
         other.poll(10)
 
 
-def test_audio_zero_is_not_an_off_mode_and_manual_is_required(tmp_path, capsys):
+def test_invalid_audio_mode_and_capture_readiness_are_reported(tmp_path, capsys):
     out = tmp_path / "campaign"
-    assert bench.main(["--variant", "off:RECOMP_AC97_READY=0", "--readiness", "manual",
+    assert bench.main(["--variant", "off:RECOMP_AUDIO=invalid", "--readiness", "manual",
                        "--ready-state", "tutorial hold", "--out", str(out)]) == 1
-    assert "enabled by presence" in capsys.readouterr().err
+    assert "RECOMP_AUDIO must be" in capsys.readouterr().err
     assert not out.exists()
-    assert bench.main(["--capture-audio", "--variant", "on:RECOMP_AC97_READY=1",
+    assert bench.main(["--capture-audio", "--variant", "on:RECOMP_AUDIO=1",
                        "--out", str(out)]) == 1
     assert "--readiness manual" in capsys.readouterr().err
 
@@ -160,8 +162,8 @@ def test_legacy_audio_zero_remains_enabled_and_warns(tmp_path, monkeypatch, caps
 
 def test_audio_comparison_requires_manual_matched_protocol(tmp_path, capsys):
     out = tmp_path / "campaign"
-    args = ["--scene", "movement", "--variant", "off:",
-            "--variant", "on:RECOMP_AC97_READY=1", "--out", str(out)]
+    args = ["--scene", "movement", "--variant", "off:RECOMP_AUDIO=0",
+            "--variant", "on:RECOMP_AUDIO=1", "--out", str(out)]
     assert bench.main(args) == 1
     assert "--readiness manual" in capsys.readouterr().err
     assert not out.exists()
@@ -182,7 +184,7 @@ def test_mixed_audio_campaign_records_only_individual_unmatched_results(tmp_path
     out = tmp_path / "campaign"
     assert bench.main([
         "--scene", "movement", "--runs", "3", "--retries", "0",
-        "--variant", "off:", "--variant", "on:RECOMP_AC97_READY=1",
+        "--variant", "off:RECOMP_AUDIO=0", "--variant", "on:RECOMP_AUDIO=1",
         "--readiness", "manual", "--ready-state", "tutorial stationary hold",
         "--no-auto-panels", "--capture", "--capture-movement", "--capture-audio",
         "--out", str(out),
@@ -191,7 +193,7 @@ def test_mixed_audio_campaign_records_only_individual_unmatched_results(tmp_path
     summary = json.loads((out / "summary.json").read_text(encoding="utf-8"))
     assert summary["audio_modes"] == {"off": "off", "on": "on"}
     assert summary["variant_options"] == {
-        "off": {}, "on": {"RECOMP_AC97_READY": "1"},
+        "off": {"RECOMP_AUDIO": "0"}, "on": {"RECOMP_AUDIO": "1"},
     }
     assert summary["options"]["capture_audio"] is True
     assert summary["runs_per_variant"] == 3 and summary["generation"] == "generation-A"
@@ -245,7 +247,7 @@ def fake_successful_run(monkeypatch, tmp_path, *, forced, capture_audio):
     })
     return bench.run_once(
         tmp_path / "run", "fixture", "stationary",
-        {"RECOMP_AC97_READY": "1"} if capture_audio else {},
+        {"RECOMP_AUDIO": "1"} if capture_audio else {},
         1, 900, False, False, "Release", capture_audio=capture_audio,
     )
 
@@ -332,7 +334,8 @@ def test_manual_run_ignores_legacy_progress_until_operator_ack(tmp_path, monkeyp
     assert result["marks"]["world"] == 150
     assert result["readiness"]["csv_drain_seconds"] == 1
     assert "RECOMP_PAD_SCRIPT" not in observed_env
-    assert not bench_control.audio_enabled(observed_env)
+    assert bench_control.audio_enabled(observed_env)
+    assert "RECOMP_AC97_READY" not in observed_env
 
 
 def test_manual_timeout_is_persisted_as_failed_run(tmp_path, monkeypatch):

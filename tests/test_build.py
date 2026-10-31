@@ -457,7 +457,7 @@ def test_run_isolates_each_runtime_working_directory(tmp_path, monkeypatch):
     monkeypatch.setenv("RECOMP_VBLANK", "0")
     for name in (
         "RECOMP_USB", "RECOMP_PB_WALK", "RECOMP_PGRAPH_IRQ", "RECOMP_KEYBOARD",
-        "RECOMP_AC97_READY",
+        "RECOMP_AC97_READY", "RECOMP_AUDIO",
     ):
         monkeypatch.delenv(name, raising=False)
 
@@ -477,6 +477,7 @@ def test_run_isolates_each_runtime_working_directory(tmp_path, monkeypatch):
     assert build.run_game(experimental_tutorial=True, experimental_audio=True) == 0
     monkeypatch.setenv("RECOMP_AC97_READY", "existing")
     assert build.run_game(experimental_tutorial=True) == 0
+    assert build.run_game(no_audio=True) == 0
     save_root = tmp_path / "isolated-\u65e5"
     save_root.mkdir()
     monkeypatch.setenv("BRUTEFORCE_SAVE_ROOT", "previous partition root")
@@ -505,13 +506,14 @@ def test_run_isolates_each_runtime_working_directory(tmp_path, monkeypatch):
     assert calls[2][2]["RECOMP_VBLANK"] == "1"
     assert calls[2][2]["RECOMP_KEYBOARD"] == "1"
     assert calls[3][2]["RECOMP_KEYBOARD"] == "0"
-    assert all("RECOMP_AC97_READY" not in calls[i][2] for i in range(4))
-    assert calls[4][2]["RECOMP_AC97_READY"] == "1"
+    assert all(calls[i][2]["RECOMP_AUDIO"] == "1" for i in range(6))
+    assert calls[6][2]["RECOMP_AUDIO"] == "0"
+    assert all("RECOMP_AC97_READY" not in calls[i][2] for i in range(5))
     assert calls[5][2]["RECOMP_AC97_READY"] == "existing"
-    assert calls[6][2]["BRUTEFORCE_SAVE_ROOT"] == "previous partition root"
-    assert calls[6][2]["RECOMP_SAVE_DIR"] == "previous user-data root"
-    assert calls[7][2]["BRUTEFORCE_SAVE_ROOT"] == str(save_root.resolve())
-    assert "RECOMP_SAVE_DIR" not in calls[7][2]
+    assert calls[7][2]["BRUTEFORCE_SAVE_ROOT"] == "previous partition root"
+    assert calls[7][2]["RECOMP_SAVE_DIR"] == "previous user-data root"
+    assert calls[8][2]["BRUTEFORCE_SAVE_ROOT"] == str(save_root.resolve())
+    assert "RECOMP_SAVE_DIR" not in calls[8][2]
     assert build.os.environ["RECOMP_D3D_PRESENT"] == "0"
     assert "RECOMP_USB" not in build.os.environ
     assert build.os.environ["RECOMP_AC97_READY"] == "existing"
@@ -519,9 +521,9 @@ def test_run_isolates_each_runtime_working_directory(tmp_path, monkeypatch):
     assert build.os.environ["RECOMP_SAVE_DIR"] == "previous user-data root"
 
 
-def test_experimental_audio_requires_tutorial():
-    with pytest.raises(build.BuildError, match="requires --experimental-tutorial"):
-        build.run_game(experimental_audio=True)
+def test_audio_compatibility_flag_conflicts_with_explicit_off():
+    with pytest.raises(build.BuildError, match="cannot be combined"):
+        build.run_game(experimental_audio=True, no_audio=True)
 
 
 @pytest.mark.parametrize("kind", ["missing", "file", "nonempty"])
@@ -542,16 +544,18 @@ def test_run_cli_passes_graphics_tutorial_audio_and_isolation_options(monkeypatc
     calls = []
     monkeypatch.setattr(
         build, "run_game",
-        lambda config, graphics, tutorial, audio, saves:
-            calls.append((config, graphics, tutorial, audio, saves)) or 0,
+        lambda config, graphics, tutorial, audio, saves, no_audio:
+            calls.append((config, graphics, tutorial, audio, saves, no_audio)) or 0,
     )
     assert build.main(["run", "--config", "Debug", "--graphics"]) == 0
     assert build.main(["run", "--experimental-tutorial"]) == 0
     assert build.main(["run", "--experimental-tutorial", "--experimental-audio"]) == 0
+    assert build.main(["run", "--no-audio"]) == 0
     assert build.main(["run", "--experimental-tutorial", "--isolated-saves", "fresh"]) == 0
     assert calls == [
-        ("Debug", True, False, False, None),
-        ("Release", False, True, False, None),
-        ("Release", False, True, True, None),
-        ("Release", False, True, False, Path("fresh")),
+        ("Debug", True, False, False, None, False),
+        ("Release", False, True, False, None, False),
+        ("Release", False, True, True, None, False),
+        ("Release", False, False, False, None, True),
+        ("Release", False, True, False, Path("fresh"), False),
     ]

@@ -4,7 +4,7 @@ The rendering architecture is in [docs/RENDERING.md](docs/RENDERING.md),
 the performance plan is in [docs/PERFPLAN.md](docs/PERFPLAN.md), measured
 results are in [docs/FINDINGS.md](docs/FINDINGS.md), and framework work is
 tracked in [docs/UPSTREAM.md](docs/UPSTREAM.md). State as of 2026-10-30:
-current framework tree `9bec55267a19bf1fa54320274cb073d785a8d411`. The
+current framework tree `0d2dbaf3daa7daaccdd9771068ae6c89f1639c8f`. The
 documented retail generation `20261029-175500-dfadbdd9` was tested against
 the preceding tree `a4489cd69600a1489edea98ac19cf20db242b6d2`; patches 0025
 and 0026 have not been retested on that generation. Generation
@@ -150,6 +150,14 @@ been validated in reviewed retail gameplay.
   pinned frames and PVIDEO. It still performs per-flip guest readback and
   does not limit all GPU work in flight. WARP and hardware synthetic tests
   cover the alias, pixel transfer, queue ordering and fallback.
+- The reported blank 4K Microsoft, Digital Anvil and intro movies were
+  CPU-decoded Bink frames, not PVIDEO. D3D11 readback had overwritten those
+  guest writes with a GPU-only clear. The backend now shadows guest colour
+  surfaces, mirrors full clears and uploads CPU changes before a GPU overlay
+  or flip. Scale-1 and 4.5x captures show movie content; the 4.5x runs
+  reported zero guest/GPU conflicts while submitting scaled shared frames.
+  An independent unobscured swap-chain capture and matched gameplay remain
+  open.
 - In the latest alternating comparison, three baseline runs averaged 44.94
   stationary rendered fps and three runs with both new options averaged
   40.18, with the latter ranging from 23.56 to 57.69. Movement whole-frame
@@ -189,10 +197,11 @@ host output, so it can proceed alongside the renderer work. Upscaling should
 follow the artifact inventory (A1), because a larger render target makes any
 existing state-tracking error harder to separate from a scaling error.
 
-The user selected xemu as the rendering reference, wants mipmapping at 4K,
-and wants audio default-on once its quality and listening gates are met.
-The xemu DSP is the planned direction, but its project-licence decision is
-deferred (see "Decisions" at the end).
+The user selected xemu as the rendering reference and wants mipmapping at 4K.
+Audio is default-on. The xemu DSP path was implemented, but the user's
+crackly, mono-sounding dialogue/gunfire report failed its listening gate;
+Simple stereo fold-down is now the recommended default. The licence decision
+is recorded under "Decisions" at the end.
 
 Blood Wake is the main source, as it was for the renderer. It pins the same
 xboxrecomp base, and its checkout is in `.deps/bloodwake-recomp` at
@@ -296,7 +305,7 @@ a cause or an accepted reason; no recurring black interval or missing
 character appears across a movement campaign; and the bright/dark behaviour
 is explained and settled against the reference. Keep G4 open until then.
 
-## B. Internal upscaling for 4K (implemented; retail validation pending)
+## B. Internal upscaling for 4K (opening movies validated; gameplay pending)
 
 **Design source (observed in `.deps/bloodwake-recomp`).** Blood Wake's
 Remastered mode chooses one render scale `S`, in physical pixels per guest
@@ -319,10 +328,11 @@ produce exact/box/Catmull-Rom shared output. Patch 0028 lets the existing
 keyed-mutex presenter accept source dimensions independent of the guest
 framebuffer while preserving flip IDs, pinned/PVIDEO fallback and capture
 refusal. Scale 1 remains the launcher default. The main executable and
-fixtures build, the complete D3D11 matrix passed 188 cases with hardware
-coverage enabled, and launcher and shared-presenter fixtures passed. No
-retail gameplay or 4K-display campaign has been run, so G4/G5 and the
-reported default 6 fps remain open.
+fixtures build, the complete D3D11 matrix passed 190 cases with hardware
+coverage enabled, and launcher and shared-presenter fixtures passed. Bounded
+scale-1 and 4.5x runs retained CPU-decoded opening movies, including the intro
+montage. No matched retail gameplay or native-4K-display campaign has been
+run, so G4/G5 and the reported default 6 fps remain open.
 
 1. **Implemented: add the scale to the D3D11 back end.** Adapt the generic parts only:
    the single place that decides the scale, the surface sizing, the epoch
@@ -337,6 +347,8 @@ reported default 6 fps remain open.
    GPU first and read that. Separately, present the full-size image directly.
    This extends the existing shared
    presentation path, which still performs the per-flip guest readback.
+   CPU-written colour surfaces are detected against a logical shadow and
+   uploaded before that readback/presentation boundary.
 3. **Current choice: one global Blood Wake-style scale; validate it per
    surface.** The traced frame renders
    into 640×480, 320×240 and 160×120 colour surfaces that are then sampled,
@@ -369,15 +381,17 @@ reported default 6 fps remain open.
    validated, allocation errors are explicit, and native window changes use
    the scale epoch without a restart. A VRAM budget and device recovery
    remain open in D; fixed launcher preset changes require a restart.
-8. **WARP implemented; hardware and retail pending.** Synthetic WARP and hardware fixtures: scale 1 matches the
+8. **Synthetic hardware implemented; retail gameplay pending.** Synthetic WARP and hardware fixtures: scale 1 matches the
    current output exactly; scale 2 downsampled matches scale 1 within a
    stated tolerance on a fixture with draws, partial clears, window clips
    and render-to-texture; readback is at guest size; aliases and visibility
    counts behave as designed. The CPU rasterizer stays at scale 1 as the
    reference, so G4 comparisons are made at scale 1. WARP now covers scale
    two with draws, render-to-texture, partial clears, window clips,
-   guest-sized readback and normalized sync/async visibility. Run the same
-   scaled cases on hardware and add a controlled retail campaign.
+   guest-sized readback, CPU-written movie frames and normalized sync/async
+   visibility. The complete matrix passes 190 hardware cases and 123 WARP
+   cases with 67 hardware skips. Bounded 4.5x hardware captures show all
+   three opening movie stages. Add a controlled retail gameplay campaign.
 9. **Recast G5.** "G1 holds at 2× internal resolution" becomes a measurement
    at 1080p and 4K presets, A/B/A against scale 1, reporting distinct world
    frames and the GPU, driver and scale used. Record results in FINDINGS.
@@ -404,99 +418,78 @@ reported default 6 fps remain open.
 matching the scale-1 picture on average once downsampled, no scale-specific
 artifacts that the fixtures do not cover, and G5 is recorded.
 
-## C. Audio
+## C. Resolve game-audio quality
 
-**Current state (observations from FINDINGS and README).** The toolkit's
-standalone APU and XAudio2 output are opt-in (`--experimental-audio`,
-`RECOMP_AC97_READY`) with the GP/EP DSP stubbed. Isolated runs produced
-non-silent 48 kHz stereo PCM through the title, menus and cinematics. No one
-has listened to it, no capture has reached the tutorial, and enabling audio
-changed menu-script timing. Whether the sound is correct, complete or free of
-gaps is unknown. A separate short, unclassified boot validated the benchmark's
-console-control shutdown and WAV-finalization helpers with the game; its
-2.01-second WAV was silent and host coverage was inconclusive.
+**Implemented and verified**
 
-**Blood Wake's audio work** (observed in its tree) is a stack of carried
-toolkit patches plus a DSP:
+- Audio is default-on; `--no-audio` and `RECOMP_AUDIO=0` are explicit off
+  paths. The launcher exposes On/Off and Accurate/Simple choices.
+- The default Simple path preserves the stereo all-mixbin fold-down. Accurate
+  remains an experimental option that runs the title's GP and EP programs
+  through the vendored xemu v0.8.139 DSP56300 C interpreter.
+- Physical-translation intent distinguishes aliased heap and contiguous-window
+  pages. The dedicated DSP worker is signaled and joined before interpreters,
+  shadows, queues, and caches are released.
+- Firmware-return and shutdown routes run full APU cleanup before
+  `ExitProcess`; bounded WAVs now receive an exact RIFF header.
+- Upstream PR #264 commit
+  `eb7b1f5833205a24fcc0eda6eb4ed2df4f2bc2e3` is selected for the observed
+  2,048-sample sequencer restart hold. PRs #261/#286 and #266/#270 remain
+  unselected because their distinct failure modes were not observed.
+- Six repeated native init/shutdown cycles passed without leaked process
+  handles. Accurate and fold-down retail exit captures finalized correctly.
+- The host policy uses eight 512-sample buffers, a three-quarter refill
+  threshold, and a high-priority APU frame worker. The last long
+  then-default Accurate probe ran 164.47 seconds from startup through
+  tutorial/gameplay; it, an earlier 115-second transition, and a 260-second
+  tutorial-world run reported zero underruns, starvation events, and refused
+  submissions.
+- A private 155-second accurate capture covered startup, cinematics/menu,
+  tutorial loading, and scripted gameplay. Every marked interval was
+  non-silent, no samples clipped, and no 32-frame, 256-frame, or near-2,048
+  paired-hole candidates were found.
+- The 164.47-second Accurate capture repeated those interval checks, reached
+  the 421-draw tutorial-world signature, accepted fixed movement inputs, and
+  remained non-silent and hole-free in every marked phase.
+- The user reports crackly, mono-sounding dialogue and gunfire in Accurate
+  mode while music sounds acceptable. Matched opening intervals have
+  left/right correlation near 0.88-0.89 under Accurate versus 0.16-0.21 under
+  Simple, without corresponding host underruns or 32/256-sample boundary
+  discontinuities. This fails the Accurate listening gate and motivates the
+  default change; it does not identify the faulty DSP/voice operation.
+- The final Release executable was relinked after the default change. A
+  five-second retail boot with `RECOMP_APU_DSP` unset selected stereo
+  fold-down; the six-cycle DSP lifecycle fixture and the 639-test integrated
+  hardware-enabled selection passed.
+- Licensing is recorded in `LICENSE`, `THIRD_PARTY_NOTICES.md`,
+  `src/xemu_dsp/NOTICE.md`, and `LICENSES/`. Project glue derives from Blood
+  Wake's MIT code; the vendored interpreter is GPL-2.0-or-later except its
+  LGPL-2.0-or-later DMA files. A linked executable is distributed, if at all,
+  under GPL-2.0-or-later as a combined work.
 
-| Item | What it addressed |
-| --- | --- |
-| TK-14, `apu_core.c` | The sequencer sample-limit tick (ISTS bit 3) fired every 2048 samples; DirectSound answered each with a hardware restart, leaving silent gaps about 20 times a second. |
-| TK-15, `apu_core.c` | Resolve the image before the window when a physical address names both. |
-| TK-16, `apu_dsp.c` | The stub DSP's mixdown: every mixbin at unity, even bins left and odd bins right. |
-| TK-17, `kernel_memory.c`, `apu_vp.c` | One physical number could name a heap page and a window page; the APU read the heap copy of the music stream's buffer and produced noise. |
-| `apu_xaudio2.c` | A 5.1 source voice when the device has six or more channels. |
-| D-012, `bw_apu_xdsp.c` plus vendored `xemu_dsp` | The GP and EP DSPs on xemu's DSP56300 interpreter, giving the console's echo and 3D-sound programs; it falls back to the stub fold-down if a program cannot keep real time. |
+**Remaining validation**
 
-Whether Brute Force triggers each of these is **unverified**. The symptoms
-are specific, so test for them.
+1. Confirm the Simple default through title/menu, campaign cinematics,
+   loading, tutorial dialogue, music, movement, weapon/effect sounds, and
+   ambience.
+2. If Accurate is pursued further, isolate whether the narrow/crackly output
+   begins in voice resampling/HRTF, GP mixbins, EP processing or FIFO routing;
+   compare matched captures rather than host counters alone.
+3. Record distortion, missing or duplicated cues, dialogue/music balance,
+   stereo reversal, spatial/reverb behavior, and cutscene synchronization.
+4. Repeat host-continuity probes only if the listening route reaches a
+   materially different audio-heavy scene or exposes a symptom.
+5. Prepare framework patches 0030-0034 for upstream review only after deciding
+   whether their generic pieces should be split further.
 
-**Upstream overlap (checked 2026-10-30 from PR titles only; contents not
-compared).** Open PRs on `sp00nznet/xboxrecomp` appear to cover several of
-the same problems: #264 (hold the frame while the SSL routine restarts the
-sequencer), #266, #270 (no silent frames while the title has the SE off),
-#261 and #286 (heap pages named by their RAM mirror alias). Per AGENTS,
-prefer selecting or improving these to a competing patch, and check whether
-the merged #193 and #195 (device-paced output, pitch resampling, WAV tap) are
-already in the pinned base. Record the overlap in UPSTREAM.
+*Done when:* a human listener signs off the Simple scene list above, the
+Accurate defect is either fixed or remains explicitly experimental, and at
+least one additional audio-heavy gameplay scene stays free of host underruns
+if it differs materially from the validated tutorial route.
 
-1. **Establish a listening baseline.** Capture a WAV through the menus and
-   the tutorial with `RECOMP_AUDIO_WAV` and isolated roots. The streaming
-   `tools/audio_analysis.py` checker reports silent 2048-sample periods,
-   broadband indicators and host underrun evidence for marked intervals;
-   apply it to reviewed real scenes. A listener still has to judge correctness;
-   the check can only identify indicators. Keep captures local.
-2. **Reach the tutorial with audio on, and understand the timing change.**
-   Find why audio shifts menu-script timing and make the audio path
-   independent of it, so the benchmark and the scripts behave the same with
-   audio on or off.
-3. **Fix what the baseline shows.** Evaluate #264/#270/#266 for the gap
-   problem and #261/#286 for the noise problem against the WAV checks. Where
-   no upstream PR covers it, add a numbered patch under `patches/xboxrecomp/`
-   adapted from Blood Wake's carried version with credit, an environment
-   switch off by default unless it is a plain bug fix, `RECOMP_*` names, and
-   a synthetic fixture.
-4. **Adopt the xemu DSP wholesale (blocked on licence).** Before vendoring
-   files or distributing a combined build, obtain the user's deferred
-   project-licence decision and review component provenance and terms.
-   After that, port Blood Wake's
-   `src/xemu_dsp` (xemu v0.8.139, GPL-2.0-or-later; `dsp_dma.*` is
-   LGPL-2.0-or-later) and its glue `bw_apu_xdsp.c`, with the shims and no
-   changes to xemu's files. Keep its fallback to the stub fold-down when a
-   program cannot keep real time, and an environment switch that selects
-   the stub for comparison and slow machines. Start after C1 shows what the
-   stub gets wrong, so the DSP's benefit is measured rather than assumed,
-   and find which DirectSound effects the title loads (reverb, 3D
-   positioning, HRTF, echo). Measure its per-frame CPU cost against the
-   frame-rate baseline; Blood Wake advises its simple mode on slow PCs.
-   Licensing work for the same change: add the files and their notices to
-   `THIRD_PARTY_NOTICES.md` and the `LICENSES` directory; choose and add a
-   project licence compatible with GPL-2.0-or-later for the combined
-   program (the project has no licence file yet); and say in the README
-   which terms a distributed build is under. Game data and the disc stay
-   out of the repository whatever the licence. This is an engineering note,
-   not legal advice; check it before the first public release.
-5. **Speaker configuration.** The kernel answers the title's audio-flags
-   query with stereo. Keep it. Optional 5.1 output is a later item; confirm
-   the title mixes for surround first.
-6. **Make audio default-on (decided).** Audio affects timing and
-   synchronisation (it already shifts menu-script timing), so it should be
-   part of every run, and the benchmark must be measured with it on. Once
-   the baseline is clean (the C1 checks pass and the user's listening pass
-   is acceptable), enable it by default in the launcher and on the command
-   line, drop the "experimental" label in README, and keep an explicit off
-   switch for diagnostics. Until then it stays opt-in. Re-measure the
-   frame-rate baseline with audio on, and make `tools/bench.py` default to
-   it.
-7. **Synchronisation.** Check audio under frame-rate dips and during loading
-   (underruns, drift, the intermittent loading hang in D). Never gain
-   frame rate by skipping a semaphore or flush to feed the audio.
-
-*Done when:* a user-run listening pass through menus, cinematics and the
-tutorial reports no gaps, noise or missing effects; audio is on by
-default; the WAV checks pass; the
-frame-rate baseline holds with audio on; and README, FINDINGS and UPSTREAM
-are updated.
+Automated captures establish valid transport and bounded signal properties;
+they cannot establish that dialogue, effects, music, or reverb sound correct.
+Stereo remains the acceptance target.
 
 ## D. Remaining pipeline and compatibility work
 
@@ -553,13 +546,15 @@ mainly where they gate 4K and audio.
 ## Decisions (settled 2026-10-30)
 
 1. **Rendering reference:** xemu, run on the same disc at matched states (A2).
-2. **DSP direction:** the xemu DSP is planned, but the exact project licence
-   is deferred. Do not vendor or distribute the combined work until the
-   user decides and provenance and terms are reviewed (C4).
+2. **DSP direction:** the xemu v0.8.139 DSP is implemented. Project-owned
+   code is MIT; the linked combined executable is GPL-2.0-or-later, with the
+   component exceptions and notices recorded in the repository (C).
 3. **Mipmaps:** wanted at 4K; the earlier deferral is lifted for scaled
    modes (B10).
-4. **Audio:** keep stereo, then enable audio by default once its quality,
-   performance and user-listening gates are met (C6).
+4. **Audio:** keep stereo and audio default-on. Simple is the recommended
+   default after Accurate failed the dialogue/effects listening gate; retain
+   explicit Off and experimental Accurate modes. Simple listening remains a
+   quality gate (C).
 5. **4K target:** use the RTX 5070 for 3840×2160 output and captures, with
    a 2880×2160 4:3 picture (4.5× 640×480). The active display is 3440×1440,
    so this does not establish native 4K-display validation (B9).
@@ -567,17 +562,16 @@ mainly where they gate 4K and audio.
    explicitly; fixed preset changes require restarting, while Native follows
    output-size changes through the scale epoch (B7).
 
-Still open: the exact DSP project licence and access to a native 4K display.
-Optional 5.1 output is deferred (C5).
+Still open: access to a native 4K display. Optional 5.1 output is deferred.
 
 ## Order
 
-1. A1 (inventory) and C1–C2 (audio baseline) in parallel: neither changes
-   shared code paths.
-2. A2–A4 as the reference and the gamma-ramp question allow; then B1–B2
-   behind a switch with scale 1 unchanged.
-3. B3–B10 and C3–C4 with their fixtures, then one A/B/A campaign for each.
-4. C5–C7 and the launcher and README updates last.
+1. Complete A1, then A2-A4 as the reference and gamma-ramp question allow.
+2. Continue B1-B10 behind switches with scale 1 unchanged.
+3. Run C's human listening pass against the stable scene from A; repeat
+   automated audio probes only for a new symptom or materially different
+   audio-heavy scene.
+4. Continue D's compatibility work without weakening audio or GPU ordering.
 
 Update FINDINGS, UPSTREAM, PERFPLAN, ARCHITECTURE and the README in the same
 change as each milestone, as AGENTS requires.

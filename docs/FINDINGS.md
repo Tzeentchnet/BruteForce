@@ -414,28 +414,117 @@ second and 149 distinct unhandled GPU methods. These observations do not
 establish overall rendering correctness; investigate unhandled methods rather
 than treating draw counts as correctness.
 
-The separately opt-in standalone APU initialized XAudio2 in isolated runs and
-produced non-silent 48 kHz stereo PCM during the title and menus. Its GP/EP DSP
-is logged as stubbed. These captures were not evaluated by a listener and did
-not reach the tutorial, so they do not establish audible, correct music,
-effects, or gameplay audio. Menu-script timing changed between the silent and
-audio-enabled runs; a timed selection can navigate to a different menu. A
-subsequent run isolated both partition and user-data roots and captured 160
-seconds of non-silent PCM through campaign cinematics, but its watchdog expired
-before the tutorial.
+### Audio integration and listening result
 
-On 2026-10-30, a separate short audio-on boot used Release generation
-`20261030-142754-81f8c6e6`, an isolated save root, no input and a verified
-minimized framebuffer window. The benchmark's shutdown helper sent CTRL_BREAK
-without forced termination, and its WAV validator accepted the runtime's
-close marker and exact 48 kHz stereo PCM length: 96,512 frames, about
-2.01 seconds. Guest threads were not cleanly joined. The entire WAV was zero,
-but the interval was not classified as active or intentional silence, so this
-is not an audio-quality verdict. XAudio2 initialized and the one periodic host
-snapshot reported no starvation or refusal; it preceded the end of the WAV,
-so host coverage is inconclusive. The analyzer ran without marked intervals.
-This tests the shared helpers, not an end-to-end manual benchmark, a tutorial
-capture or a listening pass. The WAV and logs remain local.
+Audio is default-on. `RECOMP_AUDIO=0` and `--no-audio` are the explicit off
+paths. The default `RECOMP_APU_DSP=fold` path uses the framework's stereo
+all-mixbin fallback. `xemu` explicitly selects the experimental title GP/EP
+path on the vendored xemu v0.8.139 DSP56300 C interpreter. Output remains
+48 kHz stereo.
+
+The framework-side integration is reproducible as patches 0030-0034. Patch
+0030 records whether an APU physical translation named RAM or the contiguous
+window and adds optional external DSP hooks. Patch 0031 finalizes an external
+DSP after the APU frame thread has joined. Patch 0032 lets independent cleanup
+hooks run on window, firmware-return, and shutdown exits. Patch 0033 raises the
+APU frame worker to high priority on Windows. Patch 0034 raises the queue
+refill threshold from one half to three quarters while retaining the same
+maximum. Upstream PR #264, at commit
+`eb7b1f5833205a24fcc0eda6eb4ed2df4f2bc2e3`, supplies the selected 2,048-sample
+SSL restart hold. PRs #266/#270 and #261/#286 were not adopted without
+evidence that their additional behavior is needed.
+
+The DSP wrapper mirrors the GP/EP windows against shadow copies, resolves SGE
+pages using recorded physical-translation intent, and writes EP FIFO 0 to the
+stereo monitor block. A joinable worker pipelines the DSP stage beside the VP
+frame thread. Teardown signals and joins that worker, frees both interpreters
+and all shadows, and resets static queues and counters; a native fixture
+completed six init/shutdown cycles without leaking process handles.
+
+`HalReturnToFirmware` previously called `ExitProcess`, bypassing `atexit` and
+leaving a stale RIFF header. The generic exit hook now performs full APU
+shutdown first. A retail firmware-return capture closed at 1,618,944 frames
+(33.73 seconds), and its RIFF size exactly matched the file. The simple
+fold-down comparison also finalized exactly.
+
+With the original four 512-sample XAudio2 buffers, an accurate-DSP menu probe
+reported three underruns while the fold-down comparison reported none. Six
+buffers removed those events in a short matched route, but one longer,
+logging-heavy gameplay capture still saw one dry spell during a 44.9 ms host
+pause. Eight buffers initially provided a 42.7 ms low-water mark and an
+85.3 ms maximum queue. A fresh rebuilt-Accurate campaign then reproduced two
+dry detections around a heavy ten-second diagnostic burst; a traced run
+observed the queue fall from its 2,048-sample low-water mark to 1,024 samples
+during a 33.6 ms submit gap. Periodic DSP cost/wait reports are now opt-in via
+`RECOMP_APU_DSP_TRACE=1`, and patch 0034 raises the refill threshold to 3,072
+samples (64.0 ms) without changing the 4,096-sample maximum.
+
+The final rebuilt Accurate default reported `3072..4096` pacing. A 74.51-second
+menu-transition probe, with host tracing and WAV capture active, reported
+zero underruns, starvation events, or refused submissions; its 3,576,320
+stereo frames had an exact RIFF length. Whole-capture analysis found nonzero
+content in both channels, zero clipped samples, and no 32-frame, 256-frame, or
+near-2,048 paired-hole candidates. Its last periodic host snapshot precedes
+the watchdog close by about 0.23 seconds, so the analyzer conservatively
+labels periodic coverage inconclusive even though no event line was logged.
+The earlier 115-second transition probe and a separate 260-second
+tutorial-world stress run with the prioritized worker likewise reported zero
+for all three counters.
+
+A subsequent capture of that then-default Accurate path extended the evidence
+through 164.47 seconds and 7,894,528 stereo frames. It reached an interval
+with exactly 421 draws per flip, matching the observed tutorial-world
+signature, then accepted the fixed A and stick-input sequence through 158
+seconds. A 38.5 ms submit gap reduced the queue to 1,536 samples without
+draining it. All 163 periodic host snapshots and the complete event scan
+reported zero starvation events, refused submissions, and underruns; the RIFF
+length again matched the file exactly. Startup, cinematics/menu, tutorial, and
+scripted-gameplay intervals were each non-silent in both channels, with zero
+clipped samples and no 32-frame, 256-frame, or near-2,048 paired-hole
+candidates. The analyzer labels host coverage conservatively because its last
+periodic snapshot precedes watchdog shutdown, not because it found a host
+event.
+
+A private 155-second accurate-DSP WAV reached startup, campaign cinematics,
+tutorial assets, and scripted tutorial input. Marked-interval analysis found
+nonzero stereo content, no clipped samples, and no bounded 32- or 256-frame
+zero-hole candidates in any interval. The capture remains private and one
+earlier six-buffer run contained the dry event described above; it is evidence
+for signal shape and category coverage, not the final queue setting.
+
+The user subsequently reported that dialogue and gunfire in Accurate mode
+sound crackly and mono while music sounds acceptable. This is negative human
+listening evidence, not a diagnosis of the individual DSP instruction or
+voice responsible. The saved launcher settings used D3D11, 4.5x rendering and
+`RECOMP_APU_DSP=xemu`, so the report applies to the tested accurate path.
+
+Objective follow-up did not find a host transport failure. The 164.47-second
+accurate capture is valid 48 kHz, 16-bit stereo; left/right RMS is
+approximately 1,522/1,554, whole-capture channel correlation is approximately
+0.72, about 3.6% of frames have identical channels, and no large discontinuity
+was found. Matched opening intervals nevertheless show much narrower Accurate
+output than Simple: correlation is approximately 0.878 versus 0.156 at
+5-10 seconds and 0.892 versus 0.210 at 10-15 seconds. Neither path shows
+elevated discontinuities at 32- or 256-sample boundaries. The emulated EEPROM
+advertises stereo (`XC_AUDIO=0`).
+
+The observation is therefore healthy host delivery with an audible Accurate
+mix defect; the specific GP/EP, voice-resampling, HRTF or routing cause remains
+a hypothesis. Simple is now the default and recommended mode. Accurate remains
+available as an explicitly labelled experimental option. Launcher settings
+versions 1-3 migrate the old `xemu` default to `fold`; a version-4 user choice
+of Accurate is retained. The final Release executable was relinked after this
+change. A five-second bounded retail boot with `RECOMP_APU_DSP` absent logged
+`RECOMP_APU_DSP=unset` and selected stereo fold-down. Six repeated Accurate
+DSP init/shutdown cycles passed, the focused audio-analysis and launcher
+selection passed 105 tests, and the integrated hardware-enabled selection
+passed 639 tests.
+
+Default-on audio changed the old timed route: `down` selected `DEMOS` on the
+title screen. The current diagnostic uses A presses at 20, 23, and 28 seconds
+from the first USB report and reached campaign/tutorial loading. The
+benchmark's previous 700-draw world threshold also exceeded this route's
+observed 421 draws per frame; its evidence-based threshold is now 400.
 
 ## Window-clip investigation
 
@@ -1488,6 +1577,33 @@ also established that raw D3D11 occlusion counts grow with physical area;
 sync and async reports now normalize each query by its physical/logical area
 ratio and retain the guest counts.
 
+The reported blank 4K opening movies exposed the opposite authority boundary.
+Retail traces opened `MGS_Logo_Final.bik`, `DA_Logo_Final1.bik` and
+`Intro_Montage.bik` while the D3D11 statistics reported hundreds of clears but
+zero draws. Temporary PVIDEO-bank instrumentation recorded no submitted
+overlay frame. These are observations that the linked Bink path writes the
+guest colour surface directly; the earlier PVIDEO colour-key explanation was
+not supported.
+
+Before the fix, the scaled backend published its GPU-only cleared surface and
+then read it back over the CPU-decoded pixels. The D3D11 backend now retains a
+logical guest shadow per colour surface, mirrors full GPU colour clears into
+guest memory, and detects subsequent CPU changes. It uploads a changed logical
+image before the first GPU overlay draw or at flip, scaling it into the
+physical render target before shared presentation. If a later guest write is
+detected while unresolved GPU colour work exists, the backend reports a
+conflict and preserves the GPU frame rather than silently overwriting it.
+
+A 4.5x hardware run captured a visible Microsoft Game Studios frame after
+386 guest uploads in 392 flips, with zero conflicts and 156 accepted shared
+submissions. Longer isolated runs captured a visible Digital Anvil logo and a
+frame from `Intro_Montage.bik`; every ten-second report continued to show zero
+conflicts while the Bink sequences contained zero GPU draws. A separate
+scale-1 run retained visible movie output. These are guest-window captures,
+not an independent unobscured swap-chain capture, but the changed logical
+frame is uploaded before the same physical texture is submitted to the shared
+presenter.
+
 The launcher offers Native, 2160p, 1440p, 1080p, 720p and 480p, with 480p
 still the default. Scaled modes enable shared presentation automatically.
 The existing experimental depth and packed-stencil aliases are rejected when
@@ -1496,20 +1612,21 @@ semantics are not defined at physical resolution. Scale 1 keeps the prior
 resource and readback paths.
 
 The Release fixtures and main executable built successfully. The complete
-D3D11 matrix passed 188 tests with hardware coverage enabled; the WARP-only
-selection passes 121 and skips 67 hardware cases. It includes
+D3D11 matrix passed 190 tests with hardware coverage enabled; the WARP-only
+selection passes 123 and skips 67 hardware cases. It includes
 scale-two render-to-texture, guest-sized readback, partial clears, window
 clips, resource migration, synchronous/asynchronous visibility, native-mode
-fallback and explicit output, incompatible-option rejection, and the HUD-safe
-near-plane split. The
+fallback and explicit output, incompatible-option rejection, the HUD-safe
+near-plane split, and CPU-written frames with and without a later GPU overlay
+at scale 1 and scale 2. The
 presentation fixture and shared-presenter WARP case passed; its hardware case
-also passed, and all 17 launcher tests passed. The final project-wide
-selection passed 629 tests with eight unrelated cases skipped. The verified
-framework tree is
+also passed, and all 17 launcher tests passed. After relinking the final
+executable, the integrated hardware-enabled selection passed all 639 tests.
+The verified framework tree is
 `9bec55267a19bf1fa54320274cb073d785a8d411`.
 
-These synthetic results do not establish retail image equivalence,
-performance, VRAM headroom, mip/LOD behavior, hardware scaled rendering or
+These synthetic results and bounded opening captures do not establish retail
+gameplay image equivalence, performance, VRAM headroom, mip/LOD behavior or
 output on a native 4K display. No matched gameplay campaign was run. In
 particular, this milestone does not explain or fix the user's reported
 roughly 6 fps with the default 480p launcher settings.

@@ -61,13 +61,46 @@ optional. This describes the present recompilation environment, not the
 original Xbox's complete engine design. See [FINDINGS.md](./FINDINGS.md)
 for observed guest entry points and limitations.
 
+Audio is enabled by default unless `--no-audio` or `RECOMP_AUDIO=0` is
+selected. The host initializes xboxrecomp's MCPX APU, installs a full-shutdown
+exit hook, and exposes 48 kHz stereo PCM through XAudio2. The framework's VP
+frame processing remains responsible for voices and mixbins. In the default
+`RECOMP_APU_DSP=fold` mode, the framework uses its stereo all-mixbin
+fold-down. The experimental `RECOMP_APU_DSP=xemu` mode instead copies each
+frame through GP and EP windows backed by xemu v0.8.139 DSP56300
+interpreters; EP FIFO 0 feeds the stereo monitor.
+
+The accurate stage uses a dedicated worker and bounded ring. Persistent
+window shadows preserve DSP memory that is outside each changed span. APU
+physical lookups carry a RAM-versus-contiguous-window intent tag so aliased
+scratch and FIFO pages resolve to the allocation the guest named. Repeated
+real-time overload can switch explicitly to fold-down unless
+`RECOMP_APU_DSP_FALLBACK=0` is set; allocation failures use the same reported
+fallback rather than silently returning success.
+
+Shutdown order is part of the architecture: firmware-return and normal window
+exits run the additional project hook; the framework stops its frame worker;
+the external finalizer wakes and joins the DSP worker; interpreter, shadows,
+queues, and cached translations are released; then the WAV monitor and
+XAudio2 close. This ordering prevents worker use-after-free and lets bounded
+diagnostic WAVs receive a correct RIFF header even though Windows
+`ExitProcess` does not run C `atexit` handlers. The default eight
+512-sample host buffers and three-quarter refill threshold are a project
+policy, not a guest-visible APU change. They retain an 85.3 ms maximum queue
+while refilling at 64.0 ms.
+
 The optional [launcher](../tools/launcher.py) stores host-side display and
 renderer choices separately from game data, then uses the existing validated
 experimental-tutorial launch path. Presentation scaling does not change guest
 logical render-target dimensions; scaled D3D11 modes allocate separate
-physical dimensions. The opt-in D3D11 combiner-shader cache stores derived
-bytecode locally, not game resources; guest memory, synchronization, and
-per-flip readback remain unchanged.
+physical dimensions. GPU colour surfaces also retain a packed shadow of their
+logical guest pixels. Full GPU colour clears are mirrored into the guest
+surface. If title code, including the linked Bink decoder, later changes that
+surface, the backend uploads the logical image before the first GPU draw or
+at flip, scaling it into the physical target before shared presentation.
+This is distinct from PVIDEO overlay composition. The opt-in D3D11
+combiner-shader cache stores derived bytecode locally, not game resources;
+per-flip readback remains mandatory.
 
 ## Packaging and runtime paths
 

@@ -11,8 +11,15 @@ This is **experimental bring-up**, not a complete playable release. An opt-in
 graphics and USB diagnostic reached the campaign tutorial, rendered its 3D
 environment, and showed the character moving in response to scripted
 left-stick input and injected keyboard events. A separate scripted right-stick
-probe visibly rotated the camera. Other gameplay, physical controllers and
-keyboards, audible audio, and overall rendering correctness remain unverified.
+probe visibly rotated the camera. Audio is now enabled by default and runs the
+framework's stereo all-mixbin fold-down. The accurate xemu DSP56300 path
+remains an experimental opt-in: a user reported crackly, mono-sounding
+dialogue and gunfire while music sounded acceptable. Bounded captures found
+no host underruns or recurring sample-boundary discontinuities, but the
+accurate output was substantially more left/right correlated than the simple
+path. Broader listening and missions are still required. Other gameplay,
+physical controllers and keyboards, and overall rendering correctness remain
+unverified.
 Some tutorial captures are dark and missing the HUD. The experimental path can
 still stall or fail on untested behavior and is disabled by default. A
 stationary tutorial comparison reported about 3.5 flips per second before
@@ -175,6 +182,11 @@ existing saved renderer choices are retained. The command-line path still
 defaults to the CPU reference. The individual GPU paths have the limitations
 below.
 
+The Audio tab defaults to **Simple (recommended)**. Launcher settings from
+versions 1-3 that selected the old Accurate default migrate once to Simple;
+after that migration, explicitly selecting Accurate is retained. Accurate is
+labelled experimental.
+
 The launcher defaults to **HUD without additive bloom**. This mode uses the
 screen-zero near plane for ordinary and alpha-blended programmable UI draws,
 but keeps zero-depth additive draws behind a small positive plane. Positive-
@@ -223,24 +235,59 @@ scenes have not been verified. In one probe, the tutorial reported approximately
 3.7 flips per second, not a measurement of distinct world-frame FPS.
 
 A menu script used in one diagnostic was
-`RECOMP_PAD_SCRIPT="20000:a:200,23000:a:200,26000:down:100,28000:a:200"`;
+`RECOMP_PAD_SCRIPT="20000:a:200,23000:a:200,28000:a:200"`;
 times are milliseconds from the first USB report and may need adjustment on
 another machine or when audio is enabled. Leave the variable unset for manual
 input.
 
-Audio is separately opt-in:
+Audio is enabled by default on the command line and in the launcher:
 
 ```powershell
-python tools\build.py run --experimental-tutorial --experimental-audio
+python tools\build.py run --experimental-tutorial
 ```
 
-This enables the toolkit's standalone APU and host audio output. Its DSP is
-stubbed, and a local title/menu diagnostic produced non-silent PCM, not a
-listening or tutorial-audio validation. Sound may be incorrect or absent, and
-enabling it can change startup timing. To capture a bounded local WAV for
-diagnosis, set `RECOMP_AUDIO_WAV` to a writable file path and
-`RECOMP_AUDIO_WAV_SECS` to the desired maximum number of seconds before
-launching. Captures contain game audio and should remain private.
+The default `Simple` mode uses the stereo all-mixbin fold-down and outputs
+48 kHz stereo PCM. It is the recommended path after the accurate mode failed
+the listening gate for dialogue and gunfire. The host uses eight 512-sample
+XAudio2 buffers by default for an 85.3 ms maximum queue. It refills at the
+3,072-sample (64.0 ms) low-water mark without increasing that maximum;
+`RECOMP_AUDIO_BUF_COUNT` remains an expert override. The launcher can select
+`Accurate (experimental Xbox DSP)`, which runs the title's GP and EP programs
+on xemu v0.8.139's DSP56300 interpreter.
+
+The last long Accurate validation, recorded while Accurate was the default,
+ran 164.47 seconds from startup through the observed 421-draw tutorial world
+and scripted movement input. It recorded zero host underruns, starvation
+events, or refused submissions; every marked startup, cinematics/menu,
+tutorial, and gameplay interval was non-silent, with no clipped samples or
+recurring 32/256/near-2,048-frame hole candidates. After the default changed,
+a bounded boot of the final linked executable with `RECOMP_APU_DSP` unset
+selected the stereo fold-down.
+
+Controls:
+
+- `--no-audio` or `RECOMP_AUDIO=0` disables the APU and host output.
+- `RECOMP_AUDIO=1` explicitly enables audio. Unset also means enabled.
+- `RECOMP_APU_DSP=fold` selects the default simple stereo path; `xemu`
+  selects experimental accurate processing. Unset selects `fold`.
+- `RECOMP_APU_DSP_FALLBACK=0` disables automatic fallback when the accurate
+  DSP repeatedly cannot keep real time.
+- `RECOMP_APU_DSP_THREAD=0` runs the DSP stage on the APU frame thread for
+  diagnosis.
+- `RECOMP_APU_DSP_TRACE=1` enables the five-second DSP cost and worker-wait
+  reports. They are off by default so diagnostic I/O cannot block an audio
+  worker.
+
+Invalid `RECOMP_AUDIO` values fail explicitly. The old
+`--experimental-audio` argument remains a hidden compatibility alias but is
+no longer needed. Audio can change timing relative to older silent runs; the
+current diagnostic menu script accounts for the default-on path.
+
+To capture a bounded local WAV for diagnosis, set `RECOMP_AUDIO_WAV` to a
+writable file path and `RECOMP_AUDIO_WAV_SECS` to the desired maximum number
+of seconds before launching. Captures contain game audio and should remain
+private. Automated waveform and host-continuity checks do not replace a
+listening pass.
 
 #### Audio capture diagnostics
 
@@ -256,7 +303,7 @@ $log = "$PWD\analysis\audio-$run-host.log"
 $env:RECOMP_AUDIO_WAV = $wav
 $env:RECOMP_AUDIO_WAV_SECS = "30"
 $env:RECOMP_AUDIO_HOST = "1"
-python tools\build.py run --config Release --experimental-tutorial --experimental-audio 2> $log
+python tools\build.py run --config Release --experimental-tutorial 2> $log
 ```
 
 After the run has closed the capture, replace the example ranges below with
@@ -392,14 +439,26 @@ upscale to fit the output picture. Visibility-query samples are normalized
 back to guest-pixel units. Scale 1 keeps the prior allocation and readback
 paths and remains the default.
 
+Bink opening movies write decoded pixels directly into the guest colour
+surface rather than using PVIDEO or D3D11 draws. The D3D11 backend keeps a
+logical guest shadow, mirrors full colour clears, and uploads detected CPU
+writes before the first GPU overlay draw or at flip. The upload is scaled into
+the physical render target before shared presentation. A detected CPU write
+that races unresolved GPU colour work is reported and does not overwrite that
+GPU frame.
+
 Selecting a scaled or native resolution enables shared GPU presentation.
 Explicitly setting `RECOMP_GPU_DIRECT_PRESENT=0` with an active scale is an
 error because a guest-sized CPU frame cannot carry the higher-resolution
 result. Experimental depth and packed-stencil aliases are also rejected in
 scaled modes; their guest-layout seed and sampling semantics have not been
 defined at physical resolution. The CPU renderer remains at guest resolution.
-Synthetic scale-two WARP fixtures pass, but no matched gameplay, performance,
-VRAM, 4K-display or original-hardware validation has been completed.
+The complete synthetic D3D11 matrix passes 190 cases with hardware enabled
+(123 pass and 67 hardware cases skip in WARP-only mode), including CPU-written
+frames with and without a GPU overlay at scale 1 and scale 2. A bounded retail
+4.5x run captured visible Microsoft, Digital Anvil, and intro-montage frames
+with zero guest/GPU conflicts. No matched gameplay, performance, VRAM,
+native-4K-display or original-hardware validation has been completed.
 
 `RECOMP_GPU_PSCACHE=1` enables the optional persistent combiner pixel-shader
 cache (also available in the launcher). It is off by default. After a shader
@@ -456,8 +515,9 @@ to the D3D11 window presenter through a bounded shared texture. Pinned
 framebuffers and PVIDEO overlays use the CPU-composited frame instead. Guest
 readback still happens on every flip for guest-visible memory, frame
 statistics and captures, so this does not remove that stall or bound all GPU
-work in flight. The option is off at the default 480p resolution and is
-enabled automatically for scaled modes.
+work in flight. CPU-written Bink frames are first synchronized into the GPU
+surface and remain eligible for the scaled shared route. The option is off at
+the default 480p resolution and is enabled automatically for scaled modes.
 
 The D3D11 renderer respects partial color, depth and stencil clear rectangles
 instead of clearing the whole target for each strip. When a registered backend
@@ -524,14 +584,16 @@ Keep images and logs local. See
 For matched audio-on/off runs, `--readiness manual` requires an operator to
 reach and confirm the same visible state for every attempt. `--capture-audio`
 uses unique WAV files and checks their finalization; the console-control
-shutdown and WAV-validation helpers also passed a short, unclassified game
-boot. The complete manual benchmark workflow has not yet been validated with
-the game.
-The benchmark removes inherited audio switches; an off variant leaves
-`RECOMP_AC97_READY` unset, while an on variant sets it to `1`. Setting it to
-`0` still enables audio in the runtime. Reviewed A/B/A comparisons require the
-matching manifest described in `tools\bench_match.py` and remain inconclusive
-until real captures and inputs have been checked.
+shutdown and WAV-validation helpers also passed the final firmware-exit
+capture. The complete matched manual A/B/A workflow has not yet been
+validated with the game.
+The benchmark removes inherited audio switches before applying each variant;
+audio is on when neither switch is supplied. Use `RECOMP_AUDIO=1` and
+`RECOMP_AUDIO=0` for explicit matched variants. Legacy
+`RECOMP_AC97_READY` is presence-based, so even `RECOMP_AC97_READY=0` enables
+it and is rejected for a manual comparison. Reviewed A/B/A comparisons
+require the matching manifest described in `tools\bench_match.py` and remain
+inconclusive until real captures and inputs have been checked.
 
 For matched captures, the frame comparator can label either source without
 treating it as ground truth:
@@ -754,5 +816,9 @@ python -m pytest -q tests
 For hardware-device coverage as well as WARP, set
 `BRUTEFORCE_TEST_D3D11_HARDWARE=1` before the pytest command.
 The host fixture does not contain game code and cannot run the game.
-See `THIRD_PARTY_NOTICES.md` and the toolkit's own `LICENSE` and `NOTICE` for
-licensing and attribution.
+Project-owned source is MIT-licensed. The linked executable includes xemu's
+GPL-2.0-or-later DSP interpreter and is distributed, if at all, under
+GPL-2.0-or-later as a combined work. Some DSP DMA and framework APU files use
+LGPL-2.0-or-later or LGPL-2.1-or-later. See `LICENSE`,
+`THIRD_PARTY_NOTICES.md`, `LICENSES/`, `src/xemu_dsp/NOTICE.md`, and the
+toolkit's own `LICENSE` and `NOTICE` for terms and attribution.

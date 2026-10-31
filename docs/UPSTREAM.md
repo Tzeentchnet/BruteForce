@@ -847,6 +847,130 @@ own GPU back end, an extended interface for it, and its own pacing fixes.
     support shared-GPU and SDL sources without mislabeling them.
     *Status:* experimental local framework patch; not prepared or filed.
 
+32. **Support an optional accurate external APU DSP.**
+    *Problem:* the framework fold-down cannot execute the GP/EP programs that
+    implement title effects, and one physical page number can identify either
+    heap RAM or the contiguous window.
+    *Evidence:* Brute Force bootstraps and runs both DSP programs. Incorrect
+    copy selection previously put scratch/FIFO traffic in unrelated storage.
+    The final integration produced nonzero stereo PCM through menus,
+    cinematics, tutorial loading, and scripted gameplay. The user later
+    reported crackly, mono-sounding dialogue and gunfire while music remained
+    acceptable; matched captures show substantially higher left/right
+    correlation than the framework fold-down despite healthy host delivery.
+    *Change:* [0030-accurate-apu-dsp-hooks.patch](../patches/xboxrecomp/0030-accurate-apu-dsp-hooks.patch)
+    adds compile-time optional DSP hooks plus tagged physical-translation
+    intent; [0031-external-apu-dsp-lifecycle.patch](../patches/xboxrecomp/0031-external-apu-dsp-lifecycle.patch)
+    calls the external finalizer after the frame worker joins. Builds without
+    `RECOMP_EXTERNAL_APU_DSP` retain the existing fold-down and symbols.
+    *Tests:* the `apu_phys` fixture covers RAM/window tags. The project
+    lifecycle fixture completed six accurate-DSP init/shutdown cycles with no
+    leaked thread handles. Release builds and bounded retail captures passed.
+    *Overlap:* upstream PR #264 is selected separately for the SSL restart
+    gap. Open #261/#286 concern RAM aliases; #266/#270 concern sequencer-off
+    frames. They were not adopted because the observed issues are narrower.
+    *Before filing:* separate generic physical-intent and lifecycle changes
+    from the GPL project DSP, add non-Windows concurrency coverage, and
+    coordinate the alias model with #261/#286. The accurate mix defect must
+    also be isolated before proposing the project DSP as a quality path.
+    *Status:* local framework patches; Accurate is experimental and no longer
+    the project default; not prepared or filed.
+
+33. **Run independent cleanup hooks before firmware exits.**
+    *Problem:* `HalReturnToFirmware` and `HalInitiateShutdown` use
+    `ExitProcess`, which skips C `atexit` handlers. Audio WAV headers and
+    external workers therefore remained unfinalized.
+    *Evidence:* a retail firmware-return capture previously had bytes beyond
+    its RIFF size. With the hook, full APU shutdown ran and the 33.73-second
+    file length exactly matched its RIFF header.
+    *Change:* [0032-run-hooks-before-firmware-exit.patch](../patches/xboxrecomp/0032-run-hooks-before-firmware-exit.patch)
+    adds bounded independent hook registration while preserving the kernel's
+    replaceable primary report hook, then runs the registry before firmware
+    and shutdown exits.
+    *Tests:* a native fixture covers registration, deduplication, primary
+    replacement, ordering scope, and reason propagation; the retail exit path
+    finalized and shut down cleanly.
+    *Before filing:* review registration concurrency and whether bugcheck
+    paths need an additional-only hook runner without duplicating the missing
+    summary.
+    *Status:* local framework patch; not prepared or filed.
+
+34. **Prioritize the Windows APU frame worker.**
+    *Problem:* the accurate DSP stayed below one quarter of a host core, but
+    a normal-priority APU worker could miss the device queue during
+    logging/render stalls.
+    *Evidence:* a six-buffer gameplay capture saw one device dry spell beside
+    a 44.9 ms submit gap. After raising the worker and using the project's
+    eight-buffer default, 115- and 260-second probes reported no underruns,
+    starvation events, or refused submissions.
+    *Change:* [0033-prioritize-apu-frame-worker.patch](../patches/xboxrecomp/0033-prioritize-apu-frame-worker.patch)
+    requests `THREAD_PRIORITY_HIGHEST` inside the Windows frame worker and
+    reports failure explicitly.
+    *Tests:* Release build, repeated lifecycle fixture, and the bounded retail
+    probes above. Non-Windows behavior is unchanged.
+    *Before filing:* measure other titles, battery/CPU scheduling effects, and
+    whether MMCSS is preferable to a fixed Win32 priority.
+    *Status:* local framework patch; not prepared or filed.
+
+35. **Retain more queued audio before refilling.**
+    *Problem:* the queue pacer waited until half of the configured maximum
+    remained. Even with eight 512-sample buffers, that left only 42.7 ms at
+    the low-water mark and could not cover an observed 44.9 ms host pause.
+    *Evidence:* a fresh default build reproduced dry detections around a
+    heavy diagnostic burst. A traced comparison saw the queue fall from
+    2,048 to 1,024 samples during a 33.6 ms submit gap.
+    *Change:* [0034-raise-apu-queue-low-water.patch](../patches/xboxrecomp/0034-raise-apu-queue-low-water.patch)
+    changes the common XAudio2/SDL pacing low-water mark from one half to
+    three quarters. With Brute Force's eight-buffer policy, pacing becomes
+    3,072-4,096 samples (64.0-85.3 ms) without increasing the maximum.
+    *Tests:* the framework XAudio2 fixture covers default and non-period-sized
+    buffers with the new marks. The final 164.47-second rebuilt-default retail
+    probe reached the tutorial-world signature and scripted input while
+    reporting zero underruns, starvation events, and refused submissions; its
+    WAV header finalized exactly. The complete patch stack also applied and
+    verified from a fresh checkout.
+    *Before filing:* measure multiple titles and SDL devices, and consider
+    making the ratio a validated setting rather than changing the framework
+    default.
+    *Status:* local framework patch; not prepared or filed.
+
+36. **Define CPU writes to GPU-owned colour surfaces.**
+    *Problem:* the backend readback contract assumes a GPU backend owns the
+    completed colour surface. A title can instead clear through NV2A, decode a
+    movie directly into the same guest allocation on the CPU, and then flip.
+    Unconditional GPU readback erases that CPU image; scaled shared
+    presentation publishes the stale GPU clear as well.
+    *Evidence:* Brute Force opened its Microsoft, Digital Anvil and intro Bink
+    files while hardware D3D11 reports showed hundreds of clears and zero GPU
+    draws. No PVIDEO bank was submitted. Before the workaround, 4.5x captures
+    were black. After synchronizing guest changes, bounded 4.5x captures show
+    all three movie stages. One report recorded 386 guest uploads in 392 flips,
+    zero conflicts and 156 accepted shared submissions.
+    *Change:* no framework patch yet. The project D3D11 backend retains a
+    logical guest shadow, mirrors full colour clears, and uploads a changed
+    logical surface before the first GPU draw or at flip. Scaled modes filter
+    that upload into the physical target before shared submission. A detected
+    guest/GPU ordering conflict is reported and preserves the GPU frame.
+    *Tests:* CPU-written colour frames survive scale 1 and scale 2, both alone
+    and with a later GPU overlay. The complete D3D11 matrix passes 190 cases
+    on hardware and 123 with 67 hardware cases skipped under WARP. Bounded
+    scale-1 and 4.5x retail opening probes retained visible movie content.
+    *Overlap:* checked 2026-10-30. Open
+    [#285](https://github.com/sp00nznet/xboxrecomp/pull/285) establishes
+    backend readback before snapshots but does not define guest writes after a
+    GPU clear. Tracking index
+    [#184](https://github.com/sp00nznet/xboxrecomp/pull/184) covers the GPU
+    series. Merged
+    [#220](https://github.com/sp00nznet/xboxrecomp/pull/220) covers PVIDEO,
+    which this Bink path did not use.
+    *Before filing:* design a generic ownership/write-notification contract
+    instead of requiring a backend to poll guest bytes. Cover partial CPU
+    writes, writes between multiple GPU batches, clear masks and rectangles,
+    render-target aliases, races, non-Windows backends and page-protection
+    interactions. Preserve the CPU reference path.
+    *Status:* framework gap with a tested project-side workaround; not
+    prepared or filed.
+
 ### Open upstream work to evaluate for selection
 
 These existing PRs may help Brute Force directly. Measure each with the

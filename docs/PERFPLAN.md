@@ -30,9 +30,41 @@ next steps are in [NEXTSTEPS.md](../NEXTSTEPS.md).
 | 0 | Mostly done. Harness (`tools/bench.py`), frame statistics (patch 0014), census and ceiling probes (0015), profiler (`src/profile.c`), null back end and surface guard (`src/gpu/null_backend.c`) exist and were run. Request audit 0025 has a partial, unreviewed retail diagnostic; flip-ID capture mapping 0026 is synthetic-tested. Presenter capture 0027 verified one link per GDI and CPU-upload route in short, unmatched retail probes, but did not validate physical visibility. Matched tutorial inventory, real scene review and world-frame labels remain open. A guard diagnostic aborted on a protected semaphore page, so the surface-read answer remains open. Missing: the native-rate measurement and upstream PR measurements (#231, #272, #273). |
 | 1 | Implemented, G4 not met. D3D11 back end (`src/gpu/`, `RECOMP_GPU=d3d11`) with the extended interface (0016). Synthetic WARP and hardware fixtures match apart from listed edge pixels. The new GPU-vertex tutorial capture differs from the CPU reference in 0.52% of pixels beyond 8/255; an older CPU-vertex capture differs substantially. |
 | 2 | Implemented (0017, on by default with the D3D11 back end). Stationary hold 3.20 → 30.41 rendered fps (3 runs each, alternating). An unreviewed retail diagnostic sampled 23,400 GPU-program batches without reported vertex differences through its last report. WARP and hardware fixtures cover additional packed formats, relative constants and culling against the CPU interpreter; matched-scene and complete format/hardware verification remain open. |
-| 3 | Partial. Async visibility reports (0018) and shared GPU presentation (0024) are opt-in. Shared presentation bounds one pending snapshot and retains synchronous per-flip guest readback; on-demand readback and a limit on all GPU frames in flight are not implemented. The combined alias/presentation campaign did not establish a speedup. |
+| 3 | Partial. Async visibility reports (0018) and shared GPU presentation (0024) are opt-in. Shared presentation bounds one pending snapshot and retains synchronous per-flip guest readback; on-demand readback and a limit on all GPU frames in flight are not implemented. CPU-written Bink frames are now synchronized into the GPU surface before scaled submission, and bounded 4.5x opening captures are visible. The combined alias/presentation campaign did not establish a speedup. |
 | 4 | Not started. Preserve flush, semaphore, and flip ordering. |
 | 5 | In progress. GPU compute decodes common textures; exact D24 and packed D24S8/stencil surface aliases and GPU window clipping are experimental opt-ins. One alias-only hardware diagnostic reproduced the combined alias/presentation candidate's much darker stationary background; its correctness is unknown and G4 remains unmet. D3D11 honors partial clear rectangles, and patch 0022 removes redundant software depth clears when a backend owns drawing and clearing. Patch 0019 cached hot `getenv` calls. |
+
+### Audio performance status
+
+Simple stereo fold-down is now the default independently of the experimental
+graphics path. The vendored xemu v0.8.139 GP/EP interpreter remains an
+experimental option on a dedicated high-priority worker while the framework
+APU frame worker is also raised to `THREAD_PRIORITY_HIGHEST` on Windows.
+Observed DSP time was roughly 200-250 ms per second of game time on the
+validation host, so raw compute was not the source of the remaining queue
+gaps.
+
+Four 512-sample device buffers were insufficient and six could still expose a
+dry queue during an observed 44.9 ms scheduling/logging pause. The project now
+defaults to eight buffers, with pacing at 3,072-4,096 queued samples and an
+85.3 ms maximum. Raising the refill threshold from one half to three quarters
+adds about 10.7 ms of average lead without changing that maximum. A final
+164.47-second rebuilt-default startup-to-tutorial/gameplay probe, an earlier
+115-second transition, and a 260-second tutorial-world run reported zero
+XAudio2 underruns, APU starvation events, and refused submissions. The final
+run retained audio across an observed 38.5 ms submit gap, reached the
+421-draw tutorial-world signature, and accepted fixed stick inputs. The extra
+two buffers add about 21.3 ms of maximum queue latency relative to six;
+`RECOMP_AUDIO_BUF_COUNT` remains an expert override for controlled comparisons.
+
+Do not infer perceptual correctness from these counters. The private
+155-second waveform capture had nonzero marked intervals, no clipping, and no
+32/256-frame zero-hole signatures, but the user reports crackly,
+mono-sounding dialogue and gunfire in Accurate mode while music sounds
+acceptable. Matched intervals are substantially more left/right correlated
+under Accurate than Simple. The host transport gate passed; the Accurate
+quality gate failed, so Simple is the recommended default while the DSP cause
+remains open.
 
 The first disc-inserted xemu reference attempt verified the retail XBE and
 private read-only media setup, but foreground focus and controller response
@@ -195,10 +227,11 @@ Done before writing renderer code. All evidence stays local.
    guest surface matches the actual window output, especially with overlays,
    pinned surfaces or direct presentation. Capture writes occur synchronously
    before the statistics timestamp and perturb the measured run. Real scene
-   labels and presented-image validation remain unverified. A short
-   unclassified retail boot validated the benchmark's console-control and
-   WAV-finalization helpers; the complete manual audio benchmark and listening
-   pass remain open.
+   labels and presented-image validation remain unverified. The
+   console-control and WAV-finalization helpers passed a firmware-exit retail
+   capture, and a bounded default-on campaign reached scripted gameplay. The
+   complete matched manual audio A/B/A workflow and subjective listening pass
+   remain open.
 2. **Sampling profiler with symbols.** Port the approach of Blood Wake's
    `bw_profile.c`: suspend and sample threads about every millisecond, then
    resolve addresses with DbgHelp against `BRUTEFORCE_LINK_SYMBOLS=ON`
@@ -434,12 +467,15 @@ texture. The launcher exposes Native, 2160p, 1440p, 1080p, 720p and the
 unchanged 480p default. Scaled experimental depth/stencil aliases are
 explicitly rejected.
 
-This is not evidence that the performance gates hold. Available WARP
-fixtures pass at scale two, but hardware scaled rendering, a matched retail
-campaign, VRAM headroom, mip/LOD behavior and a native 4K display remain
-untested. G4 comparisons continue at scale 1. G5 requires the controlled
-1080p/4K A/B/A campaign in [NEXTSTEPS.md](../NEXTSTEPS.md), and the reported
-default-settings movement regression remains a separate blocker.
+This is not evidence that the performance gates hold. The complete D3D11
+matrix passes 190 hardware cases and 123 WARP cases with 67 hardware cases
+skipped, including CPU-written frames before scaled presentation. Bounded
+4.5x retail probes show the Microsoft, Digital Anvil and intro movies, but a
+matched retail gameplay campaign, VRAM headroom, mip/LOD behavior and a native
+4K display remain untested. G4 comparisons continue at scale 1. G5 requires
+the controlled 1080p/4K A/B/A campaign in
+[NEXTSTEPS.md](../NEXTSTEPS.md), and the reported default-settings movement
+regression remains a separate blocker.
 
 ## Not in scope, or explicitly rejected
 

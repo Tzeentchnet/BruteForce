@@ -122,6 +122,7 @@ static struct {
     unsigned tex_unsupported, tex_unsupported_hits;
     unsigned depth_seeds, depth_samples, depth_snapshots, depth_rejected;
     unsigned stencil_samples, stencil_conversions;
+    unsigned guest_uploads, guest_conflicts;
     unsigned present_shared, present_busy;
     uint64_t tex_hashed_bytes;
     double readback_ms;
@@ -159,6 +160,7 @@ static void stats_flip(void)
                         " unsupported %u (%u cached),"
                         " depth seeds %u samples %u snapshots %u rejected %u,"
                         " stencil aliases %u conversions %u,"
+                        " guest uploads %u conflicts %u,"
                         " shared presents %u busy %u,"
                         " %llu texture bytes checked or copied (upper bound)\n",
                 s_st.flips, s_st.draws, s_st.xdraws, s_st.vdraws, s_st.vraw, s_st.vfall,
@@ -170,6 +172,7 @@ static void stats_flip(void)
                 s_st.tex_unsupported, s_st.tex_unsupported_hits,
                 s_st.depth_seeds, s_st.depth_samples, s_st.depth_snapshots, s_st.depth_rejected,
                 s_st.stencil_samples, s_st.stencil_conversions,
+                s_st.guest_uploads, s_st.guest_conflicts,
                 s_st.present_shared, s_st.present_busy,
                 (unsigned long long)s_st.tex_hashed_bytes);
         s_q_reads = 0;
@@ -467,6 +470,12 @@ typedef struct {
     ID3D11Texture2D *tex;
     ID3D11RenderTargetView *rtv;
     ID3D11ShaderResourceView *srv;
+    ID3D11Texture2D *guest_tex;
+    ID3D11ShaderResourceView *guest_srv;
+    uint8_t *guest_shadow;
+    size_t guest_shadow_bytes;
+    unsigned guest_check_gen;
+    int gpu_dirty;
 } Surf;
 
 typedef struct {
@@ -488,6 +497,7 @@ static Depth s_depth[MAX_SURF];
 static int s_ndepth;
 static Surf *s_cur;
 static Depth *s_cur_depth;
+static uint32_t s_gen = 1;          /* frame number */
 
 static int depth_views_enabled(void)
 {
@@ -519,6 +529,76 @@ static void release_surf(Surf *s)
     if (s->rtv) ID3D11RenderTargetView_Release(s->rtv);
     if (s->tex) ID3D11Texture2D_Release(s->tex);
     s->srv = NULL; s->rtv = NULL; s->tex = NULL;
+}
+
+static void release_surf_guest(Surf *s)
+{
+    if (s->guest_srv) ID3D11ShaderResourceView_Release(s->guest_srv);
+    if (s->guest_tex) ID3D11Texture2D_Release(s->guest_tex);
+    free(s->guest_shadow);
+    s->guest_srv = NULL;
+    s->guest_tex = NULL;
+    s->guest_shadow = NULL;
+    s->guest_shadow_bytes = 0;
+    s->guest_check_gen = 0;
+    s->gpu_dirty = 0;
+}
+
+static size_t surf_guest_row(const Surf *s)
+{
+    size_t row = (size_t)s->w * s->bpp;
+    return row <= s->pitch ? row : s->pitch;
+}
+
+static int ensure_guest_shadow(Surf *s)
+{
+    size_t row = surf_guest_row(s);
+    size_t bytes;
+    uint8_t *shadow;
+
+    if (!row || !s->h || s->h > SIZE_MAX / row)
+        return 0;
+    bytes = row * s->h;
+    if (s->guest_shadow && s->guest_shadow_bytes == bytes)
+        return 1;
+    shadow = (uint8_t *)realloc(s->guest_shadow, bytes);
+    if (!shadow) {
+        fprintf(stderr, "[GPU-D3D11] cannot allocate %zu-byte guest color shadow for %08X\n",
+                bytes, s->va);
+        return 0;
+    }
+    s->guest_shadow = shadow;
+    s->guest_shadow_bytes = bytes;
+    return 1;
+}
+
+static int snapshot_guest_surface(Surf *s)
+{
+    const uint8_t *guest = GUEST(s->va);
+    size_t row = surf_guest_row(s);
+    uint32_t y;
+
+    if (!ensure_guest_shadow(s))
+        return 0;
+    for (y = 0; y < s->h; ++y)
+        memcpy(s->guest_shadow + (size_t)y * row,
+               guest + (size_t)y * s->pitch, row);
+    return 1;
+}
+
+static int guest_surface_changed(const Surf *s)
+{
+    const uint8_t *guest = GUEST(s->va);
+    size_t row = surf_guest_row(s);
+    uint32_t y;
+
+    if (!s->guest_shadow || s->guest_shadow_bytes != row * s->h)
+        return 1;
+    for (y = 0; y < s->h; ++y)
+        if (memcmp(s->guest_shadow + (size_t)y * row,
+                   guest + (size_t)y * s->pitch, row))
+            return 1;
+    return 0;
 }
 
 /* Seeded from guest memory: whatever the title (or the boot) left there.
@@ -631,8 +711,10 @@ static Surf *get_surf(const Nv2aSurface *in)
     if (!gpu_scale_surface_size(w, h, aa_sx, aa_sy, &pw, &ph))
         return NULL;
     if (s && (s->bpp != bpp || s->w != w || s->h != h || s->pw != pw || s->ph != ph ||
-              !s->tex)) {
+              s->pitch != in->pitch || !s->tex)) {
         Surf replacement = *s;
+        int guest_layout_changed =
+            s->bpp != bpp || s->w != w || s->h != h || s->pitch != in->pitch;
         replacement.bpp = bpp;
         replacement.w = w;
         replacement.h = h;
@@ -645,12 +727,27 @@ static Surf *get_surf(const Nv2aSurface *in)
         replacement.tex = NULL;
         replacement.rtv = NULL;
         replacement.srv = NULL;
+        if (guest_layout_changed) {
+            replacement.guest_tex = NULL;
+            replacement.guest_srv = NULL;
+            replacement.guest_shadow = NULL;
+            replacement.guest_shadow_bytes = 0;
+            replacement.guest_check_gen = 0;
+            replacement.gpu_dirty = 0;
+        }
         if (!create_surf(&replacement, gpu_scale_requested() ? s->srv : NULL,
-                         s->pw, s->ph))
+                         s->pw, s->ph) ||
+            (guest_layout_changed && !snapshot_guest_surface(&replacement))) {
+            release_surf(&replacement);
+            if (guest_layout_changed)
+                release_surf_guest(&replacement);
             return NULL;
+        }
         if (s_cur == s)
             s_cur = NULL;
         release_surf(s);
+        if (guest_layout_changed)
+            release_surf_guest(s);
         *s = replacement;
     }
     if (s) {
@@ -673,7 +770,9 @@ static Surf *get_surf(const Nv2aSurface *in)
         s->aa_sx = aa_sx;
         s->aa_sy = aa_sy;
         s->scale_epoch = gpu_scale_epoch();
-        if (!create_surf(s, NULL, 0, 0)) {
+        if (!create_surf(s, NULL, 0, 0) || !snapshot_guest_surface(s)) {
+            release_surf(s);
+            release_surf_guest(s);
             s_nsurf--;
             return NULL;
         }
@@ -1137,6 +1236,117 @@ static int begin(const Nv2aSurface *s, const Nv2aRenderState *rs)
     return 1;
 }
 
+static int ensure_guest_texture(Surf *s)
+{
+    D3D11_TEXTURE2D_DESC td;
+    HRESULT hr;
+
+    if (s->guest_tex && s->guest_srv)
+        return 1;
+    memset(&td, 0, sizeof td);
+    td.Width = s->w;
+    td.Height = s->h;
+    td.MipLevels = 1;
+    td.ArraySize = 1;
+    td.Format = surf_format(s->bpp);
+    td.SampleDesc.Count = 1;
+    td.Usage = D3D11_USAGE_DEFAULT;
+    td.BindFlags = D3D11_BIND_SHADER_RESOURCE;
+    hr = ID3D11Device_CreateTexture2D(s_dev, &td, NULL, &s->guest_tex);
+    if (SUCCEEDED(hr))
+        hr = ID3D11Device_CreateShaderResourceView(s_dev, (ID3D11Resource *)s->guest_tex,
+                                                   NULL, &s->guest_srv);
+    if (FAILED(hr)) {
+        gpu_d3d11_check_device(s_dev, hr, "creating guest color upload texture");
+        fprintf(stderr, "[GPU-D3D11] guest color upload texture for %08X failed 0x%08lX\n",
+                s->va, (unsigned long)hr);
+        if (s->guest_srv) ID3D11ShaderResourceView_Release(s->guest_srv);
+        if (s->guest_tex) ID3D11Texture2D_Release(s->guest_tex);
+        s->guest_srv = NULL;
+        s->guest_tex = NULL;
+        return 0;
+    }
+    return 1;
+}
+
+static int upload_guest_surface(Surf *s)
+{
+    Surf *restore = s_cur;
+    Depth *restore_depth = s_cur_depth;
+
+    if (s->pw == s->w && s->ph == s->h) {
+        ID3D11DeviceContext_UpdateSubresource(s_ctx, (ID3D11Resource *)s->tex, 0, NULL,
+                                             GUEST(s->va), s->pitch, 0);
+        return 1;
+    }
+    if (!ensure_guest_texture(s))
+        return 0;
+    ID3D11DeviceContext_UpdateSubresource(s_ctx, (ID3D11Resource *)s->guest_tex, 0, NULL,
+                                         GUEST(s->va), s->pitch, 0);
+    if (!gpu_scale_blit(s->guest_srv, s->w, s->h, s->rtv, s->pw, s->ph,
+                        GPU_SCALE_BLIT_BILINEAR)) {
+        fprintf(stderr, "[GPU-D3D11] guest color upload for %08X failed\n", s->va);
+        if (restore)
+            bind_targets(restore, restore_depth);
+        return 0;
+    }
+    if (restore)
+        bind_targets(restore, restore_depth);
+    return 1;
+}
+
+static int sync_guest_surface(Surf *s, int force)
+{
+    static int warned_conflict;
+
+    if (!force && s->guest_check_gen == s_gen)
+        return 1;
+    s->guest_check_gen = s_gen;
+    if (!guest_surface_changed(s))
+        return 1;
+    if (s->gpu_dirty) {
+        s_st.guest_conflicts++;
+        if (!warned_conflict++)
+            fprintf(stderr, "[GPU-D3D11] guest writes raced GPU color work on surface %08X;"
+                            " preserving the GPU frame\n", s->va);
+        return 1;
+    }
+    if (!upload_guest_surface(s) || !snapshot_guest_surface(s))
+        return 0;
+    s_st.guest_uploads++;
+    return 1;
+}
+
+static int mirror_full_color_clear(Surf *s, uint32_t argb)
+{
+    uint8_t *guest = GUEST(s->va);
+    uint32_t x, y;
+
+    if (s->bpp == 4) {
+        for (y = 0; y < s->h; ++y) {
+            uint32_t *row = (uint32_t *)(guest + (size_t)y * s->pitch);
+            for (x = 0; x < s->w; ++x)
+                row[x] = argb;
+        }
+    } else if (s->bpp == 2) {
+        uint16_t value = (uint16_t)(((argb >> 8) & 0xF800u) |
+                                    ((argb >> 5) & 0x07E0u) |
+                                    ((argb >> 3) & 0x001Fu));
+        for (y = 0; y < s->h; ++y) {
+            uint16_t *row = (uint16_t *)(guest + (size_t)y * s->pitch);
+            for (x = 0; x < s->w; ++x)
+                row[x] = value;
+        }
+    } else {
+        return 0;
+    }
+    if (!snapshot_guest_surface(s))
+        return 0;
+    s->guest_check_gen = 0;
+    s->gpu_dirty = 0;
+    return 1;
+}
+
 /* ---- textures ------------------------------------------------------------ */
 
 #define MAX_TEX 2048
@@ -1154,7 +1364,6 @@ typedef struct {
 
 static Tex *s_tex;
 static int s_ntex;
-static uint32_t s_gen = 1;          /* frame number */
 static uint32_t *s_decode;
 static size_t s_decode_cap;
 static size_t s_tex_snapshot_bytes;
@@ -2053,6 +2262,7 @@ static void d3d_clear(const Nv2aSurface *s, const Nv2aRenderState *rs, uint32_t 
 {
     uint32_t bounds[4];
     uint32_t depth_flags = flags & 3;
+    uint32_t color_flags = flags & 0xF0;
     D3D11_RECT rect;
     float c[4], z;
     int full_color, full_depth;
@@ -2108,6 +2318,14 @@ static void d3d_clear(const Nv2aSurface *s, const Nv2aRenderState *rs, uint32_t 
     }
     if (flags & 0xF3)
         clear_draw(&rect, flags, argb, zstencil, z);
+    if (color_flags) {
+        if (color_flags == 0xF0 && full_color) {
+            if (!mirror_full_color_clear(s_cur, argb))
+                s_cur->gpu_dirty = 1;
+        } else {
+            s_cur->gpu_dirty = 1;
+        }
+    }
 }
 
 static int set_window_clip(const Nv2aSurface *s)
@@ -2170,7 +2388,8 @@ static void d3d_draw(const Nv2aSurface *s, const Nv2aBatch *b)
     ID3D11SamplerState *ss = NULL;
     float bf[4], tw = 1.0f, th = 1.0f;
 
-    if (!b || !b->count || !b->state || !begin(s, b->state) || !set_window_clip(s))
+    if (!b || !b->count || !b->state || !begin(s, b->state) ||
+        !sync_guest_surface(s_cur, 0) || !set_window_clip(s))
         return;
     rs = b->state;
     if (b->texture) {
@@ -2224,6 +2443,7 @@ static void d3d_draw(const Nv2aSurface *s, const Nv2aBatch *b)
     ID3D11DeviceContext_OMSetDepthStencilState(s_ctx, get_ds(rs, s_cur_depth != NULL),
                                                rs->stencil_ref & 0xFF);
     ID3D11DeviceContext_Draw(s_ctx, b->count, 0);
+    s_cur->gpu_dirty = 1;
     if (s_cur_depth)
         s_cur_depth->revision++;
     s_st.draws++;
@@ -2279,7 +2499,8 @@ static int xdraw_prepare(const Nv2aSurface *s, const Nv2aXBatch *b)
     float bf[4];
     int st;
 
-    if (!b || !b->state || !begin(s, b->state) || !set_window_clip(s))
+    if (!b || !b->state || !begin(s, b->state) ||
+        !sync_guest_surface(s_cur, 0) || !set_window_clip(s))
         return 0;
     rs = b->state;
     rst = batch_rs(b);
@@ -2379,6 +2600,7 @@ static void d3d_xdraw(const Nv2aSurface *s, const Nv2aXBatch *b)
     ID3D11DeviceContext_VSSetConstantBuffers(s_ctx, 0, 1, &s_xcb);
     ID3D11DeviceContext_GSSetShader(s_ctx, NULL, NULL, 0);
     ID3D11DeviceContext_Draw(s_ctx, b->count, 0);
+    s_cur->gpu_dirty = 1;
     if (s_cur_depth)
         s_cur_depth->revision++;
     s_st.draws++;
@@ -2908,6 +3130,7 @@ static int d3d_xdraw_vsh(const Nv2aSurface *s, const Nv2aXVsBatch *b)
     ID3D11DeviceContext_VSSetConstantBuffers(s_ctx, 0, 2, cbs);
     ID3D11DeviceContext_GSSetShader(s_ctx, vsh_filter_gs(), NULL, 0);
     ID3D11DeviceContext_DrawIndexed(s_ctx, b->nindices, ioff / 4u, 0);
+    s_cur->gpu_dirty = 1;
     if (s_cur_depth)
         s_cur_depth->revision++;
     ID3D11DeviceContext_GSSetShader(s_ctx, NULL, NULL, 0);
@@ -3566,6 +3789,8 @@ static int d3d_readback(uint32_t color_va)
         gpu_d3d11_check_device(s_dev, S_OK, "starting surface readback");
     if (!sf || !s_dev)
         return 0;
+    if (!sync_guest_surface(sf, 1))
+        goto done;
     publish_shared_present(sf);
     source = readback_source(sf);
     if (!source)
@@ -3606,6 +3831,10 @@ static int d3d_readback(uint32_t color_va)
         memcpy(GUEST(sf->va) + (size_t)y * sf->pitch, (const uint8_t *)m.pData + (size_t)y * m.RowPitch,
                row);
     ID3D11DeviceContext_Unmap(s_ctx, (ID3D11Resource *)s_staging, 0);
+    if (!snapshot_guest_surface(sf))
+        goto done;
+    sf->guest_check_gen = s_gen;
+    sf->gpu_dirty = 0;
     s_st.readbacks++;
     s_st.readback_ms += qpc_ms() - t0;
     ok = 1;

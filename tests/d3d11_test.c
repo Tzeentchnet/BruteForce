@@ -1754,6 +1754,41 @@ static int scene(const char *out_path, int program, int gpu)
     return 1;
 }
 
+static int scene_cpu_frame(const char *out_path, int overlay)
+{
+    static const Pos quad[4] = {{20, 20, 1, 1}, {44, 20, 1, 1},
+                                {44, 44, 1, 1}, {20, 44, 1, 1}};
+    static const uint32_t red[4] = {
+        0xFFFF2020u, 0xFFFF2020u, 0xFFFF2020u, 0xFFFF2020u
+    };
+    static const float uv[4][2] = {{0, 0}, {0, 0}, {0, 0}, {0, 0}};
+    uint32_t b = xbox_ContiguousAlloc(B_SIZE * B_SIZE * 4, 4096);
+    uint32_t vb = xbox_ContiguousAlloc(0x1000, 4096);
+    uint32_t *pixels;
+    unsigned x, y;
+    FILE *f;
+
+    REQUIRE(b && vb, "allocate CPU framebuffer fixture");
+    identity_matrix();
+    surface(b, B_SIZE, 0);
+    clear(0xF0, 0xFF000000u, 0);
+    pixels = (uint32_t *)guest(b);
+    for (y = 0; y < B_SIZE; ++y)
+        for (x = 0; x < B_SIZE; ++x)
+            pixels[y * B_SIZE + x] = x < B_SIZE / 2 ? 0xFFC04020u : 0xFF40C020u;
+    if (overlay) {
+        combiners(0);
+        draw(8, quad, red, uv, 4, vb);
+    }
+    flip();
+    f = fopen(out_path, "wb");
+    REQUIRE(f != NULL, "open CPU framebuffer output");
+    REQUIRE(fwrite(guest(b), 4, B_SIZE * B_SIZE, f) == B_SIZE * B_SIZE &&
+            fclose(f) == 0, "write CPU framebuffer output");
+    puts("CPU framebuffer frames 1");
+    return 1;
+}
+
 static void fill_bc(uint32_t va, uint32_t format, uint16_t color)
 {
     unsigned block_size = format == 0x0C ? 8 : 16;
@@ -1920,6 +1955,8 @@ int main(int argc, char **argv)
         strstr(argv[2], "unsupported-cache") ? !scene_unsupported_cache(argv[3]) :
         strstr(argv[2], "failed-upload-cache") ? !scene_failed_upload_cache(argv[3]) :
         strstr(argv[2], "cache-rewrite") ? !scene_cache_rewrite(argv[3]) :
+        strstr(argv[2], "cpu-frame") ?
+        !scene_cpu_frame(argv[3], strstr(argv[2], "overlay") != NULL) :
         strstr(argv[2], "near-hud") ? !scene_hud_near(argv[3]) :
         strstr(argv[2], "clear") ? !scene_clear_rect(argv[3], strstr(argv[2], "vsh") != NULL,
                                                      strstr(argv[2], "vertical") != NULL) :

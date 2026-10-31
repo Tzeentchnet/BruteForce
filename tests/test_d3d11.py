@@ -677,6 +677,25 @@ def rgba_at(frame, x, y):
     return frame[offset + 2], frame[offset + 1], frame[offset], frame[offset + 3]
 
 
+@pytest.mark.parametrize("overlay", [False, True])
+def test_cpu_written_framebuffer_survives_gpu_scaling_and_overlays(overlay, tmp_path):
+    suffix = "-overlay" if overlay else ""
+    modes = [
+        f"cpu-cpu-frame{suffix}",
+        f"gpu-cpu-frame{suffix}-warp",
+        f"gpu-cpu-frame{suffix}-scale2-warp",
+    ]
+    for mode in modes:
+        frames, result = render_frames(mode, tmp_path / f"{mode}.raw", 1)
+        assert "CPU framebuffer frames 1" in result.stdout
+        frame = frames[0]
+        assert rgb_at(frame, 8, 32) == (0xC0, 0x40, 0x20), mode
+        assert rgb_at(frame, 56, 32) == (0x40, 0xC0, 0x20), mode
+        assert rgb_at(frame, 32 if overlay else 40, 32) == (
+            (0xFF, 0x20, 0x20) if overlay else (0x40, 0xC0, 0x20)
+        ), mode
+
+
 @pytest.mark.skipif(not HARDWARE, reason="set BRUTEFORCE_TEST_D3D11_HARDWARE=1")
 @pytest.mark.parametrize("vertex", ["vsh", "cpuvsh"])
 def test_programmable_near_plane_can_hide_hud_and_glow_together(vertex, tmp_path):

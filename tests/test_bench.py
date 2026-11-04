@@ -83,6 +83,23 @@ def test_capture_rejects_an_overridden_flip_id_mode(tmp_path):
     assert not (tmp_path / "run").exists()
 
 
+def test_profile_callers_rejects_disabled_profile(tmp_path, capsys):
+    assert bench.main([
+        "--no-profile", "--profile-callers", "--out", str(tmp_path / "out")
+    ]) == 1
+    assert "--profile-callers cannot be combined with --no-profile" in capsys.readouterr().err
+    assert not (tmp_path / "out").exists()
+
+
+def test_profile_callers_rejects_variant_override(tmp_path):
+    with pytest.raises(bench.BenchError, match="owns BRUTEFORCE_PROFILE_CALLERS"):
+        bench.run_once(
+            tmp_path / "run", "gpu", "movement", {"BRUTEFORCE_PROFILE_CALLERS": "0"},
+            1, 120, True, False, "Release", profile_callers=True,
+        )
+    assert not (tmp_path / "run").exists()
+
+
 def test_movement_capture_requires_movement_scene(tmp_path, capsys):
     assert bench.main(["--capture-movement", "--out", str(tmp_path / "out")]) == 1
     assert "--capture-movement requires --scene movement" in capsys.readouterr().err
@@ -143,7 +160,29 @@ def test_frame_metrics_rate_and_percentiles(tmp_path):
     assert metrics["frames"] == 10
     assert metrics["frame_ms_p50"] == 500.0
     assert metrics["frame_ms_p99"] == 1000.0
+    assert metrics["frame_ms_max"] == 1000.0
     assert metrics["low_1pct_fps"] == 1.0
+
+
+def test_legacy_world_detection_waits_for_the_validated_menu_route():
+    rows = [
+        {"t": 0.0, "draws": 0},
+        {"t": bench.LEGACY_WORLD_NOT_BEFORE_SECONDS - 0.01, "draws": bench.WORLD_DRAWS},
+        {"t": bench.LEGACY_WORLD_NOT_BEFORE_SECONDS, "draws": bench.WORLD_DRAWS - 1},
+        {"t": bench.LEGACY_WORLD_NOT_BEFORE_SECONDS, "draws": bench.WORLD_DRAWS},
+    ]
+    assert not bench.legacy_world_candidate(rows, 1)
+    assert not bench.legacy_world_candidate(rows, 2)
+    assert bench.legacy_world_candidate(rows, 3)
+    assert bench.MENU_SCRIPT == (
+        "20000:a:200,23000:a:200,28000:a:200,32000:a:200,"
+        "36000:down:200,37000:a:200,42000:a:200,47000:a:200,"
+        "52000:a:200,57000:a:200,62000:a:200"
+    )
+    assert (18.75, "y:300") in bench.MOVEMENT_INPUT
+    assert bench.MOVEMENT_START > 18.75
+    assert all(not command.startswith("lup")
+               for when, command in bench.MOVEMENT_INPUT if when >= 19.0)
 
 
 def test_known_black_metrics_counts_only_frames_with_pixel_hashes():
@@ -189,13 +228,146 @@ def test_parse_profile_threads_and_game_wait(tmp_path):
         "       40.0%  bruteforce!nv2a_vsh_run\n"
         "T9   tid 13  100 samples  busy  30.0%  start bruteforce!raster_worker\n"
         "       70.0%  ntdll!NtWaitForSingleObject\n"
-        "\n== All threads: top modules\n", encoding="utf-8")
+        "\n== All threads: top modules\n"
+        "\n== Outside the exe, by first exe caller\n"
+        "T0\n"
+        "        5.0%  ntdll!NtWaitForSingleObject <- bruteforce!sub_00372180\n"
+        "        3.0%  ntdll!NtWaitForSingleObject <- bruteforce!unrelated_wait\n"
+        "        2.0%  ucrtbase!strchr <- bruteforce!sub_00372180\n"
+        "\n== All threads: top functions\n", encoding="utf-8")
     profile = bench.parse_profile(path)
     assert profile["game_thread"]["kernel_wait_pct"] == 10.0
     assert profile["game_thread"]["guest_gpu_poll_pct"] == 75.0
-    assert profile["game_thread"]["gpu_wait_pct"] == 85.0
+    assert profile["game_thread"]["kernel_gpu_wait_pct"] == 5.0
+    assert profile["game_thread"]["other_kernel_wait_pct"] == 5.0
+    assert profile["game_thread"]["gpu_wait_pct"] == 80.0
+    assert profile["game_thread"]["caller_attribution_available"] is True
     assert profile["nv2a_thread"]["busy_pct"] == 80.0
     assert profile["raster_workers"] == {"count": 1, "mean_busy_pct": 30.0}
+
+
+def test_parse_profile_without_callers_reports_gpu_wait_lower_bound(tmp_path):
+    path = tmp_path / "profile.txt"
+    path.write_text(
+        "Profile (gate closed): 100 samples over 100 ticks\n\n"
+        "THREAD,0,11,100,90,10,bruteforce!mainCRTStartup\n\n"
+        "== Threads (samples)\n"
+        "T0   tid 11  100 samples  busy  90.0%  start bruteforce!mainCRTStartup\n"
+        "       75.0%  bruteforce!sub_00372180\n"
+        "       10.0%  ntdll!NtWaitForSingleObject\n"
+        "\n== All threads: top modules\n", encoding="utf-8")
+    game = bench.parse_profile(path)["game_thread"]
+    assert game["kernel_wait_pct"] == 10.0
+    assert game["guest_gpu_poll_pct"] == 75.0
+    assert game["kernel_gpu_wait_pct"] is None
+    assert game["other_kernel_wait_pct"] is None
+    assert game["gpu_wait_pct"] == 75.0
+    assert game["caller_attribution_available"] is False
+    assert "--profile-callers" in game["gpu_wait_scope"]
+
+
+def test_parse_runtime_diagnostics():
+    diagnostics = bench.parse_runtime_diagnostics(
+        '[GPU-D3D11] device adapter="Test Adapter" vendor=0x10DE device=0x2684 '
+        'subsystem=0x12345678 revision=161 dedicated_vram=12884901888 '
+        'luid=00000000:0000ABCD driver=32.0.15.6094 feature_level=0xB000\n'
+        '[GPU-D3D11] 300 flips: 900 draws (0 extended), readback 1.25 ms/flip, '
+        '4 visibility reads waiting 2.5 ms, 7 reports written asynchronously '
+        '(9 polls found one pending), texture details, '
+        '0 approximate texture-hash bytes\n'
+        '[GPU-D3D11] 200 flips: 600 draws (0 extended), readback 1.50 ms/flip, '
+        '3 visibility reads waiting 1.5 ms, legacy texture details, '
+        '0 approximate texture-hash bytes\n'
+        '[GPU-PSCACHE] compiled in 12.500 ms\n'
+        '[GPU-PSCACHE] compiled in 7.250 ms\n'
+        '[GPU-PSCACHE] hit in 0.375 ms\n'
+        '[PFB-WAIT] event-driven flush wait enabled (200 us IRQ backstop)\n'
+        '[PFB-WAIT] waits=100 acks=100 event_wakes=95 timer_wakes=20 '
+        'spurious_wakes=0 rechecks=15 safe_points=115\n'
+        '[PFB-WAIT] waits=220 acks=220 event_wakes=210 timer_wakes=42 '
+        'spurious_wakes=0 rechecks=32 safe_points=252\n'
+        '[PERF] guest_word: 40 calls, 39 accepted, 1 rejected, 0.800 ms total; '
+        'VirtualQuery 39 calls, 0 failures, 39 regions, 0.500 ms\n'
+        '[PERF] readable_guest_range: 20 calls, 20 accepted, 0 rejected, '
+        '0.400 ms total; VirtualQuery 22 calls, 0 failures, 22 regions, 0.300 ms\n'
+        '[PERF] texture cache: 100 lookups, 450 probes, 90 key hits, 10 misses, '
+        '0.200 ms scanning; exact 80 checks, 70 hits, 4096 source bytes, '
+        '1024 palette bytes, 0.700 ms; snapshots 10 copies, 8192 bytes, '
+        '0.100 ms; rewrites 4, entry evictions 1, snapshot evictions 2, '
+        'failed-upload discards 3, unsupported hits 5\n'
+    )
+    assert diagnostics["device"] == {
+        "adapter": "Test Adapter",
+        "vendor_id": 0x10DE,
+        "device_id": 0x2684,
+        "subsystem_id": 0x12345678,
+        "revision": 161,
+        "dedicated_vram_bytes": 12884901888,
+        "luid": "00000000:0000ABCD",
+        "driver": "32.0.15.6094",
+        "feature_level": "B000",
+    }
+    assert diagnostics["d3d11_intervals"] == [
+        {
+            "flips": 300,
+            "readback_ms_per_flip": 1.25,
+            "visibility_reads": 4,
+            "visibility_wait_ms": 2.5,
+            "reports_written": 7,
+            "report_pending_polls": 9,
+            "approx_hash_bytes": 0,
+        },
+        {
+            "flips": 200,
+            "readback_ms_per_flip": 1.5,
+            "visibility_reads": 3,
+            "visibility_wait_ms": 1.5,
+            "reports_written": None,
+            "report_pending_polls": None,
+            "approx_hash_bytes": 0,
+        },
+    ]
+    assert diagnostics["validation_intervals"]["guest_word"][0]["rejected"] == 1
+    assert diagnostics["validation_intervals"]["readable_guest_range"][0]["regions"] == 22
+    assert diagnostics["texture_intervals"][0]["probes"] == 450
+    assert diagnostics["texture_intervals"][0]["exact_ms"] == 0.7
+    assert diagnostics["texture_intervals"][0]["snapshot_evictions"] == 2
+    assert diagnostics["shader_cache"] == {
+        "compiled": {"count": 2, "total_ms": 19.75, "max_ms": 12.5},
+        "hits": {"count": 1, "total_ms": 0.375, "max_ms": 0.375},
+    }
+    assert diagnostics["pfb_flush_wait"] == {
+        "enabled": True,
+        "snapshots": [
+            {
+                "waits": 100,
+                "acks": 100,
+                "event_wakes": 95,
+                "timer_wakes": 20,
+                "spurious_wakes": 0,
+                "rechecks": 15,
+                "safe_points": 115,
+            },
+            {
+                "waits": 220,
+                "acks": 220,
+                "event_wakes": 210,
+                "timer_wakes": 42,
+                "spurious_wakes": 0,
+                "rechecks": 32,
+                "safe_points": 252,
+            },
+        ],
+        "latest": {
+            "waits": 220,
+            "acks": 220,
+            "event_wakes": 210,
+            "timer_wakes": 42,
+            "spurious_wakes": 0,
+            "rechecks": 32,
+            "safe_points": 252,
+        },
+    }
 
 
 def test_summary_groups_by_label():

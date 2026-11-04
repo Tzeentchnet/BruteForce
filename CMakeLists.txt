@@ -38,7 +38,8 @@ file(GLOB RECOMP_SOURCES CONFIGURE_DEPENDS "${BRUTEFORCE_GEN_DIR}/*.c")
 set(BRUTEFORCE_GPU_SOURCES src/gpu/d3d11_backend.c src/gpu/render_scale.c src/gpu/rc_hlsl.c
     src/gpu/shader_cache.c src/gpu/vsh_hlsl.c src/gpu/texture_decode.c)
 add_executable(bruteforce src/main.c src/recomp_manual.c src/crash_diagnostics.c
-    src/profile.c src/gpu/null_backend.c ${BRUTEFORCE_GPU_SOURCES} ${RECOMP_SOURCES})
+    src/perf_counters.c src/profile.c src/gpu/null_backend.c
+    ${BRUTEFORCE_GPU_SOURCES} ${RECOMP_SOURCES})
 target_compile_definitions(bruteforce PRIVATE WIN32_LEAN_AND_MEAN NOMINMAX)
 target_include_directories(bruteforce PRIVATE
     "${CMAKE_CURRENT_BINARY_DIR}"
@@ -49,9 +50,11 @@ target_include_directories(bruteforce PRIVATE
 )
 target_link_libraries(bruteforce PRIVATE xboxrecomp bcrypt dbghelp winmm d3d11 d3dcompiler)
 
-add_executable(bruteforce_fence_test EXCLUDE_FROM_ALL tests/fence_test.c src/recomp_manual.c)
+add_executable(bruteforce_fence_test EXCLUDE_FROM_ALL
+    tests/fence_test.c src/recomp_manual.c src/perf_counters.c)
 target_compile_definitions(bruteforce_fence_test PRIVATE WIN32_LEAN_AND_MEAN NOMINMAX _CRT_SECURE_NO_WARNINGS)
 target_include_directories(bruteforce_fence_test PRIVATE
+    "${CMAKE_CURRENT_SOURCE_DIR}/src"
     "${XBOXRECOMP_DIR}/src"
     "${XBOXRECOMP_DIR}/src/kernel"
 )
@@ -81,7 +84,8 @@ target_compile_definitions(bruteforce_usb_test PRIVATE WIN32_LEAN_AND_MEAN NOMIN
 target_include_directories(bruteforce_usb_test PRIVATE "${XBOXRECOMP_DIR}/src")
 target_link_libraries(bruteforce_usb_test PRIVATE xboxrecomp)
 
-add_executable(bruteforce_interrupt_test EXCLUDE_FROM_ALL tests/interrupt_test.c src/recomp_manual.c)
+add_executable(bruteforce_interrupt_test EXCLUDE_FROM_ALL
+    tests/interrupt_test.c src/recomp_manual.c src/perf_counters.c)
 target_compile_definitions(bruteforce_interrupt_test PRIVATE WIN32_LEAN_AND_MEAN NOMINMAX _CRT_SECURE_NO_WARNINGS)
 target_include_directories(bruteforce_interrupt_test PRIVATE "${XBOXRECOMP_DIR}/templates/runtime")
 target_link_libraries(bruteforce_interrupt_test PRIVATE xboxrecomp)
@@ -107,6 +111,16 @@ add_executable(bruteforce_pushbuffer_test EXCLUDE_FROM_ALL
     tests/pushbuffer_test.c "${XBOXRECOMP_DIR}/src/kernel/nv2a_pb_scan.c")
 target_compile_definitions(bruteforce_pushbuffer_test PRIVATE
     WIN32_LEAN_AND_MEAN NOMINMAX _CRT_SECURE_NO_WARNINGS)
+
+add_executable(bruteforce_pfb_flush_test EXCLUDE_FROM_ALL
+    "${XBOXRECOMP_DIR}/tests/nv2a_pfb_flush/test_main.c"
+    "${XBOXRECOMP_DIR}/src/kernel/nv2a_pfb_flush.c")
+target_compile_definitions(bruteforce_pfb_flush_test PRIVATE
+    WIN32_LEAN_AND_MEAN NOMINMAX _CRT_SECURE_NO_WARNINGS)
+target_include_directories(bruteforce_pfb_flush_test PRIVATE
+    "${XBOXRECOMP_DIR}/src"
+    "${XBOXRECOMP_DIR}/src/kernel")
+target_link_libraries(bruteforce_pfb_flush_test PRIVATE platform)
 
 add_executable(bruteforce_pgraph_test EXCLUDE_FROM_ALL tests/pgraph_test.c)
 target_compile_definitions(bruteforce_pgraph_test PRIVATE
@@ -161,7 +175,8 @@ target_include_directories(bruteforce_gpu_audit_test PRIVATE
 target_link_libraries(bruteforce_gpu_audit_test PRIVATE xboxrecomp)
 
 add_executable(bruteforce_d3d11_test EXCLUDE_FROM_ALL tests/d3d11_test.c
-    tests/d3d11_texture_test.c tests/shader_cache_test.c src/gpu/null_backend.c ${BRUTEFORCE_GPU_SOURCES})
+    tests/d3d11_texture_test.c tests/shader_cache_test.c src/perf_counters.c
+    src/gpu/null_backend.c ${BRUTEFORCE_GPU_SOURCES})
 target_compile_definitions(bruteforce_d3d11_test PRIVATE
     WIN32_LEAN_AND_MEAN NOMINMAX _CRT_SECURE_NO_WARNINGS)
 target_include_directories(bruteforce_d3d11_test PRIVATE

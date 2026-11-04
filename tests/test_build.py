@@ -380,6 +380,8 @@ def test_pgraph_wrapper_is_discovered_by_the_recompiler(monkeypatch):
     from tools.recomp.manual_scan import scan
 
     skipped, wrapped, _ = scan(str(ROOT / "src" / "recomp_manual.c"))
+    assert 0x00372180 in skipped
+    assert 0x00372180 in wrapped
     assert 0x00377F80 in skipped
     assert 0x00377F80 in wrapped
 

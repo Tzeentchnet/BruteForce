@@ -8,6 +8,7 @@
 #include "kernel.h"
 #include "nv2a_backend.h"
 #include "xbox_memory_layout.h"
+#include "perf_counters.h"
 
 #define DEVICE_GLOBAL 0x0037DD88u
 #define DEVICE_A 0x0037D000u
@@ -31,11 +32,14 @@ static uint8_t *guest;
 static volatile LONG target;
 static volatile LONG calls;
 static volatile LONG event_calls, acknowledged, completed, generated;
+static volatile LONG pfb_wait_calls;
+static volatile uint32_t pfb_register;
 static uint32_t connected_interrupt;
-static int acknowledge_result;
+static int acknowledge_result, pfb_wait_enabled;
 
 void sub_00371AB0_enter(void);
 void sub_0037834E_enter(void);
+void sub_00372180(void);
 void sub_00377F80(void);
 void recomp_icall_fail_log(uint32_t va);
 
@@ -91,6 +95,31 @@ void xbox_Nv2aGraphCompleteTrap(void)
     if (generated != 1)
         abort();
     InterlockedIncrement(&completed);
+}
+
+void sub_00372180_gen(void)
+{
+    InterlockedIncrement(&generated);
+    g_esp += 4;
+}
+
+int xbox_Nv2aPfbFlushWaitEnabled(void)
+{
+    return pfb_wait_enabled;
+}
+
+int xbox_Nv2aPfbFlushWait(void)
+{
+    if (!(pfb_register & 0x10000u))
+        abort();
+    InterlockedAnd((volatile LONG *)&pfb_register, ~(LONG)0x10000u);
+    InterlockedIncrement(&pfb_wait_calls);
+    return 1;
+}
+
+volatile uint32_t *xbox_Nv2aRegPtr(uint32_t offset)
+{
+    return offset == 0x100410u ? &pfb_register : NULL;
 }
 
 void sub_00377F80_gen(void)
@@ -227,6 +256,7 @@ static int gamma_test(const char *mode)
 int main(int argc, char **argv)
 {
     const char *mode = argc == 2 ? argv[1] : "";
+    BruteForcePerfCounters perf_counters, reset_counters;
     HANDLE threads[THREADS];
     DWORD old_protection;
     int i;
@@ -238,8 +268,52 @@ int main(int argc, char **argv)
     if (!initialize() || _putenv_s("RECOMP_PB_EXEC", "") != 0 ||
         _putenv_s("RECOMP_PGRAPH_IRQ", "") != 0)
         return 2;
+    if (strcmp(mode, "perf-counters") == 0) {
+        const uint64_t expected_calls = (uint64_t)THREADS * ITERATIONS * 4;
+        if (_putenv_s("BRUTEFORCE_PERF_COUNTERS", "1") != 0 ||
+            _putenv_s("RECOMP_PB_EXEC", "1") != 0 ||
+            !bruteforce_perf_counters_init())
+            return 2;
+        for (i = 0; i < THREADS; ++i) {
+            threads[i] = CreateThread(NULL, 0, register_many, NULL, 0, NULL);
+            if (threads[i] == NULL)
+                return 2;
+        }
+        if (WaitForMultipleObjects(THREADS, threads, TRUE, 10000) != WAIT_OBJECT_0)
+            return 2;
+        for (i = 0; i < THREADS; ++i)
+            CloseHandle(threads[i]);
+        bruteforce_perf_counters_take(&perf_counters);
+        bruteforce_perf_counters_take(&reset_counters);
+        if (perf_counters.guest_word.calls != expected_calls ||
+            perf_counters.guest_word.accepted != expected_calls ||
+            perf_counters.guest_word.rejected != 0 ||
+            perf_counters.guest_word.virtual_queries != expected_calls ||
+            perf_counters.guest_word.query_failures != 0 ||
+            perf_counters.guest_word.regions != expected_calls ||
+            reset_counters.guest_word.calls != 0 ||
+            reset_counters.guest_word.virtual_queries != 0 ||
+            calls != THREADS * ITERATIONS)
+            return 1;
+        printf("guest_word performance counters validated: %llu calls\n",
+               (unsigned long long)expected_calls);
+        return 0;
+    }
     if (strncmp(mode, "gamma-", 6) == 0)
         return gamma_test(mode);
+    if (strcmp(mode, "pfb-disabled") == 0 ||
+        strcmp(mode, "pfb-enabled") == 0) {
+        pfb_wait_enabled = strcmp(mode, "pfb-enabled") == 0;
+        put32(MINIPORT, 0xFD000000u);
+        g_esp = GUEST_RETURN;
+        sub_00372180();
+        return g_esp != GUEST_RETURN + 4 ||
+               generated != !pfb_wait_enabled ||
+               pfb_wait_calls != pfb_wait_enabled ||
+               pfb_register != 0 ||
+               (pfb_wait_enabled &&
+                (g_eax != 0xFD000000u || g_ecx != 0x10000u));
+    }
     if (strcmp(mode, "trap-disabled") == 0) {
         g_esp = GUEST_RETURN;
         sub_00377F80();

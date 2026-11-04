@@ -70,6 +70,8 @@ def unreviewed_metrics(rows):
         "reviewed_world_frames": 0,
         "reviewed_world_changes": 0,
         "reviewed_world_changes_per_second": None,
+        "reviewed_world_low_1pct_fps": None,
+        "reviewed_world_cadence": None,
     }
 
 
@@ -111,6 +113,44 @@ def _pixel_changes(before, after, mask, tolerance):
     selected = maximum.point(lambda value: 255 if value > tolerance else 0)
     selected = ImageChops.multiply(selected, mask)
     return selected.histogram()[255], diff.getbbox() is not None
+
+
+def _percentile(values, fraction):
+    if not values:
+        return None
+    ordered = sorted(values)
+    index = min(len(ordered) - 1, max(0, round(fraction * (len(ordered) - 1))))
+    return ordered[index]
+
+
+def _world_cadence(details):
+    intervals = []
+    previous_world_time = None
+    segments = 0
+    for frame in details:
+        category = frame["classification"]
+        if category == "world_baseline":
+            previous_world_time = frame["t"]
+            segments += 1
+        elif category == "world_changed" and previous_world_time is not None:
+            intervals.append((frame["t"] - previous_world_time) * 1000)
+            previous_world_time = frame["t"]
+        elif category not in ("world_static", "hud_only"):
+            previous_world_time = None
+    if not intervals:
+        return None
+    p99 = _percentile(intervals, 0.99)
+    return {
+        "scope": ("reviewer-labeled baseline-to-change and change-to-change intervals; "
+                  "trailing incomplete intervals are excluded"),
+        "frames": len(intervals),
+        "segments": segments,
+        "seconds": round(sum(intervals) / 1000, 3),
+        "frame_ms_p50": round(_percentile(intervals, 0.5), 2),
+        "frame_ms_p90": round(_percentile(intervals, 0.9), 2),
+        "frame_ms_p99": round(p99, 2),
+        "low_1pct_fps": round(1000 / p99, 3) if p99 else None,
+    }
 
 
 def analyze_manifest(path):
@@ -258,6 +298,7 @@ def analyze_manifest(path):
     duration = frames[-1]["t"] - frames[0]["t"]
     world_transitions = counts["world_changed"] + counts["world_static"] + counts["hud_only"]
     eligible = review_complete and classified and aligned and duration > 0 and world_transitions > 0
+    cadence = _world_cadence(details) if eligible else None
     raw_complete = len(frames) > 1 and raw_compared == len(frames) - 1 and aligned
     return {
         "status": "reviewer_asserted" if eligible else "inconclusive",
@@ -278,6 +319,8 @@ def analyze_manifest(path):
         "reviewed_world_changes": counts["world_changed"],
         "reviewed_world_changes_per_second": (
             round(counts["world_changed"] / duration, 3) if eligible else None),
+        "reviewed_world_low_1pct_fps": cadence["low_1pct_fps"] if cadence else None,
+        "reviewed_world_cadence": cadence,
         "raw_region_pixel_changes": {
             "changed_transitions": raw_changed, "compared_transitions": raw_compared,
             "changes_per_second": round(raw_changed / duration, 3) if raw_complete and duration > 0 else None,

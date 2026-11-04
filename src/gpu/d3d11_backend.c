@@ -64,6 +64,7 @@
 #include "shader_cache.h"
 #include "texture_decode.h"
 #include "vsh_hlsl.h"
+#include "../perf_counters.h"
 
 extern ptrdiff_t xbox_GetMemoryOffset(void);
 
@@ -112,6 +113,61 @@ static int gpu_call_failed(HRESULT result, const char *operation)
     return 0;
 }
 
+static void report_device_identity(D3D_FEATURE_LEVEL feature_level)
+{
+    IDXGIDevice *dxgi_device = NULL;
+    IDXGIAdapter *adapter = NULL;
+    DXGI_ADAPTER_DESC desc;
+    LARGE_INTEGER driver_version;
+    char adapter_name[512];
+    char driver[64];
+    HRESULT hr;
+
+    hr = ID3D11Device_QueryInterface(s_dev, &IID_IDXGIDevice, (void **)&dxgi_device);
+    if (FAILED(hr)) {
+        fprintf(stderr, "[GPU-D3D11] cannot query DXGI device identity 0x%08lX\n",
+                (unsigned long)hr);
+        return;
+    }
+    hr = IDXGIDevice_GetAdapter(dxgi_device, &adapter);
+    IDXGIDevice_Release(dxgi_device);
+    if (FAILED(hr)) {
+        fprintf(stderr, "[GPU-D3D11] cannot query adapter identity 0x%08lX\n",
+                (unsigned long)hr);
+        return;
+    }
+    hr = IDXGIAdapter_GetDesc(adapter, &desc);
+    if (FAILED(hr)) {
+        fprintf(stderr, "[GPU-D3D11] cannot read adapter description 0x%08lX\n",
+                (unsigned long)hr);
+        IDXGIAdapter_Release(adapter);
+        return;
+    }
+    if (!WideCharToMultiByte(CP_UTF8, WC_ERR_INVALID_CHARS, desc.Description, -1,
+                             adapter_name, sizeof adapter_name, NULL, NULL)) {
+        fprintf(stderr, "[GPU-D3D11] cannot encode adapter description (Windows error %lu)\n",
+                (unsigned long)GetLastError());
+        snprintf(adapter_name, sizeof adapter_name, "<encoding unavailable>");
+    }
+    hr = IDXGIAdapter_CheckInterfaceSupport(adapter, &IID_ID3D11Device, &driver_version);
+    if (SUCCEEDED(hr)) {
+        snprintf(driver, sizeof driver, "%u.%u.%u.%u",
+                 HIWORD(driver_version.HighPart), LOWORD(driver_version.HighPart),
+                 HIWORD(driver_version.LowPart), LOWORD(driver_version.LowPart));
+    } else {
+        snprintf(driver, sizeof driver, "unavailable:0x%08lX", (unsigned long)hr);
+    }
+    fprintf(stderr, "[GPU-D3D11] device adapter=\"%s\" vendor=0x%04X device=0x%04X"
+                    " subsystem=0x%08X revision=%u dedicated_vram=%llu"
+                    " luid=%08lX:%08lX driver=%s feature_level=0x%04X\n",
+            adapter_name, desc.VendorId, desc.DeviceId, desc.SubSysId, desc.Revision,
+            (unsigned long long)desc.DedicatedVideoMemory,
+            (unsigned long)desc.AdapterLuid.HighPart,
+            (unsigned long)desc.AdapterLuid.LowPart,
+            driver, (unsigned)feature_level);
+    IDXGIAdapter_Release(adapter);
+}
+
 /* ---- statistics ---------------------------------------------------------- */
 
 static struct {
@@ -124,7 +180,7 @@ static struct {
     unsigned stencil_samples, stencil_conversions;
     unsigned guest_uploads, guest_conflicts;
     unsigned present_shared, present_busy;
-    uint64_t tex_hashed_bytes;
+    uint64_t tex_approx_hash_bytes;
     double readback_ms;
 } s_st;
 
@@ -140,6 +196,59 @@ static double qpc_ms(void)
         QueryPerformanceFrequency(&f);
     QueryPerformanceCounter(&c);
     return (double)c.QuadPart * 1000.0 / (double)f.QuadPart;
+}
+
+static void report_validation_perf(const char *name,
+                                   const BruteForceValidationPerfCounters *counters)
+{
+    fprintf(stderr, "[PERF] %s: %llu calls, %llu accepted, %llu rejected,"
+                    " %.3f ms total; VirtualQuery %llu calls, %llu failures,"
+                    " %llu regions, %.3f ms\n",
+            name,
+            (unsigned long long)counters->calls,
+            (unsigned long long)counters->accepted,
+            (unsigned long long)counters->rejected,
+            bruteforce_perf_ticks_ms(counters->total_ticks),
+            (unsigned long long)counters->virtual_queries,
+            (unsigned long long)counters->query_failures,
+            (unsigned long long)counters->regions,
+            bruteforce_perf_ticks_ms(counters->query_ticks));
+}
+
+static void report_detailed_perf(void)
+{
+    BruteForcePerfCounters counters;
+    const BruteForceTexturePerfCounters *texture;
+
+    bruteforce_perf_counters_take(&counters);
+    report_validation_perf("guest_word", &counters.guest_word);
+    report_validation_perf("readable_guest_range", &counters.guest_range);
+    texture = &counters.texture;
+    fprintf(stderr, "[PERF] texture cache: %llu lookups, %llu probes,"
+                    " %llu key hits, %llu misses, %.3f ms scanning;"
+                    " exact %llu checks, %llu hits, %llu source bytes,"
+                    " %llu palette bytes, %.3f ms;"
+                    " snapshots %llu copies, %llu bytes, %.3f ms;"
+                    " rewrites %llu, entry evictions %llu, snapshot evictions %llu,"
+                    " failed-upload discards %llu, unsupported hits %llu\n",
+            (unsigned long long)texture->lookups,
+            (unsigned long long)texture->probes,
+            (unsigned long long)texture->key_hits,
+            (unsigned long long)texture->key_misses,
+            bruteforce_perf_ticks_ms(texture->lookup_ticks),
+            (unsigned long long)texture->exact_checks,
+            (unsigned long long)texture->exact_hits,
+            (unsigned long long)texture->source_compare_bytes,
+            (unsigned long long)texture->palette_compare_bytes,
+            bruteforce_perf_ticks_ms(texture->exact_ticks),
+            (unsigned long long)texture->snapshot_copies,
+            (unsigned long long)texture->snapshot_copy_bytes,
+            bruteforce_perf_ticks_ms(texture->snapshot_copy_ticks),
+            (unsigned long long)texture->rewrites,
+            (unsigned long long)texture->evictions,
+            (unsigned long long)texture->snapshot_evictions,
+            (unsigned long long)texture->discards,
+            (unsigned long long)texture->unsupported_hits);
 }
 
 static void stats_flip(void)
@@ -162,7 +271,7 @@ static void stats_flip(void)
                         " stencil aliases %u conversions %u,"
                         " guest uploads %u conflicts %u,"
                         " shared presents %u busy %u,"
-                        " %llu texture bytes checked or copied (upper bound)\n",
+                        " %llu approximate texture-hash bytes\n",
                 s_st.flips, s_st.draws, s_st.xdraws, s_st.vdraws, s_st.vraw, s_st.vfall,
                 s_st.tris, s_st.uploads, s_st.rtt, s_st.overlap_rtt, s_st.clears,
                 s_st.ps_compiles, s_st.kup, s_st.kskip,
@@ -174,7 +283,9 @@ static void stats_flip(void)
                 s_st.stencil_samples, s_st.stencil_conversions,
                 s_st.guest_uploads, s_st.guest_conflicts,
                 s_st.present_shared, s_st.present_busy,
-                (unsigned long long)s_st.tex_hashed_bytes);
+                (unsigned long long)s_st.tex_approx_hash_bytes);
+        if (g_bruteforce_perf_counters_enabled)
+            report_detailed_perf();
         s_q_reads = 0;
         s_q_wait_ms = 0.0;
         s_rep_written = s_rep_flushes = 0;
@@ -388,6 +499,7 @@ static int ensure_device(void)
         return 0;
     }
     InterlockedExchange(&s_device_thread, (LONG)GetCurrentThreadId());
+    report_device_identity(got);
     if (!compile(s_base_hlsl, sizeof s_base_hlsl - 1, "base", "vs_main", "vs_5_0", &vsb)
         || !compile(s_base_hlsl, sizeof s_base_hlsl - 1, "base", "ps_main", "ps_5_0", &psb)
         || !compile(s_xvs_hlsl, sizeof s_xvs_hlsl - 1, "xvs", "vs_main", "vs_5_0", &xvsb)) {
@@ -786,30 +898,53 @@ static int readable_guest_range(uint32_t va, uint64_t bytes)
                            PAGE_EXECUTE_READ | PAGE_EXECUTE_READWRITE | PAGE_EXECUTE_WRITECOPY;
     uint64_t guest_end = (uint64_t)va + bytes;
     uintptr_t offset = (uintptr_t)xbox_GetMemoryOffset(), p, end;
+    uint64_t total_start = 0, query_start = 0, query_ticks = 0;
+    unsigned queries = 0, query_failures = 0, regions = 0;
+    int accepted = 0;
+    int perf = g_bruteforce_perf_counters_enabled;
 
+    if (perf)
+        total_start = bruteforce_perf_clock();
     if (!va || !bytes || bytes > XBOX_CONTIG_SIZE ||
         !(guest_end <= XBOX_CONTIG_SIZE ||
           (va >= XBOX_CONTIG_BASE && guest_end <= (uint64_t)XBOX_CONTIG_BASE + XBOX_CONTIG_SIZE)) ||
         offset > UINTPTR_MAX - va)
-        return 0;
+        goto done;
     p = offset + va;
     if (bytes > UINTPTR_MAX - p)
-        return 0;
+        goto done;
     end = p + (uintptr_t)bytes;
     while (p < end) {
         MEMORY_BASIC_INFORMATION info;
         uintptr_t base, available;
-        if (VirtualQuery((const void *)p, &info, sizeof info) != sizeof info ||
-            info.State != MEM_COMMIT || (info.Protect & (PAGE_GUARD | PAGE_NOACCESS)) ||
+        SIZE_T query_result;
+        if (perf)
+            query_start = bruteforce_perf_clock();
+        queries++;
+        query_result = VirtualQuery((const void *)p, &info, sizeof info);
+        if (perf)
+            query_ticks += bruteforce_perf_clock() - query_start;
+        if (query_result != sizeof info) {
+            query_failures++;
+            goto done;
+        }
+        regions++;
+        if (info.State != MEM_COMMIT || (info.Protect & (PAGE_GUARD | PAGE_NOACCESS)) ||
             !(info.Protect & readable))
-            return 0;
+            goto done;
         base = (uintptr_t)info.BaseAddress;
         if (p < base || p - base >= info.RegionSize)
-            return 0;
+            goto done;
         available = info.RegionSize - (p - base);
         p += available < end - p ? available : end - p;
     }
-    return 1;
+    accepted = 1;
+
+done:
+    if (perf)
+        bruteforce_perf_record_guest_range(accepted, queries, query_failures, regions,
+                                           bruteforce_perf_clock() - total_start, query_ticks);
+    return accepted;
 }
 
 /* Xbox Z24S8 stores depth in the high 24 bits; D3D11 R24G8 stores it in
@@ -1396,7 +1531,7 @@ static uint64_t tex_hash(const Nv2aTexture *t, int faces)
     size_t n = tex_bytes(t, faces);
     if (!n)
         return 0;
-    s_st.tex_hashed_bytes += n;
+    s_st.tex_approx_hash_bytes += n;
     return hash_bytes(GUEST(t->offset), n) ^ ((uint64_t)t->color << 56);
 }
 
@@ -1454,6 +1589,8 @@ static void retain_tex_snapshot(Tex *e, uint8_t *snapshot, size_t bytes)
             free(snapshot);
             return;
         }
+        if (g_bruteforce_perf_counters_enabled)
+            bruteforce_perf_record_texture_snapshot_eviction();
         release_tex_snapshot(&s_tex[lru]);
     }
     e->snapshot = snapshot;
@@ -1475,6 +1612,8 @@ static Tex *tex_slot(Tex *e)
     for (i = 1; i < s_ntex; i++)
         if (s_tex[i].last_use < s_tex[lru].last_use)
             lru = i;
+    if (g_bruteforce_perf_counters_enabled)
+        bruteforce_perf_record_texture_eviction();
     release_tex(&s_tex[lru]);
     return &s_tex[lru];
 }
@@ -1482,6 +1621,8 @@ static Tex *tex_slot(Tex *e)
 static void discard_tex(Tex *e)
 {
     int index = (int)(e - s_tex);
+    if (g_bruteforce_perf_counters_enabled)
+        bruteforce_perf_record_texture_discard();
     release_tex(e);
     --s_ntex;
     if (index != s_ntex)
@@ -1667,8 +1808,11 @@ static ID3D11ShaderResourceView *get_texture(const Nv2aTexture *t, int cube, uns
     size_t source_bytes, palette_bytes, snapshot_bytes;
     uint8_t *snapshot;
     unsigned palette_entries = 0, invalid_index;
+    unsigned perf_probes = 0;
     const char *path = NULL;
     TextureUploadResult upload_result;
+    uint64_t perf_start = 0;
+    int perf = g_bruteforce_perf_counters_enabled;
     int rewritten;
     int i, faces = cube ? 6 : 1;
 
@@ -1720,7 +1864,11 @@ static ID3D11ShaderResourceView *get_texture(const Nv2aTexture *t, int cube, uns
     }
     palette_bytes = (size_t)palette_entries * 4;
     snapshot_bytes = source_bytes + palette_bytes;
-    for (i = 0; i < s_ntex; i++)
+    if (perf)
+        perf_start = bruteforce_perf_clock();
+    for (i = 0; i < s_ntex; i++) {
+        if (perf)
+            perf_probes++;
         if (s_tex[i].offset == t->offset && s_tex[i].w == t->width && s_tex[i].h == t->height
                 && s_tex[i].color == t->color && s_tex[i].pitch == t->pitch
                 && s_tex[i].cube == (uint8_t)cube && s_tex[i].palette == t->palette
@@ -1729,21 +1877,42 @@ static ID3D11ShaderResourceView *get_texture(const Nv2aTexture *t, int cube, uns
             e = &s_tex[i];
             break;
         }
+    }
+    if (perf)
+        bruteforce_perf_record_texture_lookup(perf_probes, e != NULL,
+                                              bruteforce_perf_clock() - perf_start);
     if (e && e->unsupported) {
         e->last_use = s_gen;
         s_st.tex_unsupported_hits++;
+        if (perf)
+            bruteforce_perf_record_texture_unsupported_hit();
         return NULL;
     }
-    if (s_tex_approx && palette_bytes)
+    if (s_tex_approx && palette_bytes) {
+        s_st.tex_approx_hash_bytes += palette_bytes;
         palette_hash = hash_bytes(GUEST(t->palette), palette_bytes);
+    }
     if (!s_tex_approx) {
-        s_st.tex_hashed_bytes += source_bytes;
-        if (e && e->snapshot && e->snapshot_bytes == snapshot_bytes
-            && !memcmp(e->snapshot, GUEST(t->offset), source_bytes)
-            && (!palette_bytes
-                || !memcmp(e->snapshot + source_bytes, GUEST(t->palette), palette_bytes))) {
-            e->last_use = s_gen;
-            return e->srv;
+        if (e && e->snapshot && e->snapshot_bytes == snapshot_bytes) {
+            size_t compared_palette_bytes = 0;
+            int source_equal, palette_equal;
+            if (perf)
+                perf_start = bruteforce_perf_clock();
+            source_equal = !memcmp(e->snapshot, GUEST(t->offset), source_bytes);
+            palette_equal = !palette_bytes;
+            if (source_equal && palette_bytes) {
+                compared_palette_bytes = palette_bytes;
+                palette_equal = !memcmp(e->snapshot + source_bytes,
+                                        GUEST(t->palette), palette_bytes);
+            }
+            if (perf)
+                bruteforce_perf_record_texture_exact(
+                    source_bytes, compared_palette_bytes, source_equal && palette_equal,
+                    bruteforce_perf_clock() - perf_start);
+            if (source_equal && palette_equal) {
+                e->last_use = s_gen;
+                return e->srv;
+            }
         }
     } else {
         if (e && e->gen == s_gen && e->palette_hash == palette_hash) {
@@ -1774,9 +1943,14 @@ static ID3D11ShaderResourceView *get_texture(const Nv2aTexture *t, int cube, uns
         fflush(stderr);
         abort();
     }
+    if (perf)
+        perf_start = bruteforce_perf_clock();
     memcpy(snapshot, GUEST(t->offset), source_bytes);
     if (palette_bytes)
         memcpy(snapshot + source_bytes, GUEST(t->palette), palette_bytes);
+    if (perf)
+        bruteforce_perf_record_texture_snapshot(snapshot_bytes,
+                                                bruteforce_perf_clock() - perf_start);
     if (palette_bytes && !gpu_texture_p8_indices_valid(t, faces, snapshot,
                                                         palette_entries, &invalid_index)) {
         if (invalid_index < 256)
@@ -1790,10 +1964,19 @@ static ID3D11ShaderResourceView *get_texture(const Nv2aTexture *t, int cube, uns
         fflush(stderr);
         abort();
     }
-    h = s_tex_approx ? hash_bytes(snapshot, source_bytes) ^ ((uint64_t)t->color << 56) : 0;
-    if (s_tex_approx && palette_bytes)
-        palette_hash = hash_bytes(snapshot + source_bytes, palette_bytes);
+    if (s_tex_approx) {
+        s_st.tex_approx_hash_bytes += source_bytes;
+        h = hash_bytes(snapshot, source_bytes) ^ ((uint64_t)t->color << 56);
+        if (palette_bytes) {
+            s_st.tex_approx_hash_bytes += palette_bytes;
+            palette_hash = hash_bytes(snapshot + source_bytes, palette_bytes);
+        }
+    } else {
+        h = 0;
+    }
     rewritten = e != NULL;
+    if (perf && rewritten)
+        bruteforce_perf_record_texture_rewrite();
     e = tex_slot(e);
     memset(e, 0, sizeof *e);
     set_tex_key(e, t, cube, palette_entries);

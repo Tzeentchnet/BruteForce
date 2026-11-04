@@ -1,0 +1,672 @@
+diff --git a/docs/technical/pushbuffer-executor.md b/docs/technical/pushbuffer-executor.md
+index dfd15aa..a4796af 100644
+--- a/docs/technical/pushbuffer-executor.md
++++ b/docs/technical/pushbuffer-executor.md
+@@ -56,7 +56,11 @@ the thread that would otherwise answer.
+   With the bits cleared only between passes of the poll loop, one pass can be a
+   whole rendered frame, so a level load — thousands of kickoffs — looked
+   frozen. The walker now clears them every 256 words
+-  (`xbox_Nv2aAckBusyBits`).
++  (`xbox_Nv2aAckBusyBits`). A title-specific hook can replace that spin with
++  `xbox_Nv2aPfbFlushWait` behind `RECOMP_PFB_FLUSH_WAIT=1`. The same
++  acknowledgement path signals the waiter only after it clears the real bit;
++  a 200 microsecond timer merely rechecks the bit and runs an IRQ safe point.
++  Flip holds continue to defer both the clear and its signal.
+ - **Fence mirrors.** A project that registers `xbox_Nv2aMirrorFence` has the
+   poll thread copy the title's "submitted" fence into its "consumed" one. The
+   walk now follows every CALL and JUMP, so a pass can be long, and a mirror
+diff --git a/src/kernel/CMakeLists.txt b/src/kernel/CMakeLists.txt
+index fce12ca..58c5aaa 100644
+--- a/src/kernel/CMakeLists.txt
++++ b/src/kernel/CMakeLists.txt
+@@ -25,6 +25,7 @@ set(KERNEL_SOURCES
+     guest_vmem.c
+     icall_feedback.c
+     recomp_trace.c
++    nv2a_pfb_flush.c
+     nv2a_pb_scan.c
+     nv2a_pb_exec.c
+     nv2a_flip_hold.c
+diff --git a/src/kernel/nv2a_pfb_flush.c b/src/kernel/nv2a_pfb_flush.c
+new file mode 100644
+index 0000000..67bc725
+--- /dev/null
++++ b/src/kernel/nv2a_pfb_flush.c
+@@ -0,0 +1,353 @@
++#include "nv2a_pfb_flush.h"
++#include "platform/xbox_winnt.h"
++
++#include <limits.h>
++#include <stdio.h>
++#include <stdlib.h>
++#include <string.h>
++
++#if !defined(_WIN32)
++#include <errno.h>
++#include <pthread.h>
++#include <time.h>
++#endif
++
++#define PFB_FLUSH_BACKSTOP_NS 200000u
++
++enum PfbWake {
++    PFB_WAKE_EVENT,
++    PFB_WAKE_TIMER,
++    PFB_WAKE_SPURIOUS
++};
++
++static volatile LONG s_enabled = -1;
++static volatile LONGLONG s_waits;
++static volatile LONGLONG s_acks;
++static volatile LONGLONG s_event_wakes;
++static volatile LONGLONG s_timer_wakes;
++static volatile LONGLONG s_spurious_wakes;
++static volatile LONGLONG s_rechecks;
++static volatile LONGLONG s_safe_points;
++static volatile LONG s_last_report_ms;
++
++static void counter_increment(volatile LONGLONG *counter)
++{
++    LONGLONG value = InterlockedCompareExchange64(counter, 0, 0);
++
++    while (value != LLONG_MAX) {
++        LONGLONG previous =
++            InterlockedCompareExchange64(counter, value + 1, value);
++        if (previous == value)
++            return;
++        value = previous;
++    }
++}
++
++static LONGLONG counter_read(volatile LONGLONG *counter)
++{
++    return InterlockedCompareExchange64(counter, 0, 0);
++}
++
++static int parse_enabled(void)
++{
++    const char *value = getenv("RECOMP_PFB_FLUSH_WAIT");
++
++    if (!value || strcmp(value, "0") == 0)
++        return 0;
++    if (strcmp(value, "1") == 0)
++        return 1;
++    fprintf(stderr, "[PFB-WAIT] RECOMP_PFB_FLUSH_WAIT must be 0 or 1\n");
++    fflush(stderr);
++    abort();
++}
++
++#if defined(_WIN32)
++
++#ifndef CREATE_WAITABLE_TIMER_HIGH_RESOLUTION
++#define CREATE_WAITABLE_TIMER_HIGH_RESOLUTION 0x00000002
++#endif
++
++static INIT_ONCE s_once = INIT_ONCE_STATIC_INIT;
++static HANDLE s_ack_event;
++static XBOX_THREAD_LOCAL HANDLE s_backstop_timer;
++
++static BOOL CALLBACK pfb_flush_init(PINIT_ONCE once, PVOID parameter,
++                                    PVOID *context)
++{
++    int enabled = parse_enabled();
++    (void)once;
++    (void)parameter;
++    (void)context;
++
++    if (enabled) {
++        s_ack_event = CreateEventW(NULL, FALSE, FALSE, NULL);
++        if (!s_ack_event) {
++            fprintf(stderr, "[PFB-WAIT] cannot create acknowledgement event: %lu\n",
++                    (unsigned long)GetLastError());
++            fflush(stderr);
++            abort();
++        }
++        fprintf(stderr, "[PFB-WAIT] event-driven flush wait enabled "
++                        "(200 us IRQ backstop)\n");
++        fflush(stderr);
++    }
++    InterlockedExchange(&s_enabled, enabled);
++    return TRUE;
++}
++
++static void ensure_initialized(void)
++{
++    if (!InitOnceExecuteOnce(&s_once, pfb_flush_init, NULL, NULL)) {
++        fprintf(stderr, "[PFB-WAIT] cannot initialize flush wait: %lu\n",
++                (unsigned long)GetLastError());
++        fflush(stderr);
++        abort();
++    }
++}
++
++static enum PfbWake wait_once(void)
++{
++    HANDLE handles[2];
++    LARGE_INTEGER due;
++    DWORD result;
++
++    if (!s_backstop_timer) {
++        s_backstop_timer =
++            CreateWaitableTimerExW(NULL, NULL,
++                                   CREATE_WAITABLE_TIMER_HIGH_RESOLUTION,
++                                   TIMER_ALL_ACCESS);
++        if (!s_backstop_timer) {
++            fprintf(stderr, "[PFB-WAIT] cannot create high-resolution timer: %lu\n",
++                    (unsigned long)GetLastError());
++            fflush(stderr);
++            abort();
++        }
++    }
++
++    due.QuadPart = -(LONGLONG)(PFB_FLUSH_BACKSTOP_NS / 100u);
++    if (!SetWaitableTimer(s_backstop_timer, &due, 0, NULL, NULL, FALSE)) {
++        fprintf(stderr, "[PFB-WAIT] cannot arm high-resolution timer: %lu\n",
++                (unsigned long)GetLastError());
++        fflush(stderr);
++        abort();
++    }
++
++    handles[0] = s_ack_event;
++    handles[1] = s_backstop_timer;
++    result = WaitForMultipleObjects(2, handles, FALSE, INFINITE);
++    if (result == WAIT_OBJECT_0)
++        return PFB_WAKE_EVENT;
++    if (result == WAIT_OBJECT_0 + 1)
++        return PFB_WAKE_TIMER;
++
++    fprintf(stderr, "[PFB-WAIT] acknowledgement wait failed: %lu\n",
++            (unsigned long)GetLastError());
++    fflush(stderr);
++    abort();
++}
++
++static void signal_ack(void)
++{
++    if (!SetEvent(s_ack_event)) {
++        fprintf(stderr, "[PFB-WAIT] cannot signal acknowledgement: %lu\n",
++                (unsigned long)GetLastError());
++        fflush(stderr);
++        abort();
++    }
++}
++
++#else
++
++static pthread_once_t s_once = PTHREAD_ONCE_INIT;
++static pthread_mutex_t s_ack_lock = PTHREAD_MUTEX_INITIALIZER;
++static pthread_cond_t s_ack_cond;
++static uint64_t s_ack_generation;
++
++static void pfb_flush_init(void)
++{
++    int enabled = parse_enabled();
++
++    if (enabled) {
++#if defined(__APPLE__)
++        if (pthread_cond_init(&s_ack_cond, NULL) != 0) {
++            fprintf(stderr, "[PFB-WAIT] cannot initialize acknowledgement condition\n");
++            abort();
++        }
++#else
++        pthread_condattr_t attr;
++        if (pthread_condattr_init(&attr) != 0 ||
++            pthread_condattr_setclock(&attr, CLOCK_MONOTONIC) != 0 ||
++            pthread_cond_init(&s_ack_cond, &attr) != 0 ||
++            pthread_condattr_destroy(&attr) != 0) {
++            fprintf(stderr, "[PFB-WAIT] cannot initialize acknowledgement condition\n");
++            abort();
++        }
++#endif
++        fprintf(stderr, "[PFB-WAIT] event-driven flush wait enabled "
++                        "(200 us IRQ backstop)\n");
++        fflush(stderr);
++    }
++    InterlockedExchange(&s_enabled, enabled);
++}
++
++static void ensure_initialized(void)
++{
++    if (pthread_once(&s_once, pfb_flush_init) != 0) {
++        fprintf(stderr, "[PFB-WAIT] cannot initialize flush wait\n");
++        abort();
++    }
++}
++
++static enum PfbWake wait_once(void)
++{
++    uint64_t generation;
++    uint64_t current_generation;
++    int result;
++#if defined(__APPLE__)
++    struct timespec deadline = { 0, PFB_FLUSH_BACKSTOP_NS };
++#else
++    struct timespec deadline;
++#endif
++
++    if (pthread_mutex_lock(&s_ack_lock) != 0) {
++        fprintf(stderr, "[PFB-WAIT] cannot lock acknowledgement condition\n");
++        abort();
++    }
++    generation = s_ack_generation;
++#if defined(__APPLE__)
++    result = pthread_cond_timedwait_relative_np(&s_ack_cond, &s_ack_lock,
++                                                &deadline);
++#else
++    if (clock_gettime(CLOCK_MONOTONIC, &deadline) != 0) {
++        fprintf(stderr, "[PFB-WAIT] cannot read the monotonic clock\n");
++        abort();
++    }
++    deadline.tv_nsec += PFB_FLUSH_BACKSTOP_NS;
++    if (deadline.tv_nsec >= 1000000000L) {
++        deadline.tv_sec++;
++        deadline.tv_nsec -= 1000000000L;
++    }
++    result = pthread_cond_timedwait(&s_ack_cond, &s_ack_lock, &deadline);
++#endif
++    current_generation = s_ack_generation;
++    if (pthread_mutex_unlock(&s_ack_lock) != 0) {
++        fprintf(stderr, "[PFB-WAIT] cannot unlock acknowledgement condition\n");
++        abort();
++    }
++    if (current_generation != generation)
++        return PFB_WAKE_EVENT;
++    if (result == ETIMEDOUT)
++        return PFB_WAKE_TIMER;
++    if (result == 0)
++        return PFB_WAKE_SPURIOUS;
++
++    fprintf(stderr, "[PFB-WAIT] acknowledgement wait failed: %d\n", result);
++    abort();
++}
++
++static void signal_ack(void)
++{
++    if (pthread_mutex_lock(&s_ack_lock) != 0) {
++        fprintf(stderr, "[PFB-WAIT] cannot lock acknowledgement condition\n");
++        abort();
++    }
++    s_ack_generation++;
++    if (pthread_cond_broadcast(&s_ack_cond) != 0) {
++        fprintf(stderr, "[PFB-WAIT] cannot signal acknowledgement condition\n");
++        abort();
++    }
++    if (pthread_mutex_unlock(&s_ack_lock) != 0) {
++        fprintf(stderr, "[PFB-WAIT] cannot unlock acknowledgement condition\n");
++        abort();
++    }
++}
++
++#endif
++
++static void maybe_report(void)
++{
++    DWORD now = GetTickCount();
++    LONG last = InterlockedCompareExchange(&s_last_report_ms, 0, 0);
++    LONG stamp = (LONG)(now ? now : 1);
++
++    if (!last) {
++        InterlockedCompareExchange(&s_last_report_ms, stamp, 0);
++        return;
++    }
++    if ((DWORD)(now - (DWORD)last) < 10000u ||
++        InterlockedCompareExchange(&s_last_report_ms, stamp, last) != last)
++        return;
++
++    fprintf(stderr,
++            "[PFB-WAIT] waits=%lld acks=%lld event_wakes=%lld "
++            "timer_wakes=%lld spurious_wakes=%lld rechecks=%lld "
++            "safe_points=%lld\n",
++            (long long)counter_read(&s_waits),
++            (long long)counter_read(&s_acks),
++            (long long)counter_read(&s_event_wakes),
++            (long long)counter_read(&s_timer_wakes),
++            (long long)counter_read(&s_spurious_wakes),
++            (long long)counter_read(&s_rechecks),
++            (long long)counter_read(&s_safe_points));
++    fflush(stderr);
++}
++
++int nv2a_pfb_flush_wait_enabled(void)
++{
++    ensure_initialized();
++    return InterlockedCompareExchange(&s_enabled, 0, 0) == 1;
++}
++
++void nv2a_pfb_flush_wait(volatile uint32_t *reg,
++                         Nv2aPfbFlushSafePoint safe_point)
++{
++    if (!reg || !safe_point) {
++        fprintf(stderr, "[PFB-WAIT] flush register and safe point are required\n");
++        abort();
++    }
++    if (InterlockedCompareExchange(&s_enabled, 0, 0) != 1) {
++        fprintf(stderr, "[PFB-WAIT] wait called while the option is disabled\n");
++        abort();
++    }
++
++    counter_increment(&s_waits);
++    while (*reg & NV2A_PFB_FLUSH_BUSY_MASK) {
++        enum PfbWake wake = wait_once();
++
++        if (wake == PFB_WAKE_EVENT)
++            counter_increment(&s_event_wakes);
++        else if (wake == PFB_WAKE_TIMER)
++            counter_increment(&s_timer_wakes);
++        else
++            counter_increment(&s_spurious_wakes);
++        safe_point();
++        counter_increment(&s_safe_points);
++        if (*reg & NV2A_PFB_FLUSH_BUSY_MASK)
++            counter_increment(&s_rechecks);
++    }
++    maybe_report();
++}
++
++int nv2a_pfb_flush_ack(volatile uint32_t *reg, int flip_held)
++{
++    LONG previous;
++
++    if (!reg) {
++        fprintf(stderr, "[PFB-WAIT] acknowledgement requires a flush register\n");
++        abort();
++    }
++    if (flip_held)
++        return 0;
++    if (!(*reg & NV2A_PFB_FLUSH_BUSY_MASK))
++        return 0;
++
++    previous = InterlockedAnd((volatile LONG *)reg,
++                              (LONG)~NV2A_PFB_FLUSH_BUSY_MASK);
++    if (!((uint32_t)previous & NV2A_PFB_FLUSH_BUSY_MASK))
++        return 0;
++    if (InterlockedCompareExchange(&s_enabled, 0, 0) == 1) {
++        counter_increment(&s_acks);
++        signal_ack();
++    }
++    return 1;
++}
+diff --git a/src/kernel/nv2a_pfb_flush.h b/src/kernel/nv2a_pfb_flush.h
+new file mode 100644
+index 0000000..8138af0
+--- /dev/null
++++ b/src/kernel/nv2a_pfb_flush.h
+@@ -0,0 +1,15 @@
++#ifndef NV2A_PFB_FLUSH_H
++#define NV2A_PFB_FLUSH_H
++
++#include <stdint.h>
++
++#define NV2A_PFB_FLUSH_BUSY_MASK 0x00010000u
++
++typedef void (*Nv2aPfbFlushSafePoint)(void);
++
++int nv2a_pfb_flush_wait_enabled(void);
++void nv2a_pfb_flush_wait(volatile uint32_t *reg,
++                         Nv2aPfbFlushSafePoint safe_point);
++int nv2a_pfb_flush_ack(volatile uint32_t *reg, int flip_held);
++
++#endif
+diff --git a/src/kernel/xbox_memory_layout.c b/src/kernel/xbox_memory_layout.c
+index 7bb983f..a38ea54 100644
+--- a/src/kernel/xbox_memory_layout.c
++++ b/src/kernel/xbox_memory_layout.c
+@@ -20,6 +20,7 @@
+ #include "guest_vmem.h"
+ #include "kernel_missing.h"
+ #include "nv2a_flip_hold.h"
++#include "nv2a_pfb_flush.h"
+ #include <stdio.h>
+ #include <stdlib.h>
+ #include <string.h>
+@@ -1406,8 +1407,10 @@ static void nv2a_ack_busy_bits(int flip_held)
+         volatile uint32_t *r =
+             (volatile uint32_t *)((char *)regs + NV2A_ACK[i].offset);
+         uint32_t mask = NV2A_ACK[i].busy_mask;
+-        if (flip_held && NV2A_ACK[i].offset == NV2A_ACK_PFB_FLUSH)
++        if (NV2A_ACK[i].offset == NV2A_ACK_PFB_FLUSH) {
++            nv2a_pfb_flush_ack(r, flip_held);
+             continue;
++        }
+         /* Once the vblank is delivered its two bits belong to the
+          * vblank-ack thread (kernel_bridge.c), which clears them on the
+          * DPC's ack. Cleared here too, a pass that landed between the
+@@ -1438,6 +1441,26 @@ void xbox_Nv2aAckBusyBits(void)
+     nv2a_ack_busy_bits(0);
+ }
+ 
++int xbox_Nv2aPfbFlushWait(void)
++{
++    volatile uint32_t *reg;
++
++    if (!nv2a_pfb_flush_wait_enabled())
++        return 0;
++    reg = xbox_Nv2aRegPtr(NV2A_ACK_PFB_FLUSH);
++    if (!reg) {
++        fprintf(stderr, "[PFB-WAIT] NV2A aperture is not mapped\n");
++        abort();
++    }
++    nv2a_pfb_flush_wait(reg, xbox_IrqSafePoint);
++    return 1;
++}
++
++int xbox_Nv2aPfbFlushWaitEnabled(void)
++{
++    return nv2a_pfb_flush_wait_enabled();
++}
++
+ /* One word of the NV2A register file (offset from the register base), or NULL
+  * before it is mapped. The pushbuffer executor writes what the GPU would when
+  * it executes a command: PGRAPH state a title reads back, and DMA_GET. */
+diff --git a/src/kernel/xbox_memory_layout.h b/src/kernel/xbox_memory_layout.h
+index 46a366e..6c58d64 100644
+--- a/src/kernel/xbox_memory_layout.h
++++ b/src/kernel/xbox_memory_layout.h
+@@ -182,6 +182,11 @@ void xbox_Nv2aFrameCounterFlip(void);
+ /* A word of the NV2A register file (offset from the register base); NULL until
+  * the aperture is mapped. */
+ volatile uint32_t *xbox_Nv2aRegPtr(uint32_t offset);
++/* Wait for the real PFB flush acknowledgement when
++ * RECOMP_PFB_FLUSH_WAIT=1. Returns 0 when the option is disabled so a
++ * title-specific hook can retain its original polling loop. */
++int xbox_Nv2aPfbFlushWait(void);
++int xbox_Nv2aPfbFlushWaitEnabled(void);
+ /* Registered counters the title turned out to move itself (its vblank DPC),
+  * which the toolkit has stopped bumping; for the [GPU] report. */
+ uint32_t xbox_Nv2aFrameCountersOwned(void);
+diff --git a/tests/nv2a_pfb_flush/CMakeLists.txt b/tests/nv2a_pfb_flush/CMakeLists.txt
+new file mode 100644
+index 0000000..534b6e4
+--- /dev/null
++++ b/tests/nv2a_pfb_flush/CMakeLists.txt
+@@ -0,0 +1,16 @@
++cmake_minimum_required(VERSION 3.20)
++project(nv2a_pfb_flush_test C)
++set(CMAKE_C_STANDARD 11)
++add_subdirectory(../../src/platform platform)
++add_executable(nv2a_pfb_flush_test
++    test_main.c
++    ../../src/kernel/nv2a_pfb_flush.c)
++target_include_directories(nv2a_pfb_flush_test PRIVATE
++    ../../src
++    ../../src/kernel)
++target_link_libraries(nv2a_pfb_flush_test PRIVATE platform)
++enable_testing()
++foreach(mode IN ITEMS disabled normal spurious timeout reuse)
++    add_test(NAME nv2a_pfb_flush_${mode}
++             COMMAND nv2a_pfb_flush_test ${mode})
++endforeach()
+diff --git a/tests/nv2a_pfb_flush/test_main.c b/tests/nv2a_pfb_flush/test_main.c
+new file mode 100644
+index 0000000..a0a604f
+--- /dev/null
++++ b/tests/nv2a_pfb_flush/test_main.c
+@@ -0,0 +1,168 @@
++#include "nv2a_pfb_flush.h"
++#include "platform/xbox_winnt.h"
++
++#include <stdio.h>
++#include <stdlib.h>
++#include <string.h>
++
++static volatile uint32_t s_reg;
++static volatile LONG s_started;
++static volatile LONG s_completed;
++static volatile LONG s_safe_points;
++static volatile LONG s_clear_after;
++static int s_failures;
++
++static void check(int condition, const char *what)
++{
++    printf("  %-58s %s\n", what, condition ? "PASS" : "FAIL");
++    if (!condition)
++        s_failures++;
++}
++
++static void set_option(const char *value)
++{
++#if defined(_WIN32)
++    if (_putenv_s("RECOMP_PFB_FLUSH_WAIT", value) != 0)
++        abort();
++#else
++    if (setenv("RECOMP_PFB_FLUSH_WAIT", value, 1) != 0)
++        abort();
++#endif
++}
++
++static void safe_point(void)
++{
++    LONG count = InterlockedIncrement(&s_safe_points);
++
++    if (s_clear_after && count >= s_clear_after)
++        InterlockedAnd((volatile LONG *)&s_reg,
++                       (LONG)~NV2A_PFB_FLUSH_BUSY_MASK);
++}
++
++static DWORD WINAPI wait_thread(LPVOID unused)
++{
++    (void)unused;
++    InterlockedExchange(&s_started, 1);
++    nv2a_pfb_flush_wait(&s_reg, safe_point);
++    InterlockedExchange(&s_completed, 1);
++    return 0;
++}
++
++static HANDLE start_wait(LONG clear_after)
++{
++    HANDLE thread;
++
++    s_reg = NV2A_PFB_FLUSH_BUSY_MASK;
++    InterlockedExchange(&s_started, 0);
++    InterlockedExchange(&s_completed, 0);
++    InterlockedExchange(&s_safe_points, 0);
++    InterlockedExchange(&s_clear_after, clear_after);
++    thread = CreateThread(NULL, 0, wait_thread, NULL, 0, NULL);
++    if (!thread)
++        abort();
++    while (!InterlockedCompareExchange(&s_started, 0, 0))
++        SwitchToThread();
++    return thread;
++}
++
++static void join_wait(HANDLE thread)
++{
++    check(WaitForSingleObject(thread, 5000) == WAIT_OBJECT_0,
++          "waiter completes within five seconds");
++    CloseHandle(thread);
++}
++
++static void test_normal(void)
++{
++    HANDLE thread = start_wait(0);
++
++    Sleep(5);
++    check(!s_completed, "waiter blocks while the flush bit is set");
++    check(!nv2a_pfb_flush_ack(&s_reg, 1),
++          "a flip hold refuses the acknowledgement");
++    check((s_reg & NV2A_PFB_FLUSH_BUSY_MASK) != 0,
++          "a flip hold leaves the flush bit set");
++    Sleep(5);
++    check(!s_completed, "a held acknowledgement does not wake the waiter");
++    check(nv2a_pfb_flush_ack(&s_reg, 0),
++          "the real acknowledgement clears the bit");
++    join_wait(thread);
++    check(!(s_reg & NV2A_PFB_FLUSH_BUSY_MASK),
++          "the completed wait observes the cleared bit");
++}
++
++static void test_spurious(void)
++{
++    volatile uint32_t other = NV2A_PFB_FLUSH_BUSY_MASK;
++    HANDLE thread = start_wait(0);
++
++    Sleep(2);
++    check(nv2a_pfb_flush_ack(&other, 0),
++          "an unrelated acknowledgement signals the shared event");
++    Sleep(5);
++    check(!s_completed && (s_reg & NV2A_PFB_FLUSH_BUSY_MASK),
++          "an event wake cannot complete while the target bit remains set");
++    nv2a_pfb_flush_ack(&s_reg, 0);
++    join_wait(thread);
++}
++
++static void test_timeout(void)
++{
++    HANDLE thread = start_wait(3);
++
++    join_wait(thread);
++    check(s_safe_points >= 3,
++          "the 200 us backstop repeatedly runs the safe point");
++    check(!s_completed || !(s_reg & NV2A_PFB_FLUSH_BUSY_MASK),
++          "a lost acknowledgement signal cannot strand a cleared bit");
++}
++
++static void test_reuse(void)
++{
++    int i;
++
++    for (i = 0; i < 32; ++i) {
++        HANDLE thread = start_wait(0);
++
++        if (i & 1) {
++            Sleep(2);
++            check(!s_completed,
++                  "a retained event cannot complete a reused busy register");
++        }
++        nv2a_pfb_flush_ack(&s_reg, 0);
++        join_wait(thread);
++    }
++}
++
++int main(int argc, char **argv)
++{
++    const char *mode = argc > 1 ? argv[1] : "";
++
++    setvbuf(stdout, NULL, _IONBF, 0);
++    if (strcmp(mode, "invalid") == 0) {
++        set_option("maybe");
++        (void)nv2a_pfb_flush_wait_enabled();
++        return 0;
++    }
++    if (strcmp(mode, "disabled") == 0) {
++        set_option("0");
++        check(!nv2a_pfb_flush_wait_enabled(),
++              "the event-driven wait is off by default");
++    } else {
++        set_option("1");
++        check(nv2a_pfb_flush_wait_enabled(), "the option enables the wait");
++        if (strcmp(mode, "normal") == 0)
++            test_normal();
++        else if (strcmp(mode, "spurious") == 0)
++            test_spurious();
++        else if (strcmp(mode, "timeout") == 0)
++            test_timeout();
++        else if (strcmp(mode, "reuse") == 0)
++            test_reuse();
++        else {
++            fprintf(stderr, "unknown mode: %s\n", mode);
++            return 2;
++        }
++    }
++    return s_failures ? 1 : 0;
++}

@@ -583,6 +583,14 @@ own GPU back end, an extended interface for it, and its own pacing fixes.
     and an unavailable cache. Synthetic timing and an alternating
     stationary-tutorial cold/warm comparison are recorded in FINDINGS; the
     latter's small capture differences remain unexplained.
+    A final-generation six-leg title campaign on 2026-11-03 measured 96 cold
+    compile/create events at 12.914/25.543/30.623 ms p50/p99/max and 96 warm
+    lookup/create events at 0.143/0.517/0.535 ms. Each cold run published 32
+    entries, each warm run loaded all 32, and no warning or temporary file
+    remained. Movement flip throughput and p99 frame time were effectively
+    unchanged. The stationary captures were visually matched but not
+    byte-identical or frame-locked, so strict title output identity remains
+    open and the cache remains default-off.
     *Overlap:* #184's D3D11 back end, and
     [#274](https://github.com/sp00nznet/xboxrecomp/pull/274) (compile once
     per HLSL text), which applies the same keying idea to the D3D8 layer;
@@ -644,14 +652,43 @@ own GPU back end, an extended interface for it, and its own pacing fixes.
     *Problem:* XDK KickOff sets bit 16 of `0x100410` and spins until it
     clears. A title hook that replaces the spin can only poll, and each poll
     loses up to a timer period after the ack.
-    *Evidence:* the Brute Force flush poll at `0x00372180` appeared 210 times
-    in the CPU sample. Blood Wake measured its game thread at 49% in this
-    wait before signalling it.
-    *Change:* the framework signals an event or callback when it clears the
-    bit, and exposes a wait helper that also returns at least every ~200 µs
-    for IRQ safe points. The protocol and registers are unchanged.
-    *Status:* the title-side KickOff hook is title-specific; only the signal
-    and wait helper are generic.
+    *Evidence:* the reviewed Brute Force baseline attributed a mean 69.1% of
+    game-thread samples to `sub_00372180`. The title sets the real bit and
+    `nv2a_ack_busy_bits` clears it; a flip hold deliberately refuses that
+    acknowledgement. Blood Wake measured its game thread at 49% in this wait
+    before signalling it. The corrected Brute Force candidate completed one
+    enabled scripted movement smoke. Its cumulative diagnostics exercised
+    both event and timer wakes without a reported spurious wake, but the run
+    had no caller profile or reviewed capture and is not performance evidence.
+    *Change:*
+    [0036-event-driven-pfb-flush-wait.patch](../patches/xboxrecomp/0036-event-driven-pfb-flush-wait.patch)
+    adds the generic, default-off `RECOMP_PFB_FLUSH_WAIT=1` event and wait
+    helper. It wakes at least every 200 us for IRQ safe points, rechecks the
+    bit after every wake, signals only after the real atomic clear, and does
+    not acknowledge while a flip is held. The title-specific address,
+    structure checks, kickoff write and generated-function wrapper remain in
+    `src/recomp_manual.c`.
+    *Tests:* five native helper cases and six project wrapper cases cover
+    disabled, normal, spurious, lost-event/timer recovery, reuse, flip-held
+    and invalid-value behavior. Fence/semaphore, interrupt, PGRAPH trap,
+    pushbuffer-ring, flip-hold and D3D11 device-failure selections passed
+    before the title smoke. Two title-hook fixture modes now require the
+    disabled and enabled paths to consume exactly one guest return. The first
+    title build stalled because that title wrapper omitted the generated
+    routine's four-byte `ret` effect; this was corrected without changing the
+    framework helper. One corrected enabled movement smoke passed. A reviewed
+    alternating title comparison remains outstanding.
+    *Overlap:* checked open and merged work plus the tracking index
+    [sp00nznet/xboxrecomp#184](https://github.com/sp00nznet/xboxrecomp/pull/184)
+    on 2026-11-03. No current change implements this handshake.
+    [sp00nznet/xboxrecomp#285](https://github.com/sp00nznet/xboxrecomp/pull/285)
+    concerns pre-snapshot readback and does not overlap.
+    *Before filing:* run and review poll/event/poll/event/poll/event, explain
+    the timer/recheck counts, retain the CPU reference, test another title or
+    a framework fixture at the integration boundary, and split any unrelated
+    documentation or title hook from the generic patch.
+    *Status:* local default-off framework patch; applies in the pinned toolkit
+    tree; not prepared or filed.
 
 18. **Walk one KickOff segment at a time.**
     *Problem:* the walk runs from the last PUT to the register's current PUT
@@ -739,15 +776,24 @@ own GPU back end, an extended interface for it, and its own pacing fixes.
     *Evidence:* the old fixture let the framework's ack thread poll the
     single-threaded D3D device while the fixture's main thread drew. That is
     an API violation and a plausible contributor to the WARP device loss;
-    the separate effects of the fixes have not been isolated.
+    the separate effects of the fixes have not been isolated. A reviewed
+    six-leg title campaign on 2026-11-03 isolated async reports from every
+    other option. Mean guest-surface world cadence increased from 27.401 to
+    30.606 changes/s (11.7%) and G3 fell from 69.367% to 65.467%. The selected
+    async intervals wrote 487,725 reports; no visibility-query or device error
+    was logged. All three async attempts completed, while one sync boot
+    stalled after flip 12 and passed on retry. The async 1% low was only
+    15.697/s and G3 still failed, so this is evidence for the mechanism, not a
+    default or correctness claim.
     *Tests:* the [D3D11 fixture](../tests/d3d11_test.c) checks ordered
     reports, active counting, clears, empty intervals, and more than 64
     counting intervals on WARP and hardware. CPU and D3D counts differ on
     the shared triangle edge, as expected from their rasterization rules.
     *Overlap:* #184's GPU series; no matching visibility-report PR was found
     in the upstream PR listing checked 2026-10-31.
-    *Before filing:* measure on the title; verify report lifetime, device
-    reset, and polling behavior across drivers.
+    *Before filing:* add broader title-scene and driver coverage, verify
+    report lifetime and actual device reset, and obtain matched CPU-reference
+    evidence. Keep async default-off while the 1%-low and G3 gates fail.
     *Status:* local patch and opt-in project implementation.
 
 23. **Avoid `getenv` in per-draw and per-CALL code.**

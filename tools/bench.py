@@ -57,9 +57,17 @@ import bench_control
 import bench_match
 import bench_world
 
-MENU_SCRIPT = "20000:a:200,23000:a:200,28000:a:200"
+MENU_SCRIPT = (
+    "20000:a:200,23000:a:200,28000:a:200,32000:a:200,"
+    "36000:down:200,37000:a:200,42000:a:200,47000:a:200,"
+    "52000:a:200,57000:a:200,62000:a:200"
+)
 WORLD_DRAWS = 400
 WORLD_RUN = 5
+# The campaign menus can also exceed WORLD_DRAWS. The verified Quick Campaign
+# route finishes its last scripted press at 62 seconds from the first USB
+# report, so do not consider draw counts until after that route can complete.
+LEGACY_WORLD_NOT_BEFORE_SECONDS = 80.0
 HOLD_DETECT = 20
 STATIONARY_FRAMES = 120
 MOVEMENT_SECONDS = 40.0
@@ -69,12 +77,15 @@ READY_DRAIN_SECONDS = 1.0
 # Live input after the hold, as (seconds after input starts, line).
 MOVEMENT_INPUT = (
     (4.0, "a:200"), (7.0, "a:200"), (10.0, "a:200"), (13.0, "a:200"),
-    (16.0, "lup:2500"), (19.0, "lup+rright:2000"), (22.0, "lup:2500"),
-    (25.0, "rleft:1500"), (27.0, "lup+rleft:2500"), (30.0, "lup:3000"),
-    (34.0, "lup+rright:3000"), (38.0, "lup:3000"), (42.0, "rleft:2000"),
-    (45.0, "lup:3000"), (49.0, "lup+rright:3000"), (53.0, "lup:3000"),
+    (16.0, "lup:2000"), (18.75, "y:300"),
+    # Forward movement enters a tutorial cutscene shortly after measurement
+    # starts at native speed. Keep the measured segment camera-only.
+    (19.0, "rright:2000"), (22.0, "rleft:2500"),
+    (25.0, "rright:1500"), (27.0, "rleft:2500"), (30.0, "rright:3000"),
+    (34.0, "rleft:3000"), (38.0, "rright:3000"), (42.0, "rleft:2000"),
+    (45.0, "rright:3000"), (49.0, "rleft:3000"), (53.0, "rright:3000"),
 )
-MOVEMENT_START = 16.0           # measurement starts with the first stick input
+MOVEMENT_START = 20.0           # after the fixed tutorial-menu skip has settled
 # Help panels pause the tutorial until A is pressed; their timing depends on
 # how far the character got. During movement, a picture unchanged for
 # PANEL_FRAMES flips gets an A press, at most one per PANEL_SECONDS.
@@ -87,6 +98,16 @@ PANEL_SECONDS = 3.0
 # Guest functions that poll for GPU progress (FINDINGS: the PFB flush poll and
 # the fence wait). A game thread in them is waiting for the NV2A thread.
 GUEST_GPU_WAITS = ("sub_00372180", "sub_00371CE0")
+KERNEL_WAIT_SYMBOL_MARKERS = (
+    "!NtWaitFor", "!ZwWaitFor", "!NtDelayExecution", "!ZwDelayExecution",
+    "!NtYieldExecution", "!ZwYieldExecution", "!NtRemoveIoCompletion",
+    "!ZwRemoveIoCompletion", "!NtWaitForAlertByThreadId",
+    "!ZwWaitForAlertByThreadId", "!NtSignalAndWaitForSingleObject",
+    "!NtWaitForWorkViaWorkerFactory", "!ZwWaitForWorkViaWorkerFactory",
+    "!NtReplyWaitReceivePort", "!NtAlertThreadByThreadId",
+    "!NtUserMsgWaitForMultipleObjectsEx", "!NtUserGetMessage",
+    "!NtUserWaitMessage", "!NtGdiDdDDIWaitFor", "!NtDxgkWait",
+)
 DEFAULT_WATCHDOG = 900
 # The boot can hang intermittently before the menus (FINDINGS); such a run
 # is recorded and retried rather than measured.
@@ -94,6 +115,67 @@ STALL_SECONDS = 60
 
 # nv2a_frame_hash of a 640x480 four-byte black surface, with alpha 0 or 255.
 KNOWN_BLACK_FRAME_HASHES = bench_world.KNOWN_BLACK_FRAME_HASHES
+RUNTIME_OPTION_KEYS = (
+    "RECOMP_GPU", "RECOMP_D3D11_WARP", "RECOMP_RASTER_THREADS",
+    "RECOMP_GPU_VSH", "RECOMP_GPU_VSH_SYNC", "RECOMP_GPU_VSH_VERIFY",
+    "RECOMP_GPU_VSH_MULZERO", "RECOMP_GPU_TEX_DECODE",
+    "RECOMP_GPU_TEX_CACHE_APPROX", "RECOMP_GPU_ZPASS", "RECOMP_GPU_PSCACHE",
+    "RECOMP_GPU_DEPTH_TEXTURE", "RECOMP_GPU_STENCIL_ALIAS",
+    "RECOMP_GPU_DIRECT_PRESENT", "RECOMP_GPU_SCALE", "RECOMP_GPU_OUTPUT",
+    "RECOMP_PROGRAM_NEAR_ZERO", "RECOMP_PFB_FLUSH_WAIT", "RECOMP_AUDIO",
+    "BRUTEFORCE_PERF_COUNTERS", "BRUTEFORCE_PROFILE_CALLERS",
+)
+
+D3D11_DEVICE_RE = re.compile(
+    r'^\[GPU-D3D11\] device adapter="(?P<adapter>.*)" '
+    r'vendor=0x(?P<vendor>[0-9A-Fa-f]+) device=0x(?P<device>[0-9A-Fa-f]+) '
+    r'subsystem=0x(?P<subsystem>[0-9A-Fa-f]+) revision=(?P<revision>\d+) '
+    r'dedicated_vram=(?P<dedicated_vram>\d+) '
+    r'luid=(?P<luid>[0-9A-Fa-f]+:[0-9A-Fa-f]+) '
+    r'driver=(?P<driver>\S+) feature_level=0x(?P<feature_level>[0-9A-Fa-f]+)$',
+    re.MULTILINE,
+)
+VALIDATION_PERF_RE = re.compile(
+    r'^\[PERF\] (?P<name>guest_word|readable_guest_range): '
+    r'(?P<calls>\d+) calls, (?P<accepted>\d+) accepted, (?P<rejected>\d+) rejected, '
+    r'(?P<total_ms>[\d.]+) ms total; VirtualQuery (?P<queries>\d+) calls, '
+    r'(?P<query_failures>\d+) failures, (?P<regions>\d+) regions, '
+    r'(?P<query_ms>[\d.]+) ms$',
+    re.MULTILINE,
+)
+TEXTURE_PERF_RE = re.compile(
+    r'^\[PERF\] texture cache: (?P<lookups>\d+) lookups, (?P<probes>\d+) probes, '
+    r'(?P<key_hits>\d+) key hits, (?P<key_misses>\d+) misses, '
+    r'(?P<lookup_ms>[\d.]+) ms scanning; exact (?P<exact_checks>\d+) checks, '
+    r'(?P<exact_hits>\d+) hits, (?P<source_bytes>\d+) source bytes, '
+    r'(?P<palette_bytes>\d+) palette bytes, (?P<exact_ms>[\d.]+) ms; '
+    r'snapshots (?P<snapshot_copies>\d+) copies, (?P<snapshot_bytes>\d+) bytes, '
+    r'(?P<snapshot_ms>[\d.]+) ms; rewrites (?P<rewrites>\d+), '
+    r'entry evictions (?P<evictions>\d+), snapshot evictions (?P<snapshot_evictions>\d+), '
+    r'failed-upload discards (?P<discards>\d+), unsupported hits (?P<unsupported_hits>\d+)$',
+    re.MULTILINE,
+)
+D3D11_INTERVAL_RE = re.compile(
+    r'^\[GPU-D3D11\] (?P<flips>\d+) flips: .*?'
+    r'readback (?P<readback_ms_per_flip>[\d.]+) ms/flip, '
+    r'(?P<visibility_reads>\d+) visibility reads waiting '
+    r'(?P<visibility_wait_ms>[\d.]+) ms, '
+    r'(?:(?P<reports_written>\d+) reports written asynchronously '
+    r'\((?P<report_pending_polls>\d+) polls found one pending\), )?.*?'
+    r'(?P<approx_hash_bytes>\d+) approximate texture-hash bytes$',
+    re.MULTILINE,
+)
+PSCACHE_EVENT_RE = re.compile(
+    r'^\[GPU-PSCACHE\] (?P<kind>compiled|hit) in (?P<elapsed_ms>[\d.]+) ms$',
+    re.MULTILINE,
+)
+PFB_FLUSH_WAIT_RE = re.compile(
+    r'^\[PFB-WAIT\] waits=(?P<waits>\d+) acks=(?P<acks>\d+) '
+    r'event_wakes=(?P<event_wakes>\d+) timer_wakes=(?P<timer_wakes>\d+) '
+    r'spurious_wakes=(?P<spurious_wakes>\d+) rechecks=(?P<rechecks>\d+) '
+    r'safe_points=(?P<safe_points>\d+)$',
+    re.MULTILINE,
+)
 
 
 class BenchError(Exception):
@@ -198,6 +280,7 @@ def frame_metrics(rows):
         "frame_ms_p50": round(percentile(intervals, 0.5), 2),
         "frame_ms_p90": round(percentile(intervals, 0.9), 2),
         "frame_ms_p99": round(p99, 2),
+        "frame_ms_max": round(max(intervals), 2),
         "low_1pct_fps": round(1000 / p99, 3) if p99 else None,
     }
 
@@ -259,12 +342,42 @@ def pixel_constant_agreement(rows, start, end):
     return {"agree": agree, "total": total} if total else None
 
 
+def legacy_world_candidate(rows, index):
+    return (
+        rows[index]["draws"] >= WORLD_DRAWS
+        and rows[index]["t"] - rows[0]["t"] >= LEGACY_WORLD_NOT_BEFORE_SECONDS
+    )
+
+
+def caller_gpu_wait_shares(text):
+    marker = "== Outside the exe, by first exe caller"
+    if marker not in text:
+        return {}, False
+    section = text.split(marker, 1)[1].split("\n== All threads", 1)[0]
+    shares = {}
+    thread = None
+    for line in section.splitlines():
+        match = re.fullmatch(r"T(\d+)", line.strip())
+        if match:
+            thread = int(match.group(1))
+            continue
+        match = re.match(r"^\s+([\d.]+)%\s+(.+?)\s+<-\s+(.+?)\s*$", line)
+        if thread is None or not match:
+            continue
+        share, outside, caller = match.groups()
+        if (any(wait in outside for wait in KERNEL_WAIT_SYMBOL_MARKERS) and
+                any(caller.endswith("!" + wait) for wait in GUEST_GPU_WAITS)):
+            shares[thread] = shares.get(thread, 0.0) + float(share)
+    return {thread: round(share, 2) for thread, share in shares.items()}, True
+
+
 def parse_profile(path):
-    """Per-thread busy/wait from the profiler, plus guest GPU-poll shares."""
+    """Per-thread activity plus strictly attributable game-thread GPU waits."""
     path = Path(path)
     if not path.is_file():
         return None
     text = path.read_text(encoding="utf-8", errors="replace")
+    caller_waits, callers_available = caller_gpu_wait_shares(text)
     threads = {}
     for line in text.splitlines():
         if line.startswith("THREAD,"):
@@ -284,6 +397,8 @@ def parse_profile(path):
         info["guest_gpu_wait_pct"] = round(sum(
             float(share) for share, name in functions
             if any(name.endswith("!" + wait) for wait in GUEST_GPU_WAITS)), 2)
+        if callers_available:
+            info["kernel_gpu_wait_pct"] = caller_waits.get(int(match.group(1)), 0.0)
     header = text.splitlines()[0] if text else ""
     summary = {"header": header, "threads": threads}
     game = [t for t in threads.values() if t["start"].endswith("!mainCRTStartup")]
@@ -292,12 +407,23 @@ def parse_profile(path):
     if game:
         g = game[0]
         kernel = 100.0 * g["kernel_wait"] / g["samples"]
+        guest_gpu = g.get("guest_gpu_wait_pct", 0.0)
+        kernel_gpu = g.get("kernel_gpu_wait_pct") if callers_available else None
+        gpu_wait = guest_gpu + (kernel_gpu or 0.0)
         summary["game_thread"] = {
             "busy_pct": round(100.0 * g["busy"] / g["samples"], 2),
             "kernel_wait_pct": round(kernel, 2),
-            "guest_gpu_poll_pct": g.get("guest_gpu_wait_pct", 0.0),
-            # G3: kernel waits plus the known guest polls on GPU progress.
-            "gpu_wait_pct": round(kernel + g.get("guest_gpu_wait_pct", 0.0), 2),
+            "guest_gpu_poll_pct": guest_gpu,
+            "kernel_gpu_wait_pct": kernel_gpu,
+            "other_kernel_wait_pct": (
+                round(max(0.0, kernel - kernel_gpu), 2) if kernel_gpu is not None else None),
+            "gpu_wait_pct": round(min(100.0, gpu_wait), 2),
+            "caller_attribution_available": callers_available,
+            "gpu_wait_scope": (
+                "known guest GPU polls plus caller-attributed kernel waits"
+                if callers_available else
+                "known guest GPU polls only; rerun with --profile-callers for kernel attribution"
+            ),
             "top": g.get("top", [])[:6],
         }
     if nv2a:
@@ -325,6 +451,89 @@ def parse_census(path):
         result["categories"].setdefault(row["category"], []).append(
             (row["key"], int(row["count"]), int(row["vertices"])))
     return result
+
+
+def parse_runtime_diagnostics(text):
+    """Structured device and periodic renderer diagnostics from stderr."""
+    diagnostics = {
+        "device": None,
+        "d3d11_intervals": [],
+        "validation_intervals": {"guest_word": [], "readable_guest_range": []},
+        "texture_intervals": [],
+        "shader_cache": {
+            "compiled": {"count": 0, "total_ms": 0.0, "max_ms": None},
+            "hits": {"count": 0, "total_ms": 0.0, "max_ms": None},
+        },
+        "pfb_flush_wait": {
+            "enabled": "[PFB-WAIT] event-driven flush wait enabled" in text,
+            "snapshots": [],
+            "latest": None,
+        },
+    }
+    match = D3D11_DEVICE_RE.search(text)
+    if match:
+        values = match.groupdict()
+        diagnostics["device"] = {
+            "adapter": values["adapter"],
+            "vendor_id": int(values["vendor"], 16),
+            "device_id": int(values["device"], 16),
+            "subsystem_id": int(values["subsystem"], 16),
+            "revision": int(values["revision"]),
+            "dedicated_vram_bytes": int(values["dedicated_vram"]),
+            "luid": values["luid"],
+            "driver": values["driver"],
+            "feature_level": values["feature_level"].upper(),
+        }
+    for match in D3D11_INTERVAL_RE.finditer(text):
+        values = match.groupdict()
+        diagnostics["d3d11_intervals"].append({
+            "flips": int(values["flips"]),
+            "readback_ms_per_flip": float(values["readback_ms_per_flip"]),
+            "visibility_reads": int(values["visibility_reads"]),
+            "visibility_wait_ms": float(values["visibility_wait_ms"]),
+            "reports_written": (int(values["reports_written"])
+                                if values["reports_written"] is not None else None),
+            "report_pending_polls": (int(values["report_pending_polls"])
+                                     if values["report_pending_polls"] is not None else None),
+            "approx_hash_bytes": int(values["approx_hash_bytes"]),
+        })
+    for match in VALIDATION_PERF_RE.finditer(text):
+        values = match.groupdict()
+        diagnostics["validation_intervals"][values["name"]].append({
+            "calls": int(values["calls"]),
+            "accepted": int(values["accepted"]),
+            "rejected": int(values["rejected"]),
+            "total_ms": float(values["total_ms"]),
+            "virtual_queries": int(values["queries"]),
+            "query_failures": int(values["query_failures"]),
+            "regions": int(values["regions"]),
+            "query_ms": float(values["query_ms"]),
+        })
+    for match in TEXTURE_PERF_RE.finditer(text):
+        values = match.groupdict()
+        diagnostics["texture_intervals"].append({
+            key: (float(value) if key.endswith("_ms") else int(value))
+            for key, value in values.items()
+        })
+    cache_times = {"compiled": [], "hit": []}
+    for match in PSCACHE_EVENT_RE.finditer(text):
+        cache_times[match["kind"]].append(float(match["elapsed_ms"]))
+    for kind, output in (("compiled", "compiled"), ("hit", "hits")):
+        values = cache_times[kind]
+        diagnostics["shader_cache"][output] = {
+            "count": len(values),
+            "total_ms": round(sum(values), 3),
+            "max_ms": round(max(values), 3) if values else None,
+        }
+    for match in PFB_FLUSH_WAIT_RE.finditer(text):
+        diagnostics["pfb_flush_wait"]["snapshots"].append(
+            {key: int(value) for key, value in match.groupdict().items()}
+        )
+    if diagnostics["pfb_flush_wait"]["snapshots"]:
+        diagnostics["pfb_flush_wait"]["latest"] = (
+            diagnostics["pfb_flush_wait"]["snapshots"][-1]
+        )
+    return diagnostics
 
 
 class Gate:
@@ -389,8 +598,12 @@ def run_once(out_dir, label, scene, env_overrides, threads, watchdog, profile, c
              config, dump=False, trace_frame=False, capture=False, capture_movement=False,
              trace_after=TRACE_AFTER, readiness="legacy", ready_timeout=600.0,
              ready_state=None, no_auto_panels=False, capture_audio=False, phase_timeout=240.0,
-             capture_world=False):
+             capture_world=False, profile_callers=False):
+    if profile_callers and not profile:
+        raise BenchError("profile caller attribution requires profiling")
     overridden = {key.upper() for key in env_overrides}
+    if profile_callers and "BRUTEFORCE_PROFILE_CALLERS" in overridden:
+        raise BenchError("--profile-callers owns BRUTEFORCE_PROFILE_CALLERS")
     if "RECOMP_AUDIO_WAV" in overridden:
         raise BenchError("RECOMP_AUDIO_WAV cannot be supplied by a variant; use --capture-audio")
     if capture_audio and "RECOMP_AUDIO_WAV_SECS" in overridden:
@@ -425,6 +638,8 @@ def run_once(out_dir, label, scene, env_overrides, threads, watchdog, profile, c
     if profile:
         env["BRUTEFORCE_PROFILE"] = str(out_dir / "profile.txt")
         env["BRUTEFORCE_PROFILE_GATE"] = str(profile_gate.path)
+        if profile_callers:
+            env["BRUTEFORCE_PROFILE_CALLERS"] = "1"
     if census:
         env["RECOMP_GPU_CENSUS"] = str(out_dir / "census.csv")
         env["RECOMP_GPU_CENSUS_GATE"] = str(census_gate.path)
@@ -443,6 +658,9 @@ def run_once(out_dir, label, scene, env_overrides, threads, watchdog, profile, c
         # exists; it is created TRACE_AFTER seconds into the movement window.
         env["RECOMP_FRAME_TRACE"] = str(trace_flag)
     env.update(env_overrides)
+    profile_callers_enabled = (
+        profile and env.get("BRUTEFORCE_PROFILE_CALLERS") == "1"
+    )
     if readiness == "manual":
         env.pop("RECOMP_PAD_SCRIPT", None)
     wav_path = bench_control.reserve_audio_capture(out_dir, env) if capture_audio else None
@@ -450,6 +668,10 @@ def run_once(out_dir, label, scene, env_overrides, threads, watchdog, profile, c
              if readiness == "manual" else None)
     command, cwd, env = build.prepare_game_run(
         config, experimental_tutorial=True, isolated_saves=save, base_env=env
+    )
+    executable_path = Path(command[0]).resolve()
+    executable_sha256 = (
+        build.sha256_file(executable_path) if executable_path.is_file() else None
     )
     stdout = (out_dir / "stdout.txt").open("w", encoding="utf-8")
     stderr_path = out_dir / "stderr.txt"
@@ -484,16 +706,22 @@ def run_once(out_dir, label, scene, env_overrides, threads, watchdog, profile, c
     result = {
         "label": label, "scene": scene, "env": env_overrides, "threads": threads,
         "generation": cwd.parents[1].name, "toolkit_tree": build.TOOLKIT_TREE,
+        "executable": {
+            "path": str(executable_path),
+            "sha256": executable_sha256,
+        },
         "boot_dir": str(cwd), "out_dir": str(out_dir),
+        "runtime_options": {key: env.get(key) for key in RUNTIME_OPTION_KEYS},
         "options": {
             "config": config, "watchdog_seconds": watchdog,
-            "profile": bool(profile), "census": bool(census),
+            "profile": bool(profile), "profile_callers": profile_callers_enabled,
+            "census": bool(census),
             "periodic_dump": bool(dump), "trace_frame": bool(trace_frame),
             "trace_after_seconds": trace_after if trace_frame else None,
             "capture_stationary": bool(capture), "capture_movement": bool(capture_movement),
             "capture_world": bool(capture_world), "capture_audio": bool(capture_audio),
             "readiness": readiness, "ready_timeout_seconds": ready_timeout if ready else None,
-            "phase_timeout_seconds": phase_timeout if ready else None,
+            "phase_timeout_seconds": phase_timeout,
             "automatic_panel_presses": not no_auto_panels,
         },
         "readiness": {"mode": readiness, "state": ready_state,
@@ -529,7 +757,7 @@ def run_once(out_dir, label, scene, env_overrides, threads, watchdog, profile, c
                     marks["world"] = i
                     state = "hold"
                 elif state == "world":
-                    world_run = world_run + 1 if row["draws"] >= WORLD_DRAWS else 0
+                    world_run = world_run + 1 if legacy_world_candidate(rows, i) else 0
                     if world_run >= WORLD_RUN:
                         marks["world"] = i - WORLD_RUN + 1
                         state = "hold"
@@ -675,7 +903,7 @@ def run_once(out_dir, label, scene, env_overrides, threads, watchdog, profile, c
                 break
             if state != phase:
                 phase, phase_started = state, now
-            elif ready and state not in ("manual_ready", "finishing") and now - phase_started > phase_timeout:
+            elif state not in ("manual_ready", "finishing") and now - phase_started > phase_timeout:
                 result["error"] = f"timed out after {phase_timeout:g} s during {state}"
                 break
             if (not frames_path.is_file() and state != "manual_ready" and
@@ -708,8 +936,9 @@ def run_once(out_dir, label, scene, env_overrides, threads, watchdog, profile, c
     result["marks"] = marks
     result["wall_seconds"] = round(time.monotonic() - started, 1)
     result["flips"] = len(rows)
+    log_text = stderr_path.read_text(encoding="utf-8", errors="replace")
+    result["runtime_diagnostics"] = parse_runtime_diagnostics(log_text)
     if ready and scene == "movement" and state == "finishing":
-        log_text = stderr_path.read_text(encoding="utf-8", errors="replace")
         queued = [{"input": name, "pad_time_ms": int(when)} for name, when in re.findall(
             r'PAD: live "([^"]+)" at t=(\d+) ms', log_text)]
         result["input_runtime"] = {
@@ -742,8 +971,7 @@ def run_once(out_dir, label, scene, env_overrides, threads, watchdog, profile, c
         if len(files) < 2:
             result["error"] = result.get("error") or "continuous movement capture produced fewer than two images"
     if trace_frame:
-        trace_log = stderr_path.read_text(encoding="utf-8", errors="replace")
-        if "[FTRACE] frame begins" not in trace_log or "[FTRACE] end of frame" not in trace_log:
+        if "[FTRACE] frame begins" not in log_text or "[FTRACE] end of frame" not in log_text:
             result["error"] = result.get("error") or "requested frame trace did not complete"
     if "world" in marks:
         result["world_t"] = round(rows[marks["world"]]["t"] - rows[0]["t"], 2)
@@ -867,6 +1095,9 @@ def main(argv=None):
     parser.add_argument("--threads", type=int, default=12, help="RECOMP_RASTER_THREADS")
     parser.add_argument("--watchdog", type=int, default=DEFAULT_WATCHDOG)
     parser.add_argument("--no-profile", action="store_true")
+    parser.add_argument("--profile-callers", action="store_true",
+                        help="attribute kernel waits to their first executable caller; "
+                             "slower and required for a complete G3 estimate")
     parser.add_argument("--retries", type=int, default=1,
                         help="retries of a run that stalls or never starts")
     parser.add_argument("--census", action="store_true")
@@ -892,7 +1123,7 @@ def main(argv=None):
     parser.add_argument("--ready-timeout", type=float, default=600.0,
                         help="seconds allowed for manual readiness (default: 600)")
     parser.add_argument("--phase-timeout", type=float, default=240.0,
-                        help="seconds per subsequent manual-run phase (default: 240)")
+                        help="seconds per benchmark phase after readiness (default: 240)")
     parser.add_argument("--no-auto-panels", action="store_true",
                         help="disable adaptive A presses; retain only the fixed movement script")
     parser.add_argument("--capture-audio", action="store_true",
@@ -914,6 +1145,8 @@ def main(argv=None):
             comparison = bench_match.compare_manifest(args.compare_matched, MOVEMENT_INPUT)
             print(json.dumps(comparison, indent=2))
             return 0 if comparison["status"] == "reviewer_asserted" else 1
+        if args.no_profile and args.profile_callers:
+            raise BenchError("--profile-callers cannot be combined with --no-profile")
         variants = [parse_env(spec) for spec in (args.variant or ["cpu:"])]
         if args.capture_movement and args.scene != "movement":
             raise BenchError("--capture-movement requires --scene movement")
@@ -989,7 +1222,7 @@ def main(argv=None):
                                   args.dump, args.trace_frame, args.capture, args.capture_movement,
                                   args.trace_after, args.readiness, args.ready_timeout,
                                   args.ready_state, args.no_auto_panels, args.capture_audio,
-                                  args.phase_timeout, args.capture_world)
+                                  args.phase_timeout, args.capture_world, args.profile_callers)
                 run_generation = result.get("generation")
                 if not result.get("error") and run_generation:
                     if generation is not None and run_generation != generation:

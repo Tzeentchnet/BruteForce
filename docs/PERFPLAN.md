@@ -20,18 +20,18 @@ licensed, so they can be adapted here with attribution in
 `THIRD_PARTY_NOTICES.md`. Its title-specific hooks, addresses, and Remastered
 features do not apply and must not be copied.
 
-## Status (2026-10-30)
+## Status (2026-11-03)
 
 Measurements are in [FINDINGS.md](./FINDINGS.md#performance-plan-phase-0-and-the-first-gpu-path-results);
 next steps are in [NEXTSTEPS.md](./NEXTSTEPS.md).
 
 | Phase | Status |
 | --- | --- |
-| 0 | Mostly done. Harness (`tools/bench.py`), frame statistics (patch 0014), census and ceiling probes (0015), profiler (`src/profile.c`), null back end and surface guard (`src/gpu/null_backend.c`) exist and were run. Request audit 0025 has a partial, unreviewed retail diagnostic; flip-ID capture mapping 0026 is synthetic-tested. Presenter capture 0027 verified one link per GDI and CPU-upload route in short, unmatched retail probes, but did not validate physical visibility. Matched tutorial inventory, real scene review and world-frame labels remain open. A guard diagnostic aborted on a protected semaphore page, so the surface-read answer remains open. Missing: the native-rate measurement and upstream PR measurements (#231, #272, #273). |
+| 0 | Mostly done. Harness (`tools/bench.py`), frame statistics (patch 0014), census and ceiling probes (0015), profiler (`src/profile.c`), null back end and surface guard (`src/gpu/null_backend.c`) exist and were run. Reviewed movement manifests now report baseline-to-change and change-to-change cadence percentiles and 1% lows. The profile summary separates known guest GPU polls and caller-attributed kernel waits from unrelated kernel waits; `--profile-callers` enables the latter at additional diagnostic cost. `BRUTEFORCE_PERF_COUNTERS=1` adds atomic interval counts and opt-in timing for title pointer validation, `VirtualQuery`, exact texture-cache lookup/comparison, snapshot copies, rewrites and eviction; concurrent validation and exact P8 rewrite fixtures cover the counters. A three-run reviewed camera-pan campaign records G2, G3, readback, visibility, validation and texture-cache work on the final Release generation. A six-leg reviewed sync/async visibility campaign then isolated the existing visibility option: async improved reviewed throughput by 11.7%, but its 15.697/s mean 1% low and 65.467% G3 still fail. Guest-surface captures do not establish displayed-present cadence. Request audit 0025 has a partial, unreviewed retail diagnostic; flip-ID capture mapping 0026 is synthetic-tested. Presenter capture 0027 verified one link per GDI and CPU-upload route in short, unmatched retail probes, but did not validate physical visibility. Matched CPU-reference output, native-rate confirmation and the surface-read answer remain open. The follow-up surface guard completed with one excluded page but retained documented blind spots. Missing: upstream PR measurements (#231, #272, #273). |
 | 1 | Implemented, G4 not met. D3D11 back end (`src/gpu/`, `RECOMP_GPU=d3d11`) with the extended interface (0016). Synthetic WARP and hardware fixtures match apart from listed edge pixels. The new GPU-vertex tutorial capture differs from the CPU reference in 0.52% of pixels beyond 8/255; an older CPU-vertex capture differs substantially. |
 | 2 | Implemented (0017, on by default with the D3D11 back end). Stationary hold 3.20 → 30.41 rendered fps (3 runs each, alternating). An unreviewed retail diagnostic sampled 23,400 GPU-program batches without reported vertex differences through its last report. WARP and hardware fixtures cover additional packed formats, relative constants and culling against the CPU interpreter; matched-scene and complete format/hardware verification remain open. |
-| 3 | Partial. Async visibility reports (0018) and shared GPU presentation (0024) are opt-in. Shared presentation bounds one pending snapshot and retains synchronous per-flip guest readback; on-demand readback and a limit on all GPU frames in flight are not implemented. CPU-written Bink frames are now synchronized into the GPU surface before scaled submission, and bounded 4.5x opening captures are visible. The combined alias/presentation campaign did not establish a speedup. |
-| 4 | Not started. Preserve flush, semaphore, and flip ordering. |
+| 3 | Partial. Async visibility reports (0018) and shared GPU presentation (0024) are opt-in. Three reviewed alternating runs per visibility mode measured 27.401 versus 30.606 world changes/s, but async still failed the 1%-low and G3 gates and remains opt-in. Shared presentation bounds one pending snapshot and retains synchronous per-flip guest readback; on-demand readback and a limit on all GPU frames in flight are not implemented. CPU-written Bink frames are now synchronized into the GPU surface before scaled submission, and bounded 4.5x opening captures are visible. The combined alias/presentation campaign did not establish a speedup. |
+| 4 | Selected after remaining existing-option isolation. G3 remains 65.467% with async visibility and is still dominated by the real PFB flush poll. Preserve flush, semaphore, and flip ordering. |
 | 5 | In progress. GPU compute decodes common textures; exact D24 and packed D24S8/stencil surface aliases and GPU window clipping are experimental opt-ins. One alias-only hardware diagnostic reproduced the combined alias/presentation candidate's much darker stationary background; its correctness is unknown and G4 remains unmet. D3D11 honors partial clear rectangles, and patch 0022 removes redundant software depth clears when a backend owns drawing and clearing. Patch 0019 cached hot `getenv` calls. |
 
 ### Audio performance status
@@ -97,15 +97,27 @@ case, controlled snapshot cost, guest-write races and matched gameplay
 correctness remain unresolved. Renderer device loss fails explicitly;
 recovery and the separate presenter device remain open. See
 [FINDINGS](./FINDINGS.md#default-d3d11-movement-regression-2026-10-30).
+Detailed validation and cache-work counters are now available behind
+`BRUTEFORCE_PERF_COUNTERS=1`. They report approximately every ten seconds
+with the D3D11 statistics, but their QPC timing and atomic aggregation add
+diagnostic overhead. In nine intervals wholly contained by the reviewed
+camera-pan manifests, `guest_word` and `readable_guest_range` validation took
+9.336 and 9.639 ms/flip respectively, almost entirely in `VirtualQuery`.
+Exact texture comparison took 0.832 ms/flip, with 75.699 linear probes per
+lookup. These are instrumented workload ratios on different threads, not
+additive frame-time components.
 
 An opt-in persistent combiner pixel-shader cache now avoids recompiling
 matching bytecode in synthetic warm runs and an alternating stationary-tutorial
 comparison. Timing and output checks are in
-[FINDINGS.md](./FINDINGS.md#launcher-and-pixel-shader-cache); gameplay stutter
-and G4 remain unestablished, and the title captures have small unexplained
-differences. Synthetic blocked-publication and concurrent-writer checks now
-exercise recovery when an identical valid entry already exists; their
-results are not gameplay performance evidence.
+[FINDINGS.md](./FINDINGS.md#launcher-and-pixel-shader-cache). A final-generation
+six-leg title campaign measured 96 cold compile/create events at
+12.914/25.543/30.623 ms p50/p99/max and 96 warm lookup/create events at
+0.143/0.517/0.535 ms. Movement throughput and p99 frame time were effectively
+unchanged. Publication passed, but content-matched title captures remain
+non-identical and not frame-locked, so the cache stays opt-in and G4 remains
+unestablished. Synthetic blocked-publication and concurrent-writer checks
+exercise recovery when an identical valid entry already exists.
 
 Scenes are defined by frames and content, not wall-clock windows, because the
 tutorial's stationary hold appears to be a frame count. The stationary
@@ -136,6 +148,32 @@ world frame. In the previous six-run GPU campaign, 58.9–60.2% of movement
 flips in each run matched a solid-black image; those throughput figures do
 not establish G2 or playability. The harness reports known-black matches but
 cannot classify all dark frames or distinguish an intentional fade.
+For a complete reviewed manifest, the harness also reports world-frame
+cadence from each reviewed baseline to the next `world_changed` frame and
+between successive `world_changed` frames. Static-world and HUD-only flips
+remain inside those intervals; fades, invalid frames and unreviewed gaps break
+the cadence. Its 1% low is the reciprocal of the 99th-percentile completed
+interval. A trailing incomplete interval is not a completed frame and is
+reported outside that cadence.
+
+G3 includes samples in the two known guest GPU polls and kernel-wait samples
+whose first executable caller is one of those polls. Other game-thread kernel
+waits are reported separately and are not assumed to be GPU time. A profile
+without `--profile-callers` provides only the direct-poll lower bound and is
+not a complete G3 measurement.
+
+The 2026-11-03 reviewed default baseline used three 40-second camera-pan runs
+on generation `20261103-145850-21e3091e`, 12 raster threads and the RTX 5070.
+Reviewed guest-surface world cadence averaged 27.349 changes/s
+(26.847-27.713), with a 13.942/s mean 1% low
+(13.571-14.360). G3 averaged 69.1%, entirely in the direct PFB flush poll;
+NV2A busy averaged 73.8%. Both gates fail. Fully contained periodic intervals
+measured 0.787 ms/flip synchronous readback and 4.327 ms/flip visibility
+waiting. Readback is below 10% of the expected 33.33 ms native frame budget,
+while the flush poll overwhelmingly dominates G3. Therefore Phase 3 is not the
+first new mechanism; after isolating the existing ordered-async visibility
+option, Phase 4 is the selected path. See
+[FINDINGS.md](./FINDINGS.md#reviewed-default-d3d11-camera-pan-baseline-2026-11-03).
 
 ## Execution cadence
 
@@ -303,6 +341,12 @@ Done before writing renderer code. All evidence stays local.
 
    Select a PR only if it measurably helps and its tree verifies. None of
    them replaces Phase 1.
+   The 2026-10-31
+   [JSRF-PC review](./UPSTREAM.md#jsrf-pc-prior-art-review) adds one
+   non-PR candidate to the same measurement gate: batch non-incrementing
+   `ARRAY_ELEMENT16/32` words only if the Brute Force census shows material
+   volume. Its JSRF timing is prior-art evidence, not a transferable
+   benchmark; preserve a scalar reference path and the audit counters.
 
 **Exit:** a baseline table in FINDINGS covering distinct fps, per-thread
 busy/wait, the census, the surface-read answer, and both ceilings, with each
@@ -422,6 +466,13 @@ gameplay, apart from constant-writing programs. G4 still holds.
    vertex and index data are consumed from guest memory into the ring buffer
    before the release is written.
 
+The reviewed six-leg visibility comparison isolated the existing asynchronous
+report path. It increased mean reviewed world changes from 27.401/s to
+30.606/s, but the mean 1% low reached only 15.697/s and G3 remained 65.467%.
+The selected async intervals wrote 487,725 reports without a logged visibility
+query or device error. Ordered retirement remains synthetic-tested rather than
+independently proven by the title captures. Keep the path opt-in.
+
 **Exit:** no per-flip GPU wait in the NV2A-thread profile, and G1.
 
 ## Phase 4: let the game thread run ahead
@@ -430,12 +481,26 @@ Each step changes guest-visible timing, so each stays behind its own switch.
 Implement related steps as a milestone and measure them in one alternating
 campaign; isolate individual switches only when needed to explain a result.
 
+**Status (2026-11-03):** step 1 is implemented behind the default-off
+`RECOMP_PFB_FLUSH_WAIT=1` switch and has synthetic coverage plus one corrected
+title movement smoke. The first hook build retained guest return addresses;
+matching the generated routine's four-byte `ret` stack effect fixed startup.
+The smoke had no capture review or caller profile, so it is bring-up evidence,
+not a performance or correctness-gate result. Before steps 2-4, run the
+required poll/event/poll/event/poll/event campaign on the corrected generation,
+review all world captures, and explain its timer-wake/recheck behavior. See
+[FINDINGS.md](./FINDINGS.md#event-driven-pfb-flush-wait-bring-up-2026-11-03).
+
 1. **Event-driven flush acknowledgement.** Identify the KickOff routine
    containing or calling the PFB flush poll at `0x00372180`. Replace its
    polling with a wait on an event that the ack path signals when it clears
    bit 16 of `0x100410`, with a short high-resolution timer as a backstop so
    interrupt safe points still run. Registers and protocol are unchanged.
-   This follows Blood Wake's `bw_flush_wait` and `bw_flush_acked`.
+   This follows Blood Wake's `bw_flush_wait` and `bw_flush_acked`. JSRF-PC's
+   different experiment completes the flush at the register write; do not
+   adapt that shortcut. The wait must wake only from the real acknowledgement.
+   The local implementation is framework patch 0036 plus the title-specific
+   hook; it remains a non-default candidate until the alternating gates pass.
 2. **Idle NV2A thread.** Replace the end-of-pass `Sleep(0)` with: spin while
    work is recent, then nap on a high-resolution timer or until the next
    KickOff signals.
@@ -457,12 +522,22 @@ campaign; isolate individual switches only when needed to explain a result.
 Use the latest profile to select this work; batch it with related earlier
 phases when it is on the critical path:
 
-- **Executor decode and batching:** per-method dispatch cost, redundant state
-  rebuilds per batch, and texture hash cost (move to sparse hashing with a
-  per-frame full check, as Blood Wake does).
-- **Generated code:** compiler flags (`/O2`, `/GL` with LTCG, `/arch:AVX2`)
-  measured by A/B. Also check guest memory-access macro overhead and x87
-  emulation hot spots in the title's own code.
+- **Executor decode and batching:** per-method dispatch cost, including the
+  JSRF-PC prior art for handing non-incrementing index-word runs to the
+  executor whole; redundant state rebuilds per batch; and exact texture-cache
+  lookup and comparison cost. Index exact keys first and retain full source
+  and palette comparisons until tracked guest writes establish safe
+  invalidation. Existing rewrite fixtures show that sparse checks can miss
+  same-frame and unsampled changes, so sparse hashing remains diagnostic.
+  Use the opt-in interval counters to separate linear key probes, exact source
+  and palette comparison spans, snapshot copies, rewrites and evictions before
+  selecting the first cache change.
+  Any run API must preserve scalar CPU-reference behavior, packet boundaries,
+  audit counts, overflow handling and backend output.
+- **Generated code:** `/O2` is already active. Measure `/GL` with LTCG and an
+  optional `/arch:AVX2` build independently by A/B; AVX2 narrows host
+  compatibility and is not an assumed default. Also check guest memory-access
+  macro overhead and x87 emulation hot spots in the title's own code.
 - **Hot title functions:** a native rewrite is allowed only with the same
   operations in the same order and a bit-exact comparison against the
   generated code over a large recorded corpus. Blood Wake rewrote its water

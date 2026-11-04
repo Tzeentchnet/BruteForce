@@ -21,10 +21,15 @@ in [UPSTREAM.md](./UPSTREAM.md).
   `fx\fx.xbe` as **Tao Feng Demo v0018** and `Mech\Mech.xbe` as
   **MechAssault Demo**. Both report the same title ID as the main executable,
   so title ID alone does not distinguish these binaries.
-- Generation `20261029-175500-dfadbdd9` translated 22,295 functions with
+- Generation `20261103-145850-21e3091e` translated 22,295 functions with
   zero failed translations, 12 unresolved direct-call targets, and 34
-  untranslated instruction sites. The manifest and generated sources are
-  ignored local artifacts, not distributed inputs.
+  untranslated instruction sites. It used xboxrecomp base
+  `f0f8a461496a4f23d9b0aeaa284b8d70ba7ab82b` and patched toolkit tree
+  `25a2a713738b7aabb1c21ef6720765ff93ccffea`. The 41,057,280-byte Release
+  executable has SHA-256
+  `0bd6a9835ebc411fb757ea510fb15dee4e4848b700ea6afef2e78a85d8904328`.
+  The manifest and generated sources are ignored local artifacts, not
+  distributed inputs.
 - [build.py](../tools/build.py) records and checks the XBE, fingerprint, seed,
   manual-source, and framework provenance. The pinned base, selected PR
   commits, local patches, and expected tree are in
@@ -169,6 +174,130 @@ The nine focused collision, blocked-publication and key tests passed after
 the fix. The later integrated D3D11, frame-statistics, audit, clipping and
 presentation run passed 174 tests, including 108 D3D11 cases on WARP and
 hardware.
+
+The final-generation cold/warm campaign
+`analysis/bench/20261103-165046-pscache-cold-warm-runs` used generation
+`20261103-145850-21e3091e`, the supported Release executable, the RTX 5070,
+12 raster threads, default synchronous visibility, fixed camera-pan input,
+audio, and stationary capture. Profiling and detailed performance counters
+were off. The sequence was cold/warm/cold/warm/cold/warm. Each cold run used
+a new empty directory; the adjacent warm run reused that exact directory.
+All six runs completed without retry.
+
+Each cold run compiled and published 32 shaders. Each warm run loaded all 32
+and compiled none. Across 96 cold compile-and-create events, latency was
+12.914 ms p50, 20.090 ms p90, 25.543 ms p99, and 30.623 ms maximum; the mean
+per-run sum was 433.552 ms. Across 96 warm lookup-and-create events, latency
+was 0.143/0.220/0.517/0.535 ms, and the mean per-run sum was 5.236 ms. Cold
+timing excludes cache writes; warm timing includes lookup and
+`CreatePixelShader`. The first accepted world candidate appeared at a mean
+87.310 seconds cold and 86.493 seconds warm. The 0.817-second difference is
+an observation across three pairs, not all attributable to the 0.434-second
+mean compile sum because cache writes, loading, and run variation are also
+present.
+
+The measured shader-request stall reduction did not become a steady-state
+throughput claim:
+
+| Metric | Cold mean (range) | Warm mean (range) |
+| --- | --- | --- |
+| Stationary flips/s | 21.167 (20.994-21.369) | 21.436 (21.171-21.852) |
+| Stationary p99 frame ms | 58.143 (53.40-60.89) | 59.820 (54.18-63.13) |
+| Movement flips/s | 35.743 (35.474-35.983) | 35.990 (34.662-36.987) |
+| Movement p99 frame ms | 59.107 (57.74-61.07) | 58.933 (56.50-62.01) |
+| Movement maximum frame ms | 72.167 (62.24-81.22) | 74.330 (70.06-77.74) |
+| Movement flip-rate 1% low/s | 16.928 (16.374-17.319) | 16.994 (16.127-17.700) |
+
+These are flip intervals, not reviewed distinct world frames. Pre-movement
+maximum intervals remained 2.466-2.566 seconds and were dominated by loading
+transitions in both modes; they cannot be attributed to shader compilation.
+Warm movement was only 0.247 flips/s faster on average, while its maximum
+movement interval was 2.163 ms worse. The campaign therefore establishes a
+large reduction in blocking shader-request latency but no steady-state gain.
+
+All 59 stationary captures show the same Basic Controls panel and tutorial
+start area without a visible cold/warm rendering difference. The closest
+same-index cold/warm pairs differed in 61, 245, and 110 pixels by more than
+8/255 (0.0199%, 0.0798%, and 0.0358%) and were not byte-identical. The scene
+is content-matched but not frame-locked, and same-mode runs also differ, so
+the cause is unestablished. Synthetic cold/warm WARP and hardware fixtures
+remain byte-identical.
+
+Each cache directory ended with 32 validated entries and no temporary file.
+No cache warning, damaged-entry message, or publication failure appeared.
+Together with the existing collision, concurrent-writer, read-only,
+deny-delete, and corruption fixtures, publication reliability passes the
+current gate. Strict title output identity does not. The cache therefore
+remains opt-in despite its clear warm-start hitch reduction. Benchmark
+results now include maximum phase frame time and structured cache
+compile/hit counts, totals, and maxima; cache logs without events report zero
+counts rather than a false hit.
+
+## Event-driven PFB flush wait bring-up (2026-11-03)
+
+The title's `sub_00372180` reads the NV2A base from the graphics device at
+offset `0x17C8`, sets bit 16 of register `0x100410`, and polls until the
+framework acknowledgement clears it. Framework patch
+[`0036-event-driven-pfb-flush-wait.patch`](../patches/xboxrecomp/0036-event-driven-pfb-flush-wait.patch)
+adds a dedicated acknowledgement event and a 200 us high-resolution timer
+backstop. The real `nv2a_ack_busy_bits` path still performs the clear; a held
+flip still refuses it. Every wake rechecks the bit and runs an IRQ safe point.
+The framework never fabricates or prematurely completes the handshake.
+`RECOMP_PFB_FLUSH_WAIT=1` selects the title hook; unset or `0` calls the exact
+generated routine. Other values stop with a diagnostic.
+
+The first enabled title build, generation `20261103-172031-982987fb`
+(executable SHA-256
+`2e0d9c07f75c8c7cfb1849e2d7a87878b63c023a6088f58b823d9169f9d403b9`),
+remained alive for two 90-second attempts but produced no frame statistics,
+pushbuffer calls, draws, or flips. Bounded temporary diagnostics established
+that the real ack path cleared and signalled the first request. The framework
+wait had not blocked. Comparison with `sub_00372180_gen` then found the
+title-integration error: the enabled manual path returned without advancing
+the emulated guest stack for the original `ret`. The disabled path inherited
+that `g_esp += 4` effect from the generated routine. Repeated enabled calls
+therefore retained guest return addresses and stopped startup. The hook now
+performs the same four-byte guest return after a successful wait. Native
+fixture modes execute both paths and require exactly one guest return, the
+expected EAX/ECX state, a real busy-bit observation, and no residual bit.
+This was a Brute Force hook bug, not evidence that the generic event helper
+cleared the wrong mapping.
+
+The corrected Release generation is `20261103-174033-74f83d80`, using toolkit
+tree `00079980c26aecf07a3686fa9912112f3b122649`; its executable SHA-256 is
+`7e093b1273c850e14093c389f302ef9bfe00de5f49f8921a54c83dff84f19182`.
+The one-run campaign
+`analysis/bench/20261103-174957-pfb-event-stack-fix-smoke` used the RTX 5070,
+12 raster threads, D3D11, audio, the fixed Quick Campaign route,
+`BRUTEFORCE_PERF_COUNTERS=1`, and the enabled PFB wait. It reached the world
+at 86.67 seconds and completed without retry. Its 1,390 movement flips covered
+39.969 seconds at 34.777 flips/s. The whole-frame pixel/constant diagnostic
+reported 1,391 changes at 34.802/s with a 16.508/s 1% low.
+
+Those figures are **not reviewed world-frame performance**. The run captured
+no movement images, all 1,391 frames remain unclassified, and caller profiling
+was disabled. It establishes title bring-up and scripted movement only; it
+does not establish G2, G3, an improvement over polling, visible equivalence,
+CPU-reference equivalence, or physical presentation.
+
+The final periodic PFB snapshot reported 137,787 waits, 128,005 real
+acknowledgements, 121,822 event wakes, 137,890 timer wakes, zero spurious
+wakes, 130,169 set-bit rechecks, and 259,712 IRQ safe points. This cumulative
+snapshot was taken while the run was active rather than at a quiescent phase
+boundary. The high timer/recheck counts and the wait/ack difference are
+observations that require phase-aligned comparison; they are not yet a
+correctness failure or a performance result.
+
+Before the title smoke, the framework's five native PFB cases and six project
+wrapper cases covered disabled, normal, spurious, lost-event/timer recovery,
+reuse, flip-held, and invalid-switch behavior. The broader fence/semaphore,
+interrupt, PGRAPH trap, pushbuffer-ring, flip-hold, D3D11 WARP/hardware and
+benchmark selections also passed. After the guest-return correction, the two
+new manual-hook modes and the Release title smoke passed; the complete earlier
+matrix was not rerun for that one-line title-only correction. The option
+therefore remains default-off. The next evidence is the required
+poll/event/poll/event/poll/event campaign with caller profiles and reviewed
+world captures, not another mechanism.
 
 ## GPU audit instrumentation
 
@@ -1493,9 +1622,11 @@ frames remain unclassified. Captures and frame-statistics instrumentation
 can affect timing, and guest-frame captures do not establish scanout.
 
 The table suggests a possible improvement but cannot attribute it to either
-change or establish distinct visible-world FPS. The final executable was
-rebuilt **after** removing the ineffective P8 experiment and was not
-rebenchmarked; the user's reported 6 fps and the actual cause remain open.
+change or establish distinct visible-world FPS. At that point the final
+executable had been rebuilt **after** removing the ineffective P8 experiment
+but had not been rebenchmarked. The later reviewed campaign below does not
+reproduce the reported 6 fps on the current supported generation; it does not
+identify the cause of the historical report.
 
 A separate one-run exact/approximate-cache diagnostic measured
 19.723/8.042 stationary flips and 30.230/16.890 movement whole-frame
@@ -1514,6 +1645,185 @@ passed 246 cases on the experimental candidate. After removing the P8
 experiment, the rebuilt final renderer passed 53 focused unsupported-cache,
 failed-upload, P8-reprotection and CPU-reference parity cases. These tests do
 not establish matched gameplay or hardware NV2A equivalence.
+
+### Reviewed default D3D11 camera-pan baseline (2026-11-03)
+
+The first attempt to collect this baseline exposed three benchmark-state
+errors rather than usable performance evidence:
+
+- The old three-A menu script reached a 421-draw campaign menu at 34.16 s.
+  The old draw-count heuristic falsely accepted it as the tutorial world, and
+  the stopped attempt accumulated 50,181 frame rows over 632.68 s without
+  reaching the expected stationary transition. The validated Quick Campaign
+  route now presses A at 20, 23, 28, 32, 37, 42, 47, 52, 57 and 62 seconds,
+  presses Down at 36 seconds, rejects legacy world candidates before 80
+  seconds, and applies a per-phase timeout.
+- A corrected three-run campaign reached gameplay, but
+  `--no-auto-panels` left the HUD tutorial-choice panel over every captured
+  movement interval. Those runs are rejected for G2 and gameplay profiling.
+  A fixed Y press at 18.75 seconds now selects "skip tutorial menus", and
+  measurement starts at 20 seconds after the choice settles.
+- Forward movement after the skip could enter a letterboxed tutorial cutscene.
+  Its timing depended on achieved frame rate, so a wall-time route that looked
+  safe in a slower probe entered it near the start of faster runs. The accepted
+  route makes the measured 40-second segment camera-only and leaves the
+  character in the starting area. The two intermediate movement campaigns
+  containing that cutscene are rejected evidence.
+
+The accepted campaign is the local
+`analysis/bench/20261103-161034-default-d3d11-camera-pan` result. It used
+generation `20261103-145850-21e3091e`, the Release executable and toolkit tree
+recorded under Executable and provenance, default D3D11 options, audio on,
+12 raster threads, `BRUTEFORCE_PERF_COUNTERS=1`, and
+`BRUTEFORCE_PROFILE_CALLERS=1`. All three attempts completed without a retry.
+The selected adapter was an NVIDIA GeForce RTX 5070
+(`10DE:2F04`, 12,523,143,168 dedicated bytes, LUID
+`00000000:00021A35`, feature level 11.0). D3D11's driver query returned
+`0x887A0004`; the matching local `Win32_VideoController` record reports driver
+`32.0.16.1742`.
+
+Every accepted `holdNNNNNNNNNN.bmp` filename was matched to the same flip ID
+in `frames.csv`. Contact-sheet review classified 3,258 consecutive captures:
+no tutorial-choice panel, letterbox, fade, solid-black frame, invalid image or
+unreviewed gap was present. The reviewed world ROI is
+`[160,120,480,180]`, below the top HUD and above the reticle, radar and item
+HUD. Every transition changed that ROI. These are renderer guest-surface
+captures, not OS-compositor or physical-display captures, so the result is
+reviewer-asserted guest-surface cadence rather than proof of displayed-present
+cadence.
+
+| Run | Reviewed frames | Seconds | World changes/s | 1% low/s | p50/p90/p99 frame ms |
+| --- | ---: | ---: | ---: | ---: | --- |
+| 1 | 1,061 | 39.48 | 26.847 | 13.571 | 33.16 / 53.60 / 73.69 |
+| 2 | 1,102 | 39.73 | 27.713 | 14.360 | 32.16 / 52.94 / 69.64 |
+| 3 | 1,095 | 39.80 | 27.487 | 13.895 | 32.58 / 52.99 / 71.97 |
+
+The mean reviewed rate is 27.349 world changes/s and the mean 1% low is
+13.942/s. This does not meet G2: it is below the unverified 30 Hz native-rate
+expectation, and its 1% low is only 51.0% of its measured mean rather than the
+required 80%. It does explicitly fail to reproduce the reported current
+default movement rate of roughly 6 fps, even with continuous captures,
+caller profiling and detailed counters enabled. The historical symptom's
+cause remains unknown; a new report against this generation would require its
+own options, scene and captures.
+
+Caller-attributed profiles cover the same 40-second measured windows. The
+game thread spent 68.8%, 69.0% and 69.5% of samples in the known PFB flush
+poll `sub_00372180`; no kernel-wait sample was attributed to a known guest GPU
+poll, and unrelated kernel waits were 0.23-0.40%. G3 therefore averages
+69.1% and fails its under-10% target. The NV2A thread was
+73.45-74.21% busy. `NtQueryVirtualMemory` accounted for 21.1-22.2% of
+game-thread samples and 25.9-26.4% of NV2A-thread samples.
+
+Nine approximately ten-second counter intervals, covering 2,433 flips, were
+wholly contained inside the reviewed manifests. Their aggregate diagnostic
+work was:
+
+- synchronous readback: 0.787 ms/flip. This is 2.4% of a 33.33 ms native
+  frame budget and below the PERFPLAN 10% Phase-3-first threshold;
+- visibility: 417,638 reads and 10,527.7 ms waiting, or 4.327 ms/flip;
+- `guest_word`: 374,604 accepted calls, no rejection or query failure, and
+  22,715.062 ms total (9.336 ms/flip), of which 22,699.269 ms was in
+  374,604 `VirtualQuery` calls;
+- `readable_guest_range`: 407,332 accepted calls, no rejection or query
+  failure, and 23,452.805 ms total (9.639 ms/flip), of which 23,437.232 ms
+  was in 407,332 `VirtualQuery` calls;
+- texture cache: 1,865,281 lookups and 141,200,508 linear probes
+  (75.699 probes/lookup), all descriptor-key hits; 1,843,234 exact checks,
+  all hits, compared 95,415,228,984 source and 208,553,984 palette bytes,
+  and took 2,023.818 ms (0.832 ms/flip). Lookup scanning took 133.077 ms
+  (0.0547 ms/flip). There were no snapshot copies, rewrites, evictions,
+  failed-upload discards or approximate-hash bytes, and 22,047
+  unsupported-cache hits.
+
+The validation and texture figures include QPC reads and atomic aggregation
+from `BRUTEFORCE_PERF_COUNTERS`; they are not an uninstrumented throughput
+baseline. Work on the game and NV2A threads can overlap, so the per-flip
+figures must not be added as a single frame-time decomposition. They do show
+that page-query validation and the PFB flush protocol dominate the next
+investigation. The first existing-option comparison is synchronous versus
+ordered asynchronous visibility with every other option fixed. If G3 remains
+high, Phase 4 is the first new mechanism: preserve the real flush
+acknowledgement while replacing polling with a bounded event-driven wait.
+
+The benchmark, control, reviewed-world and matched-comparison suites pass 83
+tests after the route and timing changes. Native D3D11, fence and interrupt
+fixtures had already passed on this generation. G4 remains open; this campaign
+does not compare matched frames with the CPU reference.
+
+### Reviewed synchronous versus asynchronous visibility (2026-11-03)
+
+The local campaign
+`analysis/bench/20261103-162315-visibility-sync-async` isolated
+`RECOMP_GPU_ZPASS=async` from the default synchronous path. It used the same
+generation, executable, toolkit tree, RTX 5070, 12 raster threads, audio,
+fixed camera-pan script, continuous flip-ID capture,
+`BRUTEFORCE_PERF_COUNTERS=1`, and caller-attributed profiling as the accepted
+default baseline. The sequence was sync/async/sync/async/sync/async. Three
+runs completed for each variant. One additional synchronous attempt stalled
+after flip 12 and completed on its automatic retry; no asynchronous attempt
+failed.
+
+Review covered all 6,903 selected captures on 45 contact sheets. The six
+manifests contain consecutive flip IDs and use the same
+`[160,120,480,180]` world ROI. Each adjacent sync/async pair starts and ends
+in the same tutorial start area and follows the same alternating camera
+route. The maximum difference between corresponding input-dispatch times was
+459 ms. No tutorial-choice panel, cutscene, fade, letterbox, solid-black
+frame, missing geometry, visible visibility artifact, invalid image, or
+review gap was observed. Every ROI transition changed. This establishes
+reviewer-asserted guest-surface scene continuity, not CPU-reference
+equivalence, OS-compositor presentation, or physical scanout.
+
+| Run | Variant | Reviewed frames | Seconds | World changes/s | 1% low/s | G3 | NV2A busy |
+| --- | --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| 1 | sync | 1,081 | 39.63 | 27.253 | 13.938 | 69.8% | 73.84% |
+| 2 | async | 1,204 | 39.58 | 30.396 | 15.562 | 64.9% | 71.20% |
+| 3 retry 1 | sync | 1,091 | 39.73 | 27.433 | 13.405 | 69.5% | 73.57% |
+| 4 | async | 1,220 | 39.55 | 30.821 | 15.709 | 65.8% | 70.24% |
+| 5 | sync | 1,088 | 39.50 | 27.517 | 13.927 | 68.8% | 73.39% |
+| 6 | async | 1,219 | 39.80 | 30.602 | 15.819 | 65.7% | 71.39% |
+
+The synchronous means are 27.401 world changes/s, 13.757/s 1% low,
+69.367% G3, and 73.600% NV2A busy. The asynchronous means are 30.606/s,
+15.697/s, 65.467%, and 70.943%. Async therefore improves reviewed throughput
+by 3.205 changes/s (11.7%) and the 1% low by 1.940/s (14.1%), while reducing
+G3 by 3.9 percentage points and NV2A busy time by 2.657 points.
+
+Nine periodic intervals per variant were wholly contained in the reviewed
+ranges, covering 2,448 sync and 2,707 async flips. Synchronous visibility
+performed 405,967 query reads and waited 10,389.1 ms, or 4.244 ms/flip.
+Async performed no synchronous visibility reads and wrote 487,725 reports;
+639,569 polls found the oldest report still pending. No asynchronous log
+reported a visibility-query or device error. Ordered ring-head retirement is
+covered by the existing WARP and hardware fixtures. The retail run exercises
+that path but is not an independent proof of report order. Zero synchronous
+wait time does not mean report polling is free: the current timer measures
+the removed blocking query reads, not asynchronous polling overhead.
+
+Other interval costs were stable enough not to explain the gain:
+
+- readback was 0.781 ms/flip sync and 0.727 ms/flip async;
+- `guest_word` was 9.220 and 9.354 ms/flip, almost entirely
+  `VirtualQuery`;
+- `readable_guest_range` was 9.634 and 9.601 ms/flip, again almost entirely
+  `VirtualQuery`;
+- exact texture comparison was 0.822 and 0.810 ms/flip. Linear key scanning
+  was 0.0522 and 0.0462 ms/flip, with 75.371 and 76.350 probes per lookup.
+
+The async candidate passes the expected-rate half of G2 in all three runs,
+but its mean 1% low is only 52.3% of 30 Hz and fails the required 24/s
+threshold. G3 remains 65.467%, dominated by `sub_00372180`, and fails the
+under-10% target. Async visibility therefore remains opt-in. The subsequent
+persistent pixel-shader-cache campaign isolated its cold-start hitches from
+steady-state throughput; the failed G3 gate then selects Phase 4's
+real-acknowledgement, event-driven flush wait. The cache's separate strict
+output-identity gate remains open. The CPU reference path remains required
+for G4.
+
+The benchmark now retains asynchronous reports-written and pending-poll
+counts in its structured D3D11 interval diagnostics. Older diagnostic lines
+without those fields remain parseable and report them as unavailable.
 
 ### Synthetic D3D11 compatibility hardening
 
@@ -1865,37 +2175,27 @@ remain local.
 
 ## Current validation boundary
 
-The documented retail generation `20261029-175500-dfadbdd9` built in Release
-against verified framework tree `a4489cd69600a1489edea98ac19cf20db242b6d2`.
-Patch 0024 applies independently to tree
-`8d57b4ceb02054f4921a88a7233e6722625c14ff` and reconstructs that earlier
-tree. The coordinated current tree adds patches 0025 and 0026; neither was
-retested on that retail generation in this work.
-Patch 0023
-applies independently to tree `f2e260a5a6845c2edc0b634e82265210e47fe759`
-and reconstructs the preceding tree. Patch 0022 independently reconstructs
-that preceding tree from `3472bac8e33c1758c801fb1ca65a346a170ad8e5`.
-An earlier combined batch of the renderer, frame-statistics, window-clip and benchmark suites,
-plus three targeted build-metadata tests, passed 94 tests with WARP and
-hardware devices. These include 16-frame partial-clear fixtures, CPU,
-draw-only, clear-only and complete backend ownership cases, and default
-versus gated flip-only frame dumps. The benchmark suite also covers known-black
-reporting and keeps periodic reports active when capture and census are combined.
-Patch 0021 independently reconstructs tree
-`3472bac8e33c1758c801fb1ca65a346a170ad8e5` from
-`ec3fa862999fa1f2bd58d5eaffbaee04d7baf68d`.
+The supported comparison baseline remains generation
+`20261103-145850-21e3091e`, built in Release against xboxrecomp base
+`f0f8a461496a4f23d9b0aeaa284b8d70ba7ab82b` and verified patched tree
+`25a2a713738b7aabb1c21ef6720765ff93ccffea`. Its executable SHA-256 is
+`0bd6a9835ebc411fb757ea510fb15dee4e4848b700ea6afef2e78a85d8904328`.
+The newer Phase 4 candidate is generation `20261103-174033-74f83d80`, toolkit
+tree `00079980c26aecf07a3686fa9912112f3b122649`, executable SHA-256
+`7e093b1273c850e14093c389f302ef9bfe00de5f49f8921a54c83dff84f19182`.
+Both report 12 unresolved call targets and 34 untranslated instruction sites.
+The Phase 4 candidate has one successful enabled movement smoke but no
+reviewed alternating comparison, so it does not replace the baseline evidence.
 
-The previous framework tree was
-`ec3fa862999fa1f2bd58d5eaffbaee04d7baf68d`. Patch 0020 applies independently
-to its preceding tree
-`8f679118ffd6173765a505c5ca666a353877bcc1` and reproduces that previous tree.
-The project suite passed 194 tests with all native fixtures configured,
-including WARP and hardware texture, native BC1/2/3 cube/mip, palette-rewrite,
-and asynchronous visibility cases. After the retry-reporting change, the
-focused benchmark suite passed 14 tests. An earlier run passed 14 upstream
-wrapper and dispatch tests. Generation still reports 12 unresolved call
-targets and 34 untranslated instruction sites. One candidate boot stalled and
-required a retry. For current commands, see
+The reviewed default and sync/async camera-pan campaigns use that exact
+baseline generation. The focused benchmark, control, reviewed-world and matched
+comparison suite passes 83 tests. The native suite previously passed 164
+tests with 67 hardware or platform skips, and the final Release executable,
+D3D11 fixture, fence fixture and interrupt fixture built successfully. The
+visibility comparison retained one failed synchronous boot attempt and its
+successful retry; all three asynchronous attempts completed. These results
+do not establish G4 or physical presentation. The Phase 4 validation boundary
+and its narrower post-fix checks are recorded above. For current commands, see
 [DEVELOPMENT.md](./DEVELOPMENT.md#tests).
 
 Open work includes broader gameplay and input, physical controllers, audio,

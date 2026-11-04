@@ -9,10 +9,13 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "tools"))
 import bench_world  # noqa: E402
 
 
-def write_manifest(tmp_path, images, labels, *, review=None, flips=None, exclude=None):
+def write_manifest(tmp_path, images, labels, *, review=None, flips=None, exclude=None, times=None):
     frames = []
     for index, (image, label) in enumerate(zip(images, labels)):
-        item = {"flip": flips[index] if flips else index + 1, "t": index / 10}
+        item = {
+            "flip": flips[index] if flips else index + 1,
+            "t": times[index] if times else index / 10,
+        }
         if image is not None:
             path = tmp_path / f"frame{index}.bmp"
             if isinstance(image, bytes):
@@ -78,6 +81,8 @@ def test_labeled_synthetic_frames_separate_world_hud_black_fade_and_unknown(tmp_
     assert report["frame_details"][3]["region_pixels_over_tolerance"] == 1
     assert report["status"] == "inconclusive"
     assert report["reviewed_world_changes_per_second"] is None
+    assert report["reviewed_world_low_1pct_fps"] is None
+    assert report["reviewed_world_cadence"] is None
 
 
 def test_unlabeled_roi_changes_are_diagnostic_not_valid_world_frames(tmp_path):
@@ -144,6 +149,8 @@ def test_rate_requires_complete_real_review_and_consecutive_alignment(tmp_path):
     report = bench_world.analyze_manifest(path)
     assert report["status"] == "reviewer_asserted"
     assert report["reviewed_world_changes_per_second"] == 3.333
+    assert report["reviewed_world_low_1pct_fps"] == 3.333
+    assert report["reviewed_world_cadence"]["frames"] == 1
     assert "distinct_world_fps" not in report
     manifest = json.loads(path.read_text(encoding="utf-8"))
     manifest["frames"][2]["flip"] = 4
@@ -154,6 +161,32 @@ def test_rate_requires_complete_real_review_and_consecutive_alignment(tmp_path):
     assert report["unknown_frames"] >= 1
     assert report["reviewed_world_changes_per_second"] is None
     assert report["raw_region_pixel_changes"]["changes_per_second"] is None
+
+
+def test_reviewed_world_cadence_reports_interval_percentiles_and_low(tmp_path):
+    images = []
+    for index in range(5):
+        image = sample_world()
+        image.putpixel((4, 4), (80 + index, 90, 100))
+        images.append(image)
+    report = bench_world.analyze_manifest(write_manifest(
+        tmp_path, images,
+        ["world", "world_changed", "world_changed", "world_changed", "world_changed"],
+        review=review_metadata(), times=[0, 0.01, 0.02, 0.03, 1.03],
+    ))
+    assert report["status"] == "reviewer_asserted"
+    assert report["reviewed_world_low_1pct_fps"] == 1.0
+    assert report["reviewed_world_cadence"] == {
+        "scope": ("reviewer-labeled baseline-to-change and change-to-change intervals; "
+                  "trailing incomplete intervals are excluded"),
+        "frames": 4,
+        "segments": 1,
+        "seconds": 1.03,
+        "frame_ms_p50": 10.0,
+        "frame_ms_p90": 1000.0,
+        "frame_ms_p99": 1000.0,
+        "low_1pct_fps": 1.0,
+    }
 
 
 def test_unknown_previous_frame_never_becomes_a_valid_motion_pair(tmp_path):
@@ -195,3 +228,5 @@ def test_hash_only_benchmark_marks_nonblack_frames_unknown():
     assert report["invalid_frames"] is None and report["intentional_fade_frames"] is None
     assert report["reviewed_world_frames"] == report["reviewed_world_changes"] == 0
     assert report["reviewed_world_changes_per_second"] is None
+    assert report["reviewed_world_low_1pct_fps"] is None
+    assert report["reviewed_world_cadence"] is None

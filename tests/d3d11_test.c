@@ -25,6 +25,7 @@
 #include "gpu/d3d11_backend.h"
 #include "gpu/d3d11_device_status.h"
 #include "gpu/null_backend.h"
+#include "perf_counters.h"
 
 typedef void (*recomp_func_t)(void);
 recomp_func_t recomp_lookup(uint32_t va) { (void)va; return NULL; }
@@ -740,6 +741,74 @@ static int scene_p8_rewrite(const char *out_path, int invalid_index, int shrink,
     REQUIRE(fwrite(guest(b), 4, B_SIZE * B_SIZE, f) == B_SIZE * B_SIZE &&
             fclose(f) == 0, "write P8 rewrite output");
     puts("P8 rewrites drawn");
+    return 1;
+}
+
+static int scene_perf_counters(const char *out_path)
+{
+    uint32_t b = xbox_ContiguousAlloc(B_SIZE * B_SIZE * 4, 4096);
+    uint32_t vb = xbox_ContiguousAlloc(0x1000, 4096);
+    uint32_t tex = xbox_ContiguousAlloc(0x1000, 4096);
+    uint32_t palette = xbox_ContiguousAlloc(0x1000, 4096);
+    uint32_t *table;
+    BruteForcePerfCounters counters, reset_counters;
+    FILE *f;
+
+    REQUIRE(b && vb && tex && palette, "allocate performance-counter fixture");
+    memset(guest(tex), 0, 64);
+    table = (uint32_t *)guest(palette);
+    memset(table, 0, 256 * 4);
+    table[0] = 0xFFFF0000u;
+    table[1] = 0xFF00FF00u;
+    identity_matrix();
+    surface(b, B_SIZE, 0);
+    clear(0xF0, 0xFF000000u, 0);
+    texture_palette_stage(0, tex, palette, 3);
+    combiners_stage(0);
+    sample_quad(2, 2, 0.03f, 0.03f, vb);
+    sample_quad(16, 2, 0.03f, 0.03f, vb);
+    memset(guest(tex), 1, 64);
+    sample_quad(30, 2, 0.03f, 0.03f, vb);
+    table[1] = 0xFF0000FFu;
+    sample_quad(44, 2, 0.03f, 0.03f, vb);
+    flip();
+
+    bruteforce_perf_counters_take(&counters);
+    bruteforce_perf_counters_take(&reset_counters);
+    REQUIRE(counters.guest_range.calls >= 8 &&
+            counters.guest_range.accepted == counters.guest_range.calls &&
+            counters.guest_range.rejected == 0 &&
+            counters.guest_range.virtual_queries >= counters.guest_range.calls &&
+            counters.guest_range.query_failures == 0,
+            "readable guest-range counters");
+    REQUIRE(counters.texture.lookups >= 4 &&
+            counters.texture.probes >= 3 &&
+            counters.texture.key_hits >= 3 &&
+            counters.texture.key_misses >= 1,
+            "texture key lookup counters");
+    REQUIRE(counters.texture.exact_checks >= 3 &&
+            counters.texture.exact_hits >= 1 &&
+            counters.texture.source_compare_bytes > 0 &&
+            counters.texture.palette_compare_bytes > 0,
+            "exact texture comparison counters");
+    REQUIRE(counters.texture.snapshot_copies >= 3 &&
+            counters.texture.snapshot_copy_bytes > 0 &&
+            counters.texture.rewrites >= 2,
+            "texture snapshot and rewrite counters");
+    REQUIRE(reset_counters.guest_range.calls == 0 &&
+            reset_counters.texture.lookups == 0 &&
+            reset_counters.texture.exact_checks == 0,
+            "performance counter snapshot resets the interval");
+
+    f = fopen(out_path, "wb");
+    REQUIRE(f != NULL, "open performance-counter output");
+    REQUIRE(fwrite(guest(b), 4, B_SIZE * B_SIZE, f) == B_SIZE * B_SIZE &&
+            fclose(f) == 0, "write performance-counter output");
+    printf("D3D11 performance counters validated: %llu range checks,"
+           " %llu texture lookups, %llu exact checks\n",
+           (unsigned long long)counters.guest_range.calls,
+           (unsigned long long)counters.texture.lookups,
+           (unsigned long long)counters.texture.exact_checks);
     return 1;
 }
 
@@ -1878,9 +1947,16 @@ static int scene_bc(const char *out_path)
 
 int main(int argc, char **argv)
 {
+    int perf_mode;
+
     SetErrorMode(SEM_NOGPFAULTERRORBOX | SEM_FAILCRITICALERRORS);
     if (argc != 4)
         return 2;
+    perf_mode = strcmp(argv[2], "gpu-perf-counters") == 0;
+    if (perf_mode &&
+        (_putenv_s("BRUTEFORCE_PERF_COUNTERS", "1") != 0 ||
+         !bruteforce_perf_counters_init()))
+        return 1;
     if (_putenv_s("RECOMP_RASTER_THREADS", "4") != 0 || _putenv_s("RECOMP_SWIZZLED_RT", "1") != 0)
         return 1;
     if (!initialize(argv[1]))
@@ -1934,6 +2010,8 @@ int main(int argc, char **argv)
         return bruteforce_test_shader_cache_publication(strstr(argv[2], "readonly") != NULL,
                                                         strstr(argv[2], "different") != NULL,
                                                         strstr(argv[2], "corrupt") != NULL) ? 0 : 1;
+    if (perf_mode)
+        return scene_perf_counters(argv[3]) ? 0 : 1;
     if (strstr(argv[2], "vsh-packed") ?
         !scene_vsh_packed(argv[3], strstr(argv[2], "short3") != NULL,
                           strstr(argv[2], "ubyte4") != NULL) :

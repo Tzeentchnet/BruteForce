@@ -9,11 +9,16 @@
 #include "nv2a_backend.h"
 #include "xbox_memory_layout.h"
 #include "platform/host_time.h"
+#include "perf_counters.h"
 
 #define BRUTEFORCE_DEVICE_GLOBAL 0x0037DD88u
 #define BRUTEFORCE_DEVICE_SEMAPHORE_OFFSET 0x30u
 #define BRUTEFORCE_DEVICE_FENCE_EVENT_OFFSET 0x196Cu
+#define BRUTEFORCE_DEVICE_NV2A_OFFSET 0x17C8u
 #define BRUTEFORCE_MINIPORT_FENCE_EVENT_OFFSET 0x1A4u
+#define BRUTEFORCE_NV2A_BASE 0xFD000000u
+#define BRUTEFORCE_PFB_FLUSH_OFFSET 0x100410u
+#define BRUTEFORCE_PFB_FLUSH_BUSY 0x00010000u
 #define BRUTEFORCE_GPU_VECTOR 3u
 #define BRUTEFORCE_XPP_CLI 0x00384FA5u
 #define BRUTEFORCE_XPP_STI 0x00384FB6u
@@ -21,6 +26,7 @@
 #define BRUTEFORCE_DAC_RAMP_BYTES (256u * 3u)
 
 typedef void (*recomp_func_t)(void);
+extern void sub_00372180_gen(void);
 extern void sub_00377F80_gen(void);
 
 extern RECOMP_TLS uint32_t g_eax, g_ecx, g_edx, g_esp;
@@ -38,24 +44,47 @@ static volatile uint32_t *guest_word(uint32_t va, int writable)
     const DWORD writeable = PAGE_READWRITE | PAGE_WRITECOPY |
                             PAGE_EXECUTE_READWRITE | PAGE_EXECUTE_WRITECOPY;
     MEMORY_BASIC_INFORMATION info;
+    volatile uint32_t *result = NULL;
     uintptr_t host;
     uintptr_t region;
+    uint64_t total_start = 0, query_start = 0, query_ticks = 0;
+    unsigned queries = 0, query_failures = 0, regions = 0;
+    int perf = g_bruteforce_perf_counters_enabled;
 
+    if (perf)
+        total_start = bruteforce_perf_clock();
     if (!va || (va & 3u) ||
         !(end <= XBOX_CONTIG_SIZE ||
           (va >= XBOX_CONTIG_BASE && end <= (uint64_t)XBOX_CONTIG_BASE + XBOX_CONTIG_SIZE)) ||
         offset > UINTPTR_MAX - va)
-        return NULL;
+        goto done;
     host = offset + va;
-    if (VirtualQuery((const void *)host, &info, sizeof(info)) != sizeof(info) ||
-        info.State != MEM_COMMIT || (info.Protect & (PAGE_GUARD | PAGE_NOACCESS)) ||
+    if (perf)
+        query_start = bruteforce_perf_clock();
+    queries = 1;
+    if (VirtualQuery((const void *)host, &info, sizeof(info)) != sizeof(info)) {
+        if (perf)
+            query_ticks = bruteforce_perf_clock() - query_start;
+        query_failures = 1;
+        goto done;
+    }
+    if (perf)
+        query_ticks = bruteforce_perf_clock() - query_start;
+    regions = 1;
+    if (info.State != MEM_COMMIT || (info.Protect & (PAGE_GUARD | PAGE_NOACCESS)) ||
         !(info.Protect & (writable ? writeable : readable)))
-        return NULL;
+        goto done;
     region = (uintptr_t)info.BaseAddress;
     if (host < region || info.RegionSize < sizeof(uint32_t) ||
         host - region > info.RegionSize - sizeof(uint32_t))
-        return NULL;
-    return (volatile uint32_t *)host;
+        goto done;
+    result = (volatile uint32_t *)host;
+
+done:
+    if (perf)
+        bruteforce_perf_record_guest_word(result != NULL, queries, query_failures, regions,
+                                          bruteforce_perf_clock() - total_start, query_ticks);
+    return result;
 }
 
 static void invalid_gpu_pointer(const char *name, uint32_t va)
@@ -256,6 +285,74 @@ void sub_00371AB0_enter(void)
         if (irq && *irq == '1')
             register_fence_interrupt(device_va);
     }
+}
+
+static volatile uint32_t *pfb_device_global;
+static volatile uint32_t *pfb_nv2a_field;
+static uint32_t pfb_device_va;
+static int pfb_wait_enabled;
+
+static BOOL CALLBACK initialize_pfb_wait(PINIT_ONCE once, PVOID parameter,
+                                         PVOID *context)
+{
+    (void)once;
+    (void)parameter;
+    (void)context;
+
+    pfb_wait_enabled = xbox_Nv2aPfbFlushWaitEnabled();
+    if (!pfb_wait_enabled)
+        return TRUE;
+
+    pfb_device_global = guest_word(BRUTEFORCE_DEVICE_GLOBAL, 0);
+    if (pfb_device_global == NULL)
+        invalid_gpu_pointer("graphics device global", BRUTEFORCE_DEVICE_GLOBAL);
+    pfb_device_va = *pfb_device_global;
+    if (pfb_device_va > UINT32_MAX - BRUTEFORCE_DEVICE_NV2A_OFFSET ||
+        guest_word(pfb_device_va, 0) == NULL)
+        invalid_gpu_pointer("graphics device", pfb_device_va);
+    pfb_nv2a_field =
+        guest_word(pfb_device_va + BRUTEFORCE_DEVICE_NV2A_OFFSET, 0);
+    if (pfb_nv2a_field == NULL)
+        invalid_gpu_pointer("graphics device NV2A field", pfb_device_va);
+    return TRUE;
+}
+
+void sub_00372180(void)
+{
+    static INIT_ONCE once = INIT_ONCE_STATIC_INIT;
+    volatile uint32_t *flush;
+    LONG previous;
+
+    if (!InitOnceExecuteOnce(&once, initialize_pfb_wait, NULL, NULL))
+        abort();
+    if (!pfb_wait_enabled) {
+        sub_00372180_gen();
+        return;
+    }
+    if (*pfb_device_global != pfb_device_va) {
+        fprintf(stderr, "[GPU] Graphics device changed from 0x%08X to 0x%08X "
+                        "during a PFB flush wait\n",
+                pfb_device_va, *pfb_device_global);
+        abort();
+    }
+
+    g_eax = *pfb_nv2a_field;
+    if (g_eax != BRUTEFORCE_NV2A_BASE) {
+        fprintf(stderr, "[GPU] Unexpected NV2A register base 0x%08X\n", g_eax);
+        abort();
+    }
+    flush = xbox_Nv2aRegPtr(BRUTEFORCE_PFB_FLUSH_OFFSET);
+    if (flush == NULL)
+        invalid_gpu_pointer("PFB flush register",
+                            BRUTEFORCE_NV2A_BASE + BRUTEFORCE_PFB_FLUSH_OFFSET);
+
+    MemoryBarrier();
+    previous = InterlockedOr((volatile LONG *)flush,
+                             (LONG)BRUTEFORCE_PFB_FLUSH_BUSY);
+    g_ecx = (uint32_t)previous | BRUTEFORCE_PFB_FLUSH_BUSY;
+    if (!xbox_Nv2aPfbFlushWait())
+        abort();
+    g_esp += 4;
 }
 
 void sub_00377F80(void)

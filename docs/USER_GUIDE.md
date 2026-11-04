@@ -171,11 +171,15 @@ rather than using a physical keyboard; physical controllers and other campaign
 scenes have not been verified. In one probe, the tutorial reported approximately
 3.7 flips per second, not a measurement of distinct world-frame FPS.
 
-A menu script used in one diagnostic was
-`RECOMP_PAD_SCRIPT="20000:a:200,23000:a:200,28000:a:200"`;
-times are milliseconds from the first USB report and may need adjustment on
-another machine or when audio is enabled. Leave the variable unset for manual
-input.
+The benchmark's validated Quick Campaign route presses A at 20, 23, 28, 32,
+37, 42, 47, 52, 57 and 62 seconds and Down at 36 seconds, measured from the
+first USB report. Its complete value is
+`RECOMP_PAD_SCRIPT="20000:a:200,23000:a:200,28000:a:200,32000:a:200,36000:down:200,37000:a:200,42000:a:200,47000:a:200,52000:a:200,57000:a:200,62000:a:200"`.
+The benchmark does not accept a high draw count as the tutorial world until
+80 seconds after the first observed frame, because a campaign menu can also
+reach the old draw threshold and the validated route must finish first.
+Timings may still need adjustment on another machine or when audio is enabled.
+Leave the variable unset for manual input.
 
 Audio is enabled by default on the command line and in the launcher:
 
@@ -359,9 +363,31 @@ their CPU decoder for comparison. Compressed textures can be uploaded
 directly. Set `RECOMP_GPU_TEXLOG=1` to log texture uploads locally.
 The D3D11 texture cache compares saved source and palette bytes on each
 ordinary cache use; retained snapshots have a 128 MiB budget, excluding
-transient copies and GPU resources. The performance cost has not been
-measured. `RECOMP_GPU_TEX_CACHE_APPROX=1` restores the old approximate
-checks for diagnostics, but can leave rewritten textures stale.
+transient copies and GPU resources. One instrumented reviewed campaign
+measured exact comparison at 0.832 ms/flip over fully contained periodic
+intervals; this is diagnostic overhead in one scene, not a general cost
+bound. `RECOMP_GPU_TEX_CACHE_APPROX=1` restores the old approximate checks
+for diagnostics, but can leave rewritten textures stale.
+
+`BRUTEFORCE_PERF_COUNTERS=1` enables detailed title and D3D11 performance
+diagnostics. Approximately every ten seconds, the normal D3D11 statistics
+are followed by interval reports for:
+
+- `guest_word` and `readable_guest_range` calls, accepted and rejected
+  ranges, total validation time, `VirtualQuery` calls, failures, traversed
+  regions and query time;
+- texture-key lookups, linear probes, key hits and misses;
+- exact source and palette spans submitted to comparison, exact hits and
+  comparison time;
+- snapshot copies and bytes, rewrites, entry and snapshot evictions,
+  failed-upload discards and unsupported-cache hits.
+
+The switch accepts only `0` or `1` and is off by default. It adds QPC reads
+and atomic aggregation in the measured paths, so use it to identify work in
+a controlled diagnostic run, keep it fixed within any comparison, and retain
+an uninstrumented baseline. The standard renderer line separately labels
+bytes hashed by the unsafe approximate texture-cache mode; it is not an
+exact-comparison or snapshot-copy estimate.
 
 The D3D11 P8 path uses the programmed 32, 64, 128 or 256-entry palette and
 rejects unreadable or known-short allocations and out-of-range indices.
@@ -427,7 +453,12 @@ bytecode. For diagnostics,
 because each boot has its own working directory. Delete the cache directory
 to discard the derived bytecode. Synthetic cold/warm tests preserved the
 same output; small differences in content-matched tutorial captures remain
-unexplained, and a gameplay stutter improvement is not yet established.
+unexplained. The final-generation title comparison does establish the
+intended warm-start effect: cold compile-and-create requests reached
+30.623 ms, while warm lookup-and-create requests reached at most 0.535 ms.
+Stationary and movement flip throughput did not show a corresponding
+steady-state gain. The title captures were visually matched but not
+byte-identical or frame-locked, so the cache remains off by default.
 
 `RECOMP_GPU_ZPASS=async` enables experimental asynchronous GPU visibility
 reports; synchronous reports remain the default. The asynchronous path
@@ -506,6 +537,39 @@ recorded after the synchronous dump, and continuous capture affects timing.
 Legacy numbered dumps do not carry flip IDs. Review the scene, HUD exclusions,
 alignment and presented-image source using the manifest documented in
 `tools\bench_world.py`; unlabeled changes are not world-frame FPS.
+The fixed movement script moves the character only before measurement, presses
+Y to skip the HUD tutorial-choice panel, then starts the measured window after
+that choice has settled. The measured 40-second segment alternates camera
+input without moving the character, because forward movement can enter a
+letterboxed tutorial cutscene at a frame-rate-dependent time. This keeps panel
+dismissal and scene content fixed rather than relying on adaptive A presses;
+captured runs must still be reviewed to confirm the panel and cutscene are
+absent.
+When every frame is classified and the review metadata is complete, the
+offline analyzer reports reviewer-asserted world changes per second plus
+baseline-to-change and change-to-change frame-time percentiles and a 1% low.
+Static-world and HUD-only flips remain inside those intervals. Fades, invalid
+frames and unreviewed gaps break the cadence, and a trailing incomplete
+interval is not counted as a completed world frame.
+Phase frame metrics include `frame_ms_max` as well as p50, p90, p99, and the
+1% low. Structured runtime diagnostics summarize cache compile and hit counts,
+total time, and maximum request time from `[GPU-PSCACHE]` events. Cold compile
+timing excludes cache writes; warm hit timing includes lookup and pixel-shader
+creation. Multi-second loading transitions can dominate a whole-run maximum,
+so do not report that maximum as a shader hitch without event evidence.
+
+Use `--profile-callers` for a complete G3 diagnostic. It enables the
+profiler's more expensive stack walk and attributes kernel waits to their
+first executable caller. The benchmark counts only the two known guest GPU
+polls and kernel waits attributed to those polls as GPU/NV2A wait time; other
+game-thread kernel waits are reported separately. Without this option,
+`gpu_wait_pct` is a direct-poll lower bound rather than a complete G3 result.
+Structured D3D11 interval diagnostics also retain synchronous visibility
+reads and wait time, asynchronous reports written, and polls that found the
+oldest report pending. Older logs without the two asynchronous fields remain
+parseable and mark those values unavailable. A zero synchronous wait in
+async mode means completion moved to report polling; it does not establish
+zero report-processing cost or correct report order.
 
 For a separate Windows diagnostic, `RECOMP_PRESENTER_CAPTURE` records the
 GDI or CPU-upload D3D11 presenter's converted input and its API result.
@@ -590,6 +654,26 @@ may specify one page-aligned guest address to leave unprotected when
 records the exclusion; reads and writes on that page are not observed.
 Neither a clean report with an excluded page nor this diagnostic's other
 coverage limitations justify skipping guest readback.
+
+## Experimental event-driven PFB flush wait
+
+The latest Phase 4 candidate can replace the title's busy poll with a wait on
+the real framework acknowledgement:
+
+```powershell
+$env:RECOMP_PFB_FLUSH_WAIT = "1"
+python tools\build.py run --config Release --experimental-tutorial
+Remove-Item Env:\RECOMP_PFB_FLUSH_WAIT
+```
+
+Unset or `0` retains the generated polling routine; any other value stops with
+a diagnostic. This option does not clear the PFB bit itself and does not bypass
+flip holds. Its event is signalled only after the framework's real
+acknowledgement clears the bit, while a short timer provides IRQ safe points
+and mandatory rechecks. It is default-off and has completed only one corrected
+automated movement smoke. It has not passed the reviewed alternating
+performance comparison, G2, G3, or CPU-reference equivalence, and may change
+guest interrupt timing. Do not use it as a general performance preset yet.
 
 ## Experimental face culling
 

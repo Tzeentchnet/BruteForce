@@ -19,7 +19,8 @@ def run_fence(mode):
 @pytest.mark.parametrize(
     "mode",
     ["disabled", "valid", "low-semaphore", "concurrent", "event-valid",
-     "event-concurrent", "trap-disabled", "trap-matched", "trap-unmatched"],
+     "event-concurrent", "trap-disabled", "trap-matched", "trap-unmatched",
+     "pfb-disabled", "pfb-enabled", "perf-counters"],
 )
 def test_fence_registration(mode):
     result = run_fence(mode)

@@ -214,9 +214,10 @@ def test_inconclusive_world_analysis_cli_never_runs_game(tmp_path, monkeypatch, 
 
 def successful_stationary_rows():
     return [{
-        "flip": index + 1, "t": index / 10, "draws": 800, "vertices": 1000,
+        "flip": index + 1, "t": index / 10,
+        "draws": 800, "vertices": 1000,
         "hash": "1", "distinct": 0, "constants": "c",
-    } for index in range(150)]
+    } for index in range(1000)]
 
 
 def fake_successful_run(monkeypatch, tmp_path, *, forced, capture_audio):
@@ -525,7 +526,8 @@ def test_manual_movement_dispatches_full_script_in_buffered_log_batches(
                     "flip": index + 2, "t": index / 10 + 0.05, "draws": 800, "vertices": 1,
                     "hash": "1", "distinct": 0, "constants": "c",
                 } for index in range(1, 142)]
-                for index, when in enumerate([item[0] for item in bench.MOVEMENT_INPUT] + [56.1]):
+                end = bench.MOVEMENT_START + bench.MOVEMENT_SECONDS + 0.1
+                for index, when in enumerate([item[0] for item in bench.MOVEMENT_INPUT] + [end]):
                     new.append({
                         "flip": index + 144, "t": 14.15 + when, "draws": 800, "vertices": 1,
                         "hash": "2", "distinct": 1, "constants": "d",

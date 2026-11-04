@@ -3,18 +3,13 @@
 The rendering architecture is in [RENDERING.md](RENDERING.md),
 the performance plan is in [PERFPLAN.md](PERFPLAN.md), measured
 results are in [FINDINGS.md](FINDINGS.md), and framework work is
-tracked in [UPSTREAM.md](UPSTREAM.md). State as of 2026-10-31:
-current framework tree `25a2a713738b7aabb1c21ef6720765ff93ccffea`. The
-documented retail generation `20261029-175500-dfadbdd9` was tested against
-the preceding tree `a4489cd69600a1489edea98ac19cf20db242b6d2`; patches 0025
-and 0026 have not been retested on that generation. Generation
-`20261030-135733-86f4d023` used tree
-`fe8216622a8195fd7a2531a7fc4f1f723f402aa3` for one unmatched, instrumented
-retail diagnostic; flip-ID capture mapping was not exercised there.
-Generation `20261030-142754-81f8c6e6` was rebuilt in Release against the
-current tree. It still reports 12 unresolved call targets and 34 untranslated
-instruction sites; the new build and presenter-source patch 0027 have not
-been validated in reviewed retail gameplay.
+tracked in [UPSTREAM.md](UPSTREAM.md). State as of 2026-11-03: current
+framework tree `25a2a713738b7aabb1c21ef6720765ff93ccffea`. Supported retail
+generation `20261103-145850-21e3091e` was built in Release against that tree;
+its executable SHA-256 is
+`0bd6a9835ebc411fb757ea510fb15dee4e4848b700ea6afef2e78a85d8904328`.
+It still reports 12 unresolved call targets and 34 untranslated instruction
+sites. Both current reviewed performance campaigns use this exact generation.
 
 Framework patches 0001, 0035 and 0005 were filed upstream as
 [sp00nznet/xboxrecomp#297](https://github.com/sp00nznet/xboxrecomp/pull/297),
@@ -50,16 +45,14 @@ not file another PR, amend these PRs or comment upstream without approval.
   second on the CPU and 30.4 on D3D11 with GPU vertex programs, three runs
   each. The hold is visually static, so these are **rendered**, not distinct,
   frames. Native 30 Hz remains a hypothesis.
-- The user reports about 6 fps while moving with default D3D11 settings.
-  Failed texture uploads previously accumulated empty cache entries; the
-  renderer now discards retryable failures and negatively caches deterministic
-  unsupported decodes after alias checks. A P8 query-reuse experiment had no
-  observed hits and was removed; reprotection is tested between binds. A
-  three-run candidate comparison suggests better flip and whole-frame change
-  rates but used unmatched adaptive inputs and included the removed
-  experiment. The final binary was not rebenchmarked. Unreviewed whole-frame
-  changes do not establish world fps; the reported case and matched visual
-  correctness remain open. See
+- The user reported about 6 fps while moving with default D3D11 settings.
+  The final supported Release generation has now been rebenchmarked with three
+  reviewed camera-pan runs, fixed input, no retries and complete
+  flip-ID-aligned labels. It averaged 27.349 guest-surface world changes/s,
+  even with detailed counters, caller profiling and continuous captures.
+  This explicitly fails to reproduce a current 6 fps default result; it does
+  not identify the historical cause. Matched CPU-reference correctness remains
+  open. See
   [FINDINGS](FINDINGS.md#default-d3d11-movement-regression-2026-10-30).
 - An alternating three-run GPU comparison reported stationary rendered fps
   from 32.60 to 45.06 and movement pixel-change fps from 25.15 to 35.23
@@ -95,13 +88,52 @@ not file another PR, amend these PRs or comment upstream without approval.
   pending-query cases pass; actual device removal, recovery, the separate
   presenter device and semaphore races are not verified.
 - Ordered asynchronous visibility reports pass synthetic WARP and hardware
-  fixtures and the combined title campaign. They remain opt-in with
-  `RECOMP_GPU_ZPASS=async` pending broader gameplay and reliability checks.
-- In those movement profiles, the estimated game-thread GPU wait dropped
-  from 33.5% to 24.7% of samples, but the black-frame intervals limit their
-  relevance to visible gameplay. `NtQueryVirtualMemory` remains a major
-  game-thread hotspot, and texture hashing remains visible on the NV2A
-  thread. The two GPU changes were measured together, not individually.
+  fixtures. A new six-leg campaign isolated only
+  `RECOMP_GPU_ZPASS=async`, reviewed all 6,903 selected captures, and found
+  no visible visibility artifact or asynchronous query/device error. Async
+  improved mean reviewed world cadence from 27.401 to 30.606 changes/s and
+  the mean 1% low from 13.757 to 15.697/s. G3 fell from 69.367% to 65.467%.
+  The 1% low remains below 24/s and G3 remains far above 10%, so async stays
+  opt-in. One synchronous boot stalled after flip 12 and succeeded on retry;
+  all three asynchronous attempts completed. These are matched guest-surface
+  scene reviews, not CPU-reference or physical-presentation equivalence.
+- Reviewed movement manifests now report world-change cadence percentiles and
+  a 1% low only after complete real-image labels, consecutive flip alignment,
+  HUD-region validation and presentation-source review. The profiler summary
+  no longer treats every game-thread kernel wait as GPU time:
+  `--profile-callers` adds waits whose first executable caller is one of the
+  two known guest GPU polls, while unrelated and unattributed waits remain
+  separate. The final rebuilt default campaign reviewed 3,258 gameplay
+  captures and measured 26.847-27.713 world changes/s with
+  13.571-14.360/s 1% lows. The captures are aligned guest-surface evidence,
+  not proof of physical presentation. G3 was 68.8-69.5%, dominated by
+  `sub_00372180`; both G2 and G3 fail.
+- Nine periodic intervals wholly inside those reviewed ranges measured
+  0.787 ms/flip readback, 4.327 ms/flip visibility waiting,
+  9.336 ms/flip `guest_word` validation, 9.639 ms/flip renderer
+  readable-range validation and 0.832 ms/flip exact texture comparison.
+  `VirtualQuery` dominated both validation totals. The counters add QPC and
+  atomic overhead and run on different threads, so these figures are not
+  additive frame-time components.
+- The final-generation cold/warm pixel-shader-cache campaign measured
+  12.914/25.543/30.623 ms p50/p99/max across 96 cold compile/create events
+  and 0.143/0.517/0.535 ms across 96 warm lookup/create events. Movement
+  averaged 35.743 cold and 35.990 warm flips/s, with effectively unchanged
+  p99 frame time, so the win is startup hitch removal rather than steady-state
+  throughput. Publication passed in all three pairs and existing failure
+  fixtures. Title captures were visually matched but not byte-identical or
+  frame-locked, so strict output identity remains open and the cache stays
+  opt-in.
+- Phase 4's first mechanism now exists behind
+  `RECOMP_PFB_FLUSH_WAIT=1`. Synthetic coverage and one corrected movement
+  smoke show that the real acknowledgement can drive the title through the
+  scripted route. The initial title wrapper omitted the generated `ret` stack
+  effect; a four-byte guest-stack correction and explicit enabled/disabled
+  fixture modes fixed it. The smoke did not include capture review or caller
+  profiling, so the next task is a six-leg poll/event alternating campaign,
+  not the idle-thread or segmented-walk mechanism. Do not satisfy the
+  acknowledgement early or weaken semaphore, report, flip, or CPU-reference
+  ordering. The shader-cache output gate remains independent.
 - Both variants of the new movement campaign logged unsupported texture
   format `0x2E` (`LIN_D24S8`). Its effect on the visible image is not yet
   established; the CPU reference also lacks a decoder for that format.
@@ -202,7 +234,7 @@ not file another PR, amend these PRs or comment upstream without approval.
 By the user's direction the current rendering and frame rate are accepted as
 a working baseline. The next goal is playable quality: fewer render
 artifacts, internal upscaling so the game can run at 4K, and audio. The G1,
-G2 and G4 gates in [PERFPLAN.md](PERFPLAN.md) are not formally met; the
+G2, G3 and G4 gates in [PERFPLAN.md](PERFPLAN.md) are not formally met; the
 acceptance is a judgement, so keep them as regression guards. Do not trade
 the baseline away while working on the items below.
 
@@ -551,12 +583,20 @@ mainly where they gate 4K, widescreen and audio.
 - Inspect the slow combined candidate's high sampled GPU-wait share, the
   frequent busy shared slot and repeated packed-depth conversions; only avoid
   conversion when depth and stencil writes are correctly tracked.
-- Profile callers of `NtQueryVirtualMemory` and investigate texture hashing
-  and visibility polling using the combined campaign's profiles and counters.
-- Batch the event-driven flush acknowledgement, an idle NV2A thread, and
-  segment-at-a-time walking where their ordering can be preserved. Keep
-  timing changes behind separate switches and compare the combined result
-  once; isolate switches only to diagnose regressions.
+- The final rebuilt default renderer now has reviewed world captures,
+  caller-attributed profiles and detailed validation/cache counters. First
+  isolate synchronous versus ordered asynchronous visibility in an
+  alternating campaign with all other options and instrumentation fixed.
+  Then address repeated page-query validation with checked accesses that
+  retain guard-page, reprotection, allocation and reset detection. Retain a
+  normal uninstrumented baseline because the counter switch adds timing and
+  atomic-accounting overhead.
+- First measure the event-driven flush acknowledgement alone with three
+  poll/event pairs, caller profiles, fixed counters and reviewed world
+  captures. Explain its high smoke-run timer/recheck counts and keep it
+  default-off until G2, G3 and correctness gates pass. Only then add the idle
+  NV2A-thread wait and segment-at-a-time walking behind separate switches;
+  compare the combined milestone and isolate switches to diagnose regressions.
 - Extend the synthetic cache and P8 fixes in the current boundary to tracked
   guest writes, render-target aliases and untracked suballocations; establish
   NV2A out-of-range palette behavior and preserve palette length through the

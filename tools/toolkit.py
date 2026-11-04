@@ -13,7 +13,7 @@ ROOT = Path(__file__).resolve().parents[1]
 TOOLKIT_DIR = ROOT / ".deps" / "xboxrecomp"
 TOOLKIT_URL = "https://github.com/sp00nznet/xboxrecomp.git"
 TOOLKIT_BASE = "f0f8a461496a4f23d9b0aeaa284b8d70ba7ab82b"
-TOOLKIT_TREE = "25a2a713738b7aabb1c21ef6720765ff93ccffea"
+TOOLKIT_TREE = "00079980c26aecf07a3686fa9912112f3b122649"
 LOCAL_PATCHES = (
     ROOT / "patches" / "xboxrecomp" / "0001-bound-extra-thunks.patch",
     ROOT / "patches" / "xboxrecomp" / "0002-model-wbinvd.patch",
@@ -50,6 +50,7 @@ LOCAL_PATCHES = (
     ROOT / "patches" / "xboxrecomp" / "0033-prioritize-apu-frame-worker.patch",
     ROOT / "patches" / "xboxrecomp" / "0034-raise-apu-queue-low-water.patch",
     ROOT / "patches" / "xboxrecomp" / "0035-preserve-mono-hrtf-stereo.patch",
+    ROOT / "patches" / "xboxrecomp" / "0036-event-driven-pfb-flush-wait.patch",
 )
 
 # PRs #262, #280, #277, #278, and #264, in their tested application order.

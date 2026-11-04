@@ -13,6 +13,7 @@
 #include "crash_diagnostics.h"
 #include "gpu/d3d11_backend.h"
 #include "gpu/null_backend.h"
+#include "perf_counters.h"
 #include "profile.h"
 
 typedef void (*recomp_func_t)(void);
@@ -311,6 +312,8 @@ int main(int argc, char **argv)
         fprintf(stderr, "Usage: bruteforce.exe [game directory]\n");
         return 2;
     }
+    if (!bruteforce_perf_counters_init())
+        return 2;
     if (!configure_audio(&audio_requested))
         return 2;
     if ((getenv("RECOMP_VBLANK") == NULL && _putenv_s("RECOMP_VBLANK", "1") != 0) ||

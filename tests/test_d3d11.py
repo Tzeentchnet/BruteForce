@@ -100,6 +100,20 @@ def fixture_pixel(data, x, y):
     return r, g, b, a
 
 
+def test_detailed_performance_counters(tmp_path):
+    output = tmp_path / "perf-counters.raw"
+    result = render_compatibility_fixture("gpu-perf-counters", output)
+    assert result.returncode == 0, result.stderr
+    assert len(output.read_bytes()) == SIZE * SIZE * 4
+    assert "D3D11 performance counters validated" in result.stdout
+    assert "diagnostic timing adds overhead" in result.stderr
+    assert re.search(
+        r'\[GPU-D3D11\] device adapter=".+?" .* '
+        r'driver=\S+ feature_level=0x[0-9A-F]+',
+        result.stderr,
+    )
+
+
 def assert_vsh_verification(result, expected_fetch=None):
     reports = re.findall(
         r"\[VSH-VERIFY\] (\d+) batches checked, (\d+) differ; "

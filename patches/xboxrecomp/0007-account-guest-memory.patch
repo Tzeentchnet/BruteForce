@@ -38,7 +38,7 @@ index ce05198..0dfb33a 100644
   * address is below the mirrors' start), in which case the caller carries on
   * with its own path. Otherwise they return 1 with *status set. */
 diff --git a/src/kernel/kernel_bridge.c b/src/kernel/kernel_bridge.c
-index 34f3242..051e8da 100644
+index 3e70ef2..bbada63 100644
 --- a/src/kernel/kernel_bridge.c
 +++ b/src/kernel/kernel_bridge.c
 @@ -1950,7 +1950,7 @@ static void bridge_KeQuerySystemTime(void)
@@ -82,10 +82,10 @@ index e66e3de..43897a1 100644
      return STATUS_SUCCESS;
  }
 diff --git a/src/kernel/xbox_memory_layout.c b/src/kernel/xbox_memory_layout.c
-index b723a92..1962022 100644
+index 7ade793..f2f1f6b 100644
 --- a/src/kernel/xbox_memory_layout.c
 +++ b/src/kernel/xbox_memory_layout.c
-@@ -1683,6 +1683,7 @@ uint32_t g_xbox_image_hi = 0;
+@@ -1696,6 +1696,7 @@ uint32_t g_xbox_image_hi = 0;
  uint32_t g_xbox_region_base = XBOX_REGION_MIN;
  uint32_t g_xbox_stack_base  = XBOX_REGION_MIN + XBOX_REGION_STACK_OFF;
  uint32_t g_xbox_stack_size  = 8u * 1024 * 1024;
@@ -93,7 +93,7 @@ index b723a92..1962022 100644
  uint32_t g_xbox_code_lo = 0;
  uint32_t g_xbox_code_hi = 0;
  
-@@ -2929,6 +2930,12 @@ BOOL xbox_MemoryLayoutInit(const void *xbe_data, size_t xbe_size)
+@@ -2942,6 +2943,12 @@ BOOL xbox_MemoryLayoutInit(const void *xbe_data, size_t xbe_size)
          g_xbox_region_base = region;
          g_xbox_stack_base  = stack_base;
          g_xbox_stack_size  = stack_size;
@@ -106,7 +106,7 @@ index b723a92..1962022 100644
          xbox_heap_reset_base();
  
          fprintf(stderr, "  Toolkit region: 0x%08X (image ends 0x%08X)%s\n",
-@@ -4636,6 +4643,72 @@ void xbox_HeapFree(uint32_t xbox_va)
+@@ -4709,6 +4716,72 @@ void xbox_HeapFree(uint32_t xbox_va)
      ReleaseSRWLockExclusive(&g_heap_lock);
  }
  
@@ -180,11 +180,11 @@ index b723a92..1962022 100644
  {
      return g_mapping_handle;
 diff --git a/src/kernel/xbox_memory_layout.h b/src/kernel/xbox_memory_layout.h
-index 67a8792..46a366e 100644
+index da4c155..31a9453 100644
 --- a/src/kernel/xbox_memory_layout.h
 +++ b/src/kernel/xbox_memory_layout.h
-@@ -220,6 +220,10 @@ void xbox_PhysNoteRamName(uint32_t va);
- const volatile uint8_t *xbox_PhysRamNameMap(void);
+@@ -223,6 +223,10 @@ const volatile uint8_t *xbox_PhysRamNameMap(void);
+ int xbox_PhysRamNamedAt(uint32_t pa);
  uint32_t xbox_ContiguousInUseBytes(void);
  
 +/* Conservative free physical pages from the guest's tracked allocations and

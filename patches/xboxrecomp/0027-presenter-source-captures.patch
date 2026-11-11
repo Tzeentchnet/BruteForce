@@ -1,8 +1,8 @@
 diff --git a/src/kernel/nv2a_pb_exec.c b/src/kernel/nv2a_pb_exec.c
-index 8cbb19da52993fad29a5a6f4337a6fcd1fb58e7d..50e7defee6233c59101c279003272cdd92739e81 100644
+index 18bc6e9..04eaa3e 100644
 --- a/src/kernel/nv2a_pb_exec.c
 +++ b/src/kernel/nv2a_pb_exec.c
-@@ -50,6 +50,9 @@
+@@ -54,6 +54,9 @@
  #define GPU_AUDIT(call) do { if (nv2a_gpu_audit_enabled()) { call; } } while (0)
  #if defined(_WIN32)
  #include <windows.h>
@@ -12,7 +12,7 @@ index 8cbb19da52993fad29a5a6f4337a6fcd1fb58e7d..50e7defee6233c59101c279003272cdd
  #define NV_TLS __declspec(thread)
  #else
  #define NV_TLS __thread
-@@ -62,6 +65,10 @@ extern uint32_t xbox_Nv2aFenceWordVa(void);
+@@ -66,6 +69,10 @@ extern uint32_t xbox_Nv2aFenceWordVa(void);
  extern int nv2a_pb_dma_walk(void);   /* nv2a_pb_scan.c: RECOMP_PB_WALK=dma */
  extern void xbox_FramebufferWindowStart(void);
  extern uint32_t g_xbox_image_lo, g_xbox_image_hi;
@@ -23,7 +23,7 @@ index 8cbb19da52993fad29a5a6f4337a6fcd1fb58e7d..50e7defee6233c59101c279003272cdd
  
  /* Would writing this surface land on the title's own image?
   *
-@@ -4607,6 +4614,64 @@ static int s_frame_in_guest;
+@@ -5006,6 +5013,64 @@ static int s_frame_in_guest;
   * load index), for the frame statistics' constants column. */
  static uint64_t s_frame_constants;
  
@@ -88,7 +88,7 @@ index 8cbb19da52993fad29a5a6f4337a6fcd1fb58e7d..50e7defee6233c59101c279003272cdd
  static void frame_constants_mix(uint32_t word)
  {
      s_frame_constants = (s_frame_constants ^ word) * 0x100000001B3ull + 0x9E37u;
-@@ -4618,11 +4683,25 @@ static int frame_stats_on(void)
+@@ -5017,11 +5082,25 @@ static int frame_stats_on(void)
          const char *path = getenv("RECOMP_FRAME_STATS");
          s_frame_stats_on = 0;
          if (path && *path) {
@@ -115,7 +115,7 @@ index 8cbb19da52993fad29a5a6f4337a6fcd1fb58e7d..50e7defee6233c59101c279003272cdd
              }
          }
      }
-@@ -5266,6 +5345,34 @@ void nv2a_pb_exec_method(uint32_t subch, uint32_t method, uint32_t param)
+@@ -5692,6 +5771,34 @@ void nv2a_pb_exec_method(uint32_t subch, uint32_t method, uint32_t param)
              if (done) {
                  xbox_FramebufferWindowSet(dma_resolve(done), pitch);
                  xbox_FramebufferWindowSetAA(s_gpu.aa_sy > 1.5f ? 2 : 1);
@@ -151,7 +151,7 @@ index 8cbb19da52993fad29a5a6f4337a6fcd1fb58e7d..50e7defee6233c59101c279003272cdd
              }
          }
 diff --git a/src/video/fb_present.c b/src/video/fb_present.c
-index 24e21d46a93ea84649f30b2a2011de7759530ec7..73ab6e99533ffd53289a63ecca530af00ddc0aea 100644
+index 24e21d4..73ab6e9 100644
 --- a/src/video/fb_present.c
 +++ b/src/video/fb_present.c
 @@ -26,6 +26,7 @@
@@ -758,7 +758,7 @@ index 24e21d46a93ea84649f30b2a2011de7759530ec7..73ab6e99533ffd53289a63ecca530af0
  
  #endif /* _WIN32: POSIX hosts get the SDL2 window in fb_present_sdl.c */
 diff --git a/src/video/fb_present_sdl.c b/src/video/fb_present_sdl.c
-index 87b7ef789c6cab2bdc2c01fc0d20de4a9c6eef8f..71aa0de50fd4d6de60e90594820dacd1458b73c6 100644
+index b9b8c3e..6b2b592 100644
 --- a/src/video/fb_present_sdl.c
 +++ b/src/video/fb_present_sdl.c
 @@ -99,7 +99,14 @@ void xbox_FramebufferWindowSet(uint32_t fb_va, uint32_t pitch)
@@ -790,7 +790,7 @@ index 87b7ef789c6cab2bdc2c01fc0d20de4a9c6eef8f..71aa0de50fd4d6de60e90594820dacd1
      if (!env_on("RECOMP_FB_WINDOW") || env_on("RECOMP_HEADLESS"))
          return guest_main();
 diff --git a/src/video/gpu_present.c b/src/video/gpu_present.c
-index 18c932efa7bf62434654f5b6a831e97294553ee0..6aaf93224238624e59b392d3117d9c0563305e3b 100644
+index 18c932e..6aaf932 100644
 --- a/src/video/gpu_present.c
 +++ b/src/video/gpu_present.c
 @@ -277,7 +277,8 @@ static ID3D11ShaderResourceView *take_shared(int allow_shared, uint64_t frame_id
@@ -887,7 +887,7 @@ index 18c932efa7bf62434654f5b6a831e97294553ee0..6aaf93224238624e59b392d3117d9c05
  {
      InterlockedExchange(&s_shared_ready, 0);
 diff --git a/src/video/gpu_present.h b/src/video/gpu_present.h
-index 2cf8893423d397435771a1d4862bfb373f7cb6ab..1a59dfa1279f20ad79e55b7fc8d124df43accd0d 100644
+index 2cf8893..1a59dfa 100644
 --- a/src/video/gpu_present.h
 +++ b/src/video/gpu_present.h
 @@ -10,6 +10,28 @@ int  gpu_present_init(HWND hwnd, uint32_t width, uint32_t height);
@@ -921,7 +921,7 @@ index 2cf8893423d397435771a1d4862bfb373f7cb6ab..1a59dfa1279f20ad79e55b7fc8d124df
   * presenter acquires key 1 and releases key 0 after using or discarding it. */
 diff --git a/src/video/present_capture.h b/src/video/present_capture.h
 new file mode 100644
-index 0000000000000000000000000000000000000000..3fb3b83c3244af2c38ada0e379a9138318418ead
+index 0000000..3fb3b83
 --- /dev/null
 +++ b/src/video/present_capture.h
 @@ -0,0 +1,360 @@
@@ -1287,7 +1287,7 @@ index 0000000000000000000000000000000000000000..3fb3b83c3244af2c38ada0e379a91383
 +#endif
 diff --git a/src/video/present_provenance.h b/src/video/present_provenance.h
 new file mode 100644
-index 0000000000000000000000000000000000000000..2a3d633b649cd7e8454042b09fcf9778e6ca9035
+index 0000000..2a3d633
 --- /dev/null
 +++ b/src/video/present_provenance.h
 @@ -0,0 +1,53 @@
@@ -1344,28 +1344,58 @@ index 0000000000000000000000000000000000000000..2a3d633b649cd7e8454042b09fcf9778
 +}
 +
 +#endif
+diff --git a/tests/nv2a_ffp_backend/nv2a_backend_fixture.c b/tests/nv2a_ffp_backend/nv2a_backend_fixture.c
+index 8eedd36..faacd0e 100644
+--- a/tests/nv2a_ffp_backend/nv2a_backend_fixture.c
++++ b/tests/nv2a_ffp_backend/nv2a_backend_fixture.c
+@@ -2,6 +2,29 @@
+ 
+ #include <string.h>
+ 
++struct RecompPresentTag;
++void xbox_FramebufferWindowPresent(uint32_t va, uint32_t pitch);
++
++void xbox_FramebufferWindowPresentTagged(
++    uint32_t va,
++    uint32_t pitch,
++    const struct RecompPresentTag *tag)
++{
++    (void)tag;
++    xbox_FramebufferWindowPresent(va, pitch);
++}
++
++int xbox_Nv2aGraphSoftwareTrap(
++    uint32_t subch,
++    uint32_t method,
++    uint32_t data)
++{
++    (void)subch;
++    (void)method;
++    (void)data;
++    return 0;
++}
++
+ #ifdef _WIN32
+ #include <windows.h>
+ typedef DWORD FixtureThread;
 diff --git a/tests/nv2a_ffp_backend/nv2a_ffp_backend_test.c b/tests/nv2a_ffp_backend/nv2a_ffp_backend_test.c
-index aced57603bcf7b91ef32d55f435815d4e41cbcc6..b3d8024c9dddae4a0b71b62db0af2c82ef9473e7 100644
+index d2de51a..487ec13 100644
 --- a/tests/nv2a_ffp_backend/nv2a_ffp_backend_test.c
 +++ b/tests/nv2a_ffp_backend/nv2a_ffp_backend_test.c
-@@ -39,6 +39,12 @@ int nv2a_pb_dma_walk(void) { return 1; }             /* RECOMP_PB_WALK=dma: 0x03
- void xbox_FramebufferWindowStart(void) {}
+@@ -41,8 +41,6 @@ void xbox_FramebufferWindowStart(void) {}
  void xbox_FramebufferWindowFrameStats(uint32_t draws) { (void)draws; }
  void xbox_FramebufferWindowPresent(uint32_t va, uint32_t pitch) { (void)va; (void)pitch; }
-+#if defined(_WIN32)
-+struct RecompPresentTag;
-+void xbox_FramebufferWindowPresentTagged(uint32_t va, uint32_t pitch,
-+                                         const struct RecompPresentTag *tag)
-+{ (void)va; (void)pitch; (void)tag; }
-+#endif
  void xbox_Nv2aFrameCounterFlip(void) {}
- int xbox_Nv2aGraphSoftwareTrap(uint32_t subch, uint32_t method, uint32_t data)
- { (void)subch; (void)method; (void)data; return 0; }
+-int xbox_Nv2aGraphSoftwareTrap(uint32_t subch, uint32_t method, uint32_t data)
+-{ (void)subch; (void)method; (void)data; return 0; }
+ /* The flip hold (nv2a_flip_hold.c, linked in). No vblank moves here, so the
+  * executor never holds a flip; the walk is never inside a pushbuffer CALL. */
+ int nv2a_pb_scan_in_call(void) { return 0; }
 diff --git a/tests/nv2a_raster_batch/nv2a_raster_batch_test.c b/tests/nv2a_raster_batch/nv2a_raster_batch_test.c
-index f713de8605c91604f7136ffe79f3d3612c7b14aa..eef4dddaaa221adae5025a13b3344fae620464d1 100644
+index 3035373..56358b2 100644
 --- a/tests/nv2a_raster_batch/nv2a_raster_batch_test.c
 +++ b/tests/nv2a_raster_batch/nv2a_raster_batch_test.c
-@@ -43,6 +43,12 @@ int nv2a_pb_dma_walk(void) { return 1; }
+@@ -50,6 +50,12 @@ int nv2a_pb_dma_walk(void) { return 1; }
  void xbox_FramebufferWindowStart(void) {}
  void xbox_FramebufferWindowFrameStats(uint32_t draws) { (void)draws; }
  void xbox_FramebufferWindowPresent(uint32_t va, uint32_t pitch) { (void)va; (void)pitch; }
@@ -1380,7 +1410,7 @@ index f713de8605c91604f7136ffe79f3d3612c7b14aa..eef4dddaaa221adae5025a13b3344fae
  { (void)subch; (void)method; (void)data; return 0; }
 diff --git a/tests/presenter_capture/executor_capture_test.c b/tests/presenter_capture/executor_capture_test.c
 new file mode 100644
-index 0000000000000000000000000000000000000000..a83f3f414d64ecda405c871c4ebba207d50fdfe4
+index 0000000..a83f3f4
 --- /dev/null
 +++ b/tests/presenter_capture/executor_capture_test.c
 @@ -0,0 +1,124 @@
@@ -1510,7 +1540,7 @@ index 0000000000000000000000000000000000000000..a83f3f414d64ecda405c871c4ebba207
 +}
 diff --git a/tests/presenter_capture/legacy_stubs.c b/tests/presenter_capture/legacy_stubs.c
 new file mode 100644
-index 0000000000000000000000000000000000000000..c5af9d4921f9e325043aeefb428eed6632565a9d
+index 0000000..c5af9d4
 --- /dev/null
 +++ b/tests/presenter_capture/legacy_stubs.c
 @@ -0,0 +1,21 @@
@@ -1537,7 +1567,7 @@ index 0000000000000000000000000000000000000000..c5af9d4921f9e325043aeefb428eed66
 +{ (void)p; (void)allow; (void)id; (void)trace; return 0; }
 diff --git a/tests/presenter_capture/presenter_capture_test.c b/tests/presenter_capture/presenter_capture_test.c
 new file mode 100644
-index 0000000000000000000000000000000000000000..002fd06bf5db814892b157c5c5116e6d1e9456cd
+index 0000000..002fd06
 --- /dev/null
 +++ b/tests/presenter_capture/presenter_capture_test.c
 @@ -0,0 +1,430 @@
@@ -1973,7 +2003,7 @@ index 0000000000000000000000000000000000000000..002fd06bf5db814892b157c5c5116e6d
 +}
 diff --git a/tests/presenter_capture/real_presenter_test.c b/tests/presenter_capture/real_presenter_test.c
 new file mode 100644
-index 0000000000000000000000000000000000000000..644f3e0a63ae04aebf58b71032943e9245b26e0a
+index 0000000..644f3e0
 --- /dev/null
 +++ b/tests/presenter_capture/real_presenter_test.c
 @@ -0,0 +1,96 @@
@@ -2075,7 +2105,7 @@ index 0000000000000000000000000000000000000000..644f3e0a63ae04aebf58b71032943e92
 +}
 diff --git a/tests/presenter_capture/run_windows.ps1 b/tests/presenter_capture/run_windows.ps1
 new file mode 100644
-index 0000000000000000000000000000000000000000..305c6baf2d4233863ae023ab690538a6e5e97fb4
+index 0000000..305c6ba
 --- /dev/null
 +++ b/tests/presenter_capture/run_windows.ps1
 @@ -0,0 +1,85 @@
@@ -2166,7 +2196,7 @@ index 0000000000000000000000000000000000000000..305c6baf2d4233863ae023ab690538a6
 +}
 diff --git a/tests/presenter_capture/shared_gpu_capture_test.c b/tests/presenter_capture/shared_gpu_capture_test.c
 new file mode 100644
-index 0000000000000000000000000000000000000000..71f1ff88a91e748ac6e919f481d04030e0814567
+index 0000000..71f1ff8
 --- /dev/null
 +++ b/tests/presenter_capture/shared_gpu_capture_test.c
 @@ -0,0 +1,162 @@
@@ -2334,7 +2364,7 @@ index 0000000000000000000000000000000000000000..71f1ff88a91e748ac6e919f481d04030
 +}
 diff --git a/tests/presenter_capture/test_present_capture.py b/tests/presenter_capture/test_present_capture.py
 new file mode 100644
-index 0000000000000000000000000000000000000000..241f99b45c3496d72509bf4910bc3ccaebae57c4
+index 0000000..241f99b
 --- /dev/null
 +++ b/tests/presenter_capture/test_present_capture.py
 @@ -0,0 +1,328 @@
@@ -2668,7 +2698,7 @@ index 0000000000000000000000000000000000000000..241f99b45c3496d72509bf4910bc3cca
 +    unittest.main(verbosity=2)
 diff --git a/tools/validate_present_capture.py b/tools/validate_present_capture.py
 new file mode 100644
-index 0000000000000000000000000000000000000000..7fe3b51999bc4eec39e907230b5ec8ca1bc5052e
+index 0000000..7fe3b51
 --- /dev/null
 +++ b/tools/validate_present_capture.py
 @@ -0,0 +1,299 @@

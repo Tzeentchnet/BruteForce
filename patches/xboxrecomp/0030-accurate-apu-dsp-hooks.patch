@@ -1,5 +1,5 @@
 diff --git a/src/apu/apu_core.c b/src/apu/apu_core.c
-index 4620af2..e704c85 100644
+index a6a3657..f1a01b6 100644
 --- a/src/apu/apu_core.c
 +++ b/src/apu/apu_core.c
 @@ -82,6 +82,16 @@ extern uint32_t xbox_ContiguousAllocatedBytes(void);
@@ -47,7 +47,7 @@ index 4620af2..e704c85 100644
 +    }
      if (a >= (64u << 20))
          return a < apu_mapped_ram() ? "ram" : "wrap";
-     if (xbox_PhysRamNameMap()[a >> 12])
+     if (xbox_PhysRamNamedAt(a))
 @@ -453,6 +478,17 @@ void mcpx_apu_write(void *opaque, hwaddr addr, uint64_t val,
          stl_le_phys(address_space_memory, d->regs[NV_PAPU_FEMEMADDR], (uint32_t)val);
          qatomic_set(&d->regs[addr], (uint32_t)val);
@@ -184,10 +184,10 @@ index 43897a1..3754df3 100644
  }
  
 diff --git a/tests/apu_phys/test_main.c b/tests/apu_phys/test_main.c
-index a5a148f..80b82e6 100644
+index 5d21b74..e7fe57c 100644
 --- a/tests/apu_phys/test_main.c
 +++ b/tests/apu_phys/test_main.c
-@@ -29,6 +29,7 @@ recomp_func_t recomp_lookup(uint32_t xbox_va);
+@@ -31,6 +31,7 @@ recomp_func_t recomp_lookup(uint32_t xbox_va);
  recomp_func_t recomp_lookup(uint32_t xbox_va) { (void)xbox_va; return NULL; }
  recomp_func_t recomp_lookup_manual(uint32_t xbox_va);
  recomp_func_t recomp_lookup_manual(uint32_t xbox_va) { (void)xbox_va; return NULL; }
@@ -195,7 +195,7 @@ index a5a148f..80b82e6 100644
  
  static int failures;
  
-@@ -107,12 +108,22 @@ int main(int argc, char **argv)
+@@ -109,6 +110,8 @@ int main(int argc, char **argv)
          check(xbox_MmGetPhysicalAddress((PVOID)(uintptr_t)w) == w,
                "MmGetPhysicalAddress is the identity for the heap");
      xbox_MmGetPhysicalAddress((PVOID)(uintptr_t)b);
@@ -204,6 +204,8 @@ index a5a148f..80b82e6 100644
      check(side(a + 0x10) == 0 && side(a + 0x2FF0) == 0,
            "a page named from the heap reads RAM");
      check(side(c + 0x1800) == 1, "a page nobody named still reads the window");
+@@ -121,7 +124,15 @@ int main(int argc, char **argv)
+     check(side(c + 0x10) == 1, "an unnamed block's bytes on that page read the window");
  
      xbox_MmGetPhysicalAddress((PVOID)(uintptr_t)(XBOX_CONTIG_BASE + a));
 +    check(xbox_PhysLastTranslationMap()[a >> 12] == 2,

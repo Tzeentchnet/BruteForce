@@ -1,8 +1,8 @@
 diff --git a/src/kernel/nv2a_pb_exec.c b/src/kernel/nv2a_pb_exec.c
-index a4d72ba..d12201f 100644
+index 7cecc4a..03e74ed 100644
 --- a/src/kernel/nv2a_pb_exec.c
 +++ b/src/kernel/nv2a_pb_exec.c
-@@ -41,6 +41,7 @@
+@@ -45,6 +45,7 @@
  #include "nv2a_combiner.h"
  #include "nv2a_backend.h"
  #include "nv2a_window_clip.h"
@@ -10,7 +10,7 @@ index a4d72ba..d12201f 100644
  #if defined(_WIN32)
  #include <windows.h>
  #define NV_TLS __declspec(thread)
-@@ -1174,23 +1175,6 @@ static void clear_surface(uint32_t param)
+@@ -1186,23 +1187,6 @@ static void clear_surface(uint32_t param)
   * resolve does exactly that -- its last column and last row, 1119 pixels of
   * white on a black frame, from a rounding step at the boundary.
   */
@@ -34,7 +34,7 @@ index a4d72ba..d12201f 100644
  static uint32_t expand(uint32_t v, uint32_t bits)
  {
      return d3d8_expand_channel(v, bits);
-@@ -1238,8 +1222,8 @@ static int sample_tex(const Texture *t, uint32_t face_offset,
+@@ -1250,8 +1234,8 @@ static int sample_tex(const Texture *t, uint32_t face_offset,
          *argb = t->border;
          return 1;
      }
@@ -45,7 +45,7 @@ index a4d72ba..d12201f 100644
  
      fmt = t->color;
      if (d3d8_format_dxt_block_bytes(fmt)) {
-@@ -1256,7 +1240,7 @@ static int sample_tex(const Texture *t, uint32_t face_offset,
+@@ -1268,7 +1252,7 @@ static int sample_tex(const Texture *t, uint32_t face_offset,
          uint32_t bx = u >> 2, by = v >> 2, bw = (t->width + 3) >> 2;
          const uint8_t *blk = mem + base + ((size_t)by * bw + bx) * bb;
          uintptr_t key = (uintptr_t)blk;

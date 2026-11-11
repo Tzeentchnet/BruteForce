@@ -1,8 +1,8 @@
 diff --git a/src/kernel/nv2a_pb_exec.c b/src/kernel/nv2a_pb_exec.c
-index eff999d..8cbb19d 100644
+index 784f41f..18bc6e9 100644
 --- a/src/kernel/nv2a_pb_exec.c
 +++ b/src/kernel/nv2a_pb_exec.c
-@@ -724,9 +724,26 @@ static uint32_t surface_bpp(void)
+@@ -728,9 +728,26 @@ static uint32_t surface_bpp(void)
   * the sequence. */
  static int s_flip_dumping;
  
@@ -29,7 +29,7 @@ index eff999d..8cbb19d 100644
      if (enabled < 0) {
          const char *value = getenv("RECOMP_FB_DUMP_FLIPS_ONLY");
          enabled = value && *value && strcmp(value, "0") != 0;
-@@ -734,7 +751,7 @@ static int flip_dump_only(void)
+@@ -738,7 +755,7 @@ static int flip_dump_only(void)
      return enabled;
  }
  
@@ -38,7 +38,7 @@ index eff999d..8cbb19d 100644
  {
      const char *prefix = getenv("RECOMP_FB_DUMP");
      const uint8_t *mem = (const uint8_t *)xbox_GetMemoryOffset();
-@@ -752,17 +769,54 @@ static void dump_surface_bmp(void)
+@@ -756,17 +773,54 @@ static void dump_surface_bmp(void)
      uint8_t hdr[54];
      FILE *f;
  
@@ -97,7 +97,7 @@ index eff999d..8cbb19d 100644
  
      memset(hdr, 0, sizeof hdr);
      hdr[0] = 'B'; hdr[1] = 'M';
-@@ -799,7 +853,16 @@ static void dump_surface_bmp(void)
+@@ -803,7 +857,16 @@ static void dump_surface_bmp(void)
              fwrite(zero, 1, pad, f);
          }
      }
@@ -115,7 +115,7 @@ index eff999d..8cbb19d 100644
      if (seq == 1)
          fprintf(stderr, "  [GPU] framebuffer dump: %s (%ux%u from 0x%08X %ubpp)\n",
                  path, w, h, s_gpu.color_offset, bpp);
-@@ -2116,7 +2179,7 @@ static int batch_is_screen_space(void)
+@@ -2277,7 +2340,7 @@ static int batch_is_screen_space(void)
  #define FB_DUMP_AFTER_DRAW 8
  static int s_drawn_dumps;
  
@@ -124,7 +124,7 @@ index eff999d..8cbb19d 100644
  
  /* A fixed-function batch without texture coordinates is drawn untextured, as
   * the screen-space path does, whatever stale texture the stage still holds. */
-@@ -4015,7 +4078,7 @@ static void raster_batch(void)
+@@ -4414,7 +4477,7 @@ static void raster_batch(void)
      if (s_gpu.tris_drawn != before && s_drawn_dumps < FB_DUMP_AFTER_DRAW
          && !s_flip_dumping && !flip_dump_only()) {
          s_drawn_dumps++;
@@ -133,7 +133,7 @@ index eff999d..8cbb19d 100644
      }
  }
  
-@@ -5223,8 +5286,19 @@ void nv2a_pb_exec_method(uint32_t subch, uint32_t method, uint32_t param)
+@@ -5649,8 +5712,19 @@ void nv2a_pb_exec_method(uint32_t subch, uint32_t method, uint32_t param)
                      if (f) { fclose(f); on = 1; }
                  }
                  s_flip_dumping = on;
@@ -155,7 +155,7 @@ index eff999d..8cbb19d 100644
              }
          }
          frame_stats_flip();
-@@ -5601,7 +5675,7 @@ void nv2a_pb_exec_report(void)
+@@ -6027,7 +6101,7 @@ void nv2a_pb_exec_report(void)
      /* One picture per report rather than per clear: a title clears hundreds of
       * times a second and nobody wants that many files. */
      if (!s_flip_dumping && !flip_dump_only())

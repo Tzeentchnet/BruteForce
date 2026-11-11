@@ -1,8 +1,8 @@
 diff --git a/src/kernel/nv2a_pb_exec.c b/src/kernel/nv2a_pb_exec.c
-index 87175a2..6e20743 100644
+index 5329827..4a7e267 100644
 --- a/src/kernel/nv2a_pb_exec.c
 +++ b/src/kernel/nv2a_pb_exec.c
-@@ -169,6 +169,9 @@ static int surface_write_refused(uint32_t base, uint32_t bytes, const char *what
+@@ -173,6 +173,9 @@ static int surface_write_refused(uint32_t base, uint32_t bytes, const char *what
   * ALPHA_TEST_ENABLE is written 390 times and left at zero, so this is
   * blending and not an alpha test. */
  #define NV097_SET_BLEND_ENABLE            0x0304
@@ -12,7 +12,7 @@ index 87175a2..6e20743 100644
  #define NV097_SET_BLEND_FUNC_SFACTOR      0x0344
  #define NV097_SET_BLEND_FUNC_DFACTOR      0x0348
  #define NV_BLEND_SRC_ALPHA                0x0302
-@@ -316,11 +319,15 @@ static struct {
+@@ -320,11 +323,15 @@ static struct {
      uint32_t clip_raw_h, clip_raw_v;    /* SET_SURFACE_CLIP_* as sent: logical */
      Nv2aWindowClip window_clip;
      int window_clip_enabled;
@@ -29,9 +29,9 @@ index 87175a2..6e20743 100644
      /* Why a batch came out flat. "Untextured" has two causes that look
       * identical on screen and want opposite fixes: the batch carried no
       * texture coordinates, or it did and the stage was not usable. */
-@@ -800,18 +807,23 @@ static void surface_apply_clip(void)
- 
+@@ -805,19 +812,24 @@ static void surface_apply_clip(void)
  static const Nv2aBackend *s_backend;
+ static void (*s_backend_present_sync)(void);
  
 -static void check_window_clip_backend(const Nv2aBackend *backend)
 +static void check_software_backend(const Nv2aBackend *backend)
@@ -48,14 +48,15 @@ index 87175a2..6e20743 100644
 +    }
  }
  
- void nv2a_backend_register(const Nv2aBackend *backend)
+ void nv2a_backend_register_with_present_sync(const Nv2aBackend *backend,
+                                              void (*present_sync)(void))
  {
 -    check_window_clip_backend(backend);
 +    check_software_backend(backend);
      s_backend = backend;
+     s_backend_present_sync = backend ? present_sync : NULL;
  }
- 
-@@ -827,6 +839,25 @@ static inline int window_clip_allows(int x, int y)
+@@ -839,6 +851,25 @@ static inline int window_clip_allows(int x, int y)
                                     s_gpu.aa_sx > 1.5f, s_gpu.aa_sy > 1.5f);
  }
  
@@ -81,7 +82,7 @@ index 87175a2..6e20743 100644
  static void current_surface(Nv2aSurface *out)
  {
      out->color_va        = dma_resolve(s_gpu.color_offset);
-@@ -1611,6 +1642,10 @@ static void raster_triangle(const float a[2], const float b[2],
+@@ -1735,6 +1766,10 @@ static void raster_triangle(const float a[2], const float b[2],
      area = (b[0] - a[0]) * (c[1] - a[1]) - (b[1] - a[1]) * (c[0] - a[0]);
      if (area == 0.0f)
          return;                            /* degenerate */
@@ -90,9 +91,9 @@ index 87175a2..6e20743 100644
 +        return;
 +    }
  
-     /* Where this batch writes. The same check the per-pixel path made, made
-      * once: a surface address landing on the title's own image is no safer
-@@ -2725,6 +2760,10 @@ static void raster_xf_triangle(const Nv2aVshOutput *va, const Nv2aVshOutput *vb,
+     if (textured) {
+         tex_filter_config(&bilinear, &aniso);
+@@ -3114,6 +3149,10 @@ static void raster_xf_triangle(const Nv2aVshOutput *va, const Nv2aVshOutput *vb,
          s_gpu.xf_degenerate++;
          return;
      }
@@ -103,36 +104,27 @@ index 87175a2..6e20743 100644
      if (backend_draws()) {                     /* a back end rasterises */
          Nv2aVertex *o = backend_slot();
          if (o) {
-@@ -3086,8 +3125,10 @@ static void raster_batch_program(void)
-             raster_xf_clipped(&s_xf[i], &s_xf[i+1], &s_xf[i+2]);
+@@ -3481,7 +3520,7 @@ static void raster_batch_program(void)
          break;
      case NV_PRIM_TRIANGLE_STRIP:
--        for (i = 0; i + 2 < n; i++)
--            raster_xf_clipped(&s_xf[i], &s_xf[i+1], &s_xf[i+2]);
-+        for (i = 0; i + 2 < n; i++) {
-+            uint32_t swap = software_cull_active() && (i & 1u);
-+            raster_xf_clipped(&s_xf[i + swap], &s_xf[i + 1 - swap], &s_xf[i+2]);
-+        }
-         break;
-     case NV_PRIM_TRIANGLE_FAN:
-     case NV_PRIM_POLYGON:
-@@ -3154,9 +3195,11 @@ static void raster_batch(void)
-                            vertex_color(s_gpu.idx[i]));
+         for (i = 0; i + 2 < n; i++) {
+-            if ((i & 1) && strip_alt_winding())
++            if ((i & 1) && (strip_alt_winding() || software_cull_active()))
+                 raster_xf_clipped(&s_xf[i+1], &s_xf[i], &s_xf[i+2]);
+             else
+                 raster_xf_clipped(&s_xf[i], &s_xf[i+1], &s_xf[i+2]);
+@@ -3553,7 +3592,7 @@ static void raster_batch(void)
          break;
      case NV_PRIM_TRIANGLE_STRIP:
--        for (i = 0; i + 2 < s_gpu.idx_count; i++)
--            raster_indexed(s_gpu.idx[i], s_gpu.idx[i+1], s_gpu.idx[i+2],
-+        for (i = 0; i + 2 < s_gpu.idx_count; i++) {
-+            uint32_t swap = software_cull_active() && (i & 1u);
-+            raster_indexed(s_gpu.idx[i + swap], s_gpu.idx[i + 1 - swap], s_gpu.idx[i+2],
-                            vertex_color(s_gpu.idx[i]));
-+        }
-         break;
-     case NV_PRIM_TRIANGLE_FAN:
-     case NV_PRIM_POLYGON:
-@@ -3807,18 +3850,28 @@ void nv2a_pb_exec_method(uint32_t subch, uint32_t method, uint32_t param)
+         for (i = 0; i + 2 < s_gpu.idx_count; i++) {
+-            if ((i & 1) && strip_alt_winding())
++            if ((i & 1) && (strip_alt_winding() || software_cull_active()))
+                 raster_indexed(s_gpu.idx[i+1], s_gpu.idx[i], s_gpu.idx[i+2],
+                                vertex_color(s_gpu.idx[i]));
+             else
+@@ -4234,18 +4273,28 @@ void nv2a_pb_exec_method(uint32_t subch, uint32_t method, uint32_t param)
      }
-     if (!inited) {
+     if (!s_exec_inited) {
          const char *window_clip = getenv("RECOMP_WINDOW_CLIP");
 +        const char *software_cull = getenv("RECOMP_CULL_FACE");
  
@@ -146,7 +138,7 @@ index 87175a2..6e20743 100644
 +            fprintf(stderr, "[GPU] RECOMP_CULL_FACE must be 0 or 1\n");
 +            abort();
 +        }
-         inited = 1;
+         s_exec_inited = 1;
          s_gpu.window_clip_enabled = window_clip && strcmp(window_clip, "1") == 0;
 -        check_window_clip_backend(s_backend);
 +        s_gpu.software_cull_enabled = software_cull && strcmp(software_cull, "1") == 0;
@@ -160,7 +152,7 @@ index 87175a2..6e20743 100644
          s_gpu.aa_sx = s_gpu.aa_sy = 1.0f;
          /* Stencil state as the hardware resets it: GL_ALWAYS, masks 0xFF,
           * GL_KEEP, until the title says otherwise. */
-@@ -3962,6 +4015,36 @@ void nv2a_pb_exec_method(uint32_t subch, uint32_t method, uint32_t param)
+@@ -4389,6 +4438,36 @@ void nv2a_pb_exec_method(uint32_t subch, uint32_t method, uint32_t param)
      case NV097_SET_BLEND_ENABLE:
          s_gpu.blend_enable = param;
          break;
@@ -197,7 +189,7 @@ index 87175a2..6e20743 100644
      case NV097_SET_BLEND_EQUATION:
          s_gpu.blend_equation = param;
          break;
-@@ -4568,6 +4651,8 @@ void nv2a_pb_exec_report(void)
+@@ -4997,6 +5076,8 @@ void nv2a_pb_exec_report(void)
                      " screen-space, %u triangles fully off-surface\n",
              s_gpu.tris_drawn, s_gpu.batches_untransformed,
              s_gpu.tris_skipped_offscreen);

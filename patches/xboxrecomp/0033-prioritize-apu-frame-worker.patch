@@ -1,5 +1,5 @@
 diff --git a/src/apu/apu_core.c b/src/apu/apu_core.c
-index e704c85..c71a191 100644
+index f1a01b6..6edfd74 100644
 --- a/src/apu/apu_core.c
 +++ b/src/apu/apu_core.c
 @@ -1205,6 +1205,11 @@ static void apu_irq_stats_line(void)

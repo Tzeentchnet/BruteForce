@@ -1,8 +1,8 @@
 diff --git a/src/kernel/nv2a_pb_exec.c b/src/kernel/nv2a_pb_exec.c
-index 50e7def..57d4de3 100644
+index 04eaa3e..53fe2ca 100644
 --- a/src/kernel/nv2a_pb_exec.c
 +++ b/src/kernel/nv2a_pb_exec.c
-@@ -193,6 +193,12 @@ static int surface_write_refused(uint32_t base, uint32_t bytes, const char *what
+@@ -197,6 +197,12 @@ static int surface_write_refused(uint32_t base, uint32_t bytes, const char *what
  #define NV097_SET_BLEND_COLOR             0x034C
  #define NV097_SET_BLEND_EQUATION          0x0350
  
@@ -15,7 +15,7 @@ index 50e7def..57d4de3 100644
  #define NV097_SET_SURFACE_CLIP_HORIZONTAL 0x0200
  #define NV097_SET_SURFACE_CLIP_VERTICAL   0x0204
  #define NV097_SET_SURFACE_FORMAT          0x0208
-@@ -337,7 +343,7 @@ static struct {
+@@ -341,7 +347,7 @@ static struct {
          uint32_t enabled, face, front, programmed;
      } cull;
      int software_cull_enabled;
@@ -24,7 +24,7 @@ index 50e7def..57d4de3 100644
      float    aa_sx, aa_sy;              /* anti-aliasing scale of the surface */
      uint32_t clear_color;
      uint32_t clears, unhandled_total;
-@@ -930,9 +936,10 @@ static void check_software_backend(const Nv2aBackend *backend)
+@@ -935,9 +941,10 @@ static void check_software_backend(const Nv2aBackend *backend)
                          " registered render back ends are unsupported\n");
          abort();
      }
@@ -38,7 +38,7 @@ index 50e7def..57d4de3 100644
          abort();
      }
  }
-@@ -3100,8 +3107,10 @@ static void raster_xf_triangle(const Nv2aVshOutput *va, const Nv2aVshOutput *vb,
+@@ -3494,8 +3501,10 @@ static void raster_xf_triangle(const Nv2aVshOutput *va, const Nv2aVshOutput *vb,
   * The polygon is clipped against w = NV_CLIP_W and then the near plane
   * z = 0 (Sutherland-Hodgman), divided back by w, and fanned. The legacy near
   * plane is screen z = c[59].z. RECOMP_PROGRAM_NEAR_ZERO=1 instead uses screen
@@ -51,7 +51,7 @@ index 50e7def..57d4de3 100644
   * ponytail: near planes only; x/y/far fall to the rasteriser's bounds
   * check, which is correct, just slower for huge off-screen triangles. */
  #define NV_CLIP_W 1e-3f
-@@ -3257,13 +3266,27 @@ static int transform_vertex(uint32_t index, Nv2aVshOutput *out)
+@@ -3651,13 +3660,27 @@ static int transform_vertex(uint32_t index, Nv2aVshOutput *out)
      return 1;
  }
  
@@ -80,7 +80,7 @@ index 50e7def..57d4de3 100644
  }
  
  /* Vertex programs on the GPU (nv2a_backend_ext.h, draw_vsh). With a back end
-@@ -4865,11 +4888,14 @@ void nv2a_pb_exec_method(uint32_t subch, uint32_t method, uint32_t param)
+@@ -5289,11 +5312,14 @@ void nv2a_pb_exec_method(uint32_t subch, uint32_t method, uint32_t param)
              abort();
          }
          if (program_near_zero && *program_near_zero &&
@@ -98,7 +98,7 @@ index 50e7def..57d4de3 100644
              near_z && near_z[0] == '0') {
              fprintf(stderr, "[GPU] RECOMP_PROGRAM_NEAR_ZERO requires RECOMP_CLIP_NEAR_Z"
                              " to remain enabled\n");
-@@ -4879,7 +4905,10 @@ void nv2a_pb_exec_method(uint32_t subch, uint32_t method, uint32_t param)
+@@ -5303,7 +5329,10 @@ void nv2a_pb_exec_method(uint32_t subch, uint32_t method, uint32_t param)
          (void)frame_stats_on();      /* before the first constant upload */
          s_gpu.window_clip_enabled = window_clip && strcmp(window_clip, "1") == 0;
          s_gpu.software_cull_enabled = software_cull && strcmp(software_cull, "1") == 0;
@@ -110,7 +110,7 @@ index 50e7def..57d4de3 100644
          check_software_backend(s_backend);
          if (s_gpu.window_clip_enabled)
              fprintf(stderr, "[GPU] experimental window clipping enabled"
-@@ -4887,9 +4916,12 @@ void nv2a_pb_exec_method(uint32_t subch, uint32_t method, uint32_t param)
+@@ -5311,9 +5340,12 @@ void nv2a_pb_exec_method(uint32_t subch, uint32_t method, uint32_t param)
          if (s_gpu.software_cull_enabled)
              fprintf(stderr, "[GPU] experimental face culling enabled"
                              " (software rasterizer only)\n");

@@ -72,7 +72,7 @@ and [packed-alias investigation](./FINDINGS.md#packed-depthstencil-aliases-and-s
 | Texture layout and decode | [texture_decode.c](../src/gpu/texture_decode.c), [d3d11_backend.c](../src/gpu/d3d11_backend.c) |
 | Generated vertex and combiner shaders | [vsh_hlsl.c](../src/gpu/vsh_hlsl.c), [rc_hlsl.c](../src/gpu/rc_hlsl.c), [shader_cache.c](../src/gpu/shader_cache.c) |
 | Null renderer and surface-read probe | [null_backend.c](../src/gpu/null_backend.c) |
-| Frame handoff and optional shared presentation | [patch 0005](../patches/xboxrecomp/0005-synchronize-presented-frames.patch), [patch 0024](../patches/xboxrecomp/0024-gpu-shared-presentation.patch), [patch 0028](../patches/xboxrecomp/0028-scaled-gpu-presentation.patch) |
+| Frame handoff and optional shared presentation | [upstream snapshot synchronization](https://github.com/sp00nznet/xboxrecomp/pull/300), [patch 0024](../patches/xboxrecomp/0024-gpu-shared-presentation.patch), [patch 0028](../patches/xboxrecomp/0028-scaled-gpu-presentation.patch) |
 | Measurements and capture | [bench.py](../tools/bench.py), [patch 0014](../patches/xboxrecomp/0014-frame-statistics.patch), [patch 0026](../patches/xboxrecomp/0026-flip-id-frame-captures.patch), [patch 0027](../patches/xboxrecomp/0027-presenter-source-captures.patch) |
 
 The setup-created `.deps\xboxrecomp` checkout contains the patched
@@ -298,6 +298,17 @@ fall back to CPU transformation until their shader is ready. Optional
 `RECOMP_GPU_VSH_VERIFY=<n>` reads back every nth GPU-program batch for
 comparison with the interpreter and is a slow diagnostic.
 
+Fixed-function batches are still transformed by the executor on the CPU
+before D3D11 receives them. The executor also rejects primitive types below
+triangles. One partial retail audit recorded 174 line-list requests and no
+point requests; the latter does not prove points are absent elsewhere.
+Blood Wake v0.3.1 is current prior art for optional raw fixed-function batches
+and GPU-expanded point sprites, with CPU fallbacks and readback verification.
+It does not handle the observed line-list gap. Any adaptation must extend the
+existing backend contract rather than replace Brute Force's ownership model,
+keep the CPU path working, and first establish fixed-function cost or visible
+point use.
+
 [rc_hlsl.c](../src/gpu/rc_hlsl.c) generates a pixel shader from the texture
 stages and register-combiner configuration, including up to eight general
 combiner stages and the final combiner. It follows the current CPU
@@ -312,6 +323,10 @@ texture cache. `RECOMP_GPU_PSCACHE=1` stores validated bytecode under
 source, compiler binary and compilation inputs. It is off by default; other
 shader types are not covered. Cache errors are logged and compiled shaders
 can still run. See the [launcher and cache findings](./FINDINGS.md#launcher-and-pixel-shader-cache).
+Blood Wake v0.3.1 additionally precompiles vertex variants observed through
+its title-specific shader-creation wrapper during loading. That is a
+discovery and cache-warm-up pattern, not directly reusable addresses or
+shader lists for this title.
 
 ### Raster state, clipping and known differences
 
@@ -460,7 +475,9 @@ replace matched gameplay or original-hardware validation.
 - Device removal is reported and the renderer stops rather than claiming
   outstanding GPU work completed. Device/resource recovery, the separate
   presenter device and loss races at guest-visible synchronization are not
-  established.
+  established. Blood Wake's newer recovery worker is prior art, but it does
+  not by itself define how Brute Force should settle pending PFB flush,
+  semaphore, report, flip, shared-present, and guest-readback work.
 - Fixed and native resolution controls have synthetic WARP coverage, not a
   matched retail gameplay campaign. Performance, VRAM headroom, mip/LOD
   behavior, 4K display output and hardware-D3D11 scaled rendering remain

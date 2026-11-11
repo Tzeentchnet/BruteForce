@@ -1,8 +1,8 @@
 diff --git a/src/kernel/nv2a_pb_exec.c b/src/kernel/nv2a_pb_exec.c
-index 1eeb495..f4888f0 100644
+index d751681..64d50db 100644
 --- a/src/kernel/nv2a_pb_exec.c
 +++ b/src/kernel/nv2a_pb_exec.c
-@@ -720,6 +720,16 @@ static uint32_t surface_bpp(void)
+@@ -724,6 +724,16 @@ static uint32_t surface_bpp(void)
   * the sequence. */
  static int s_flip_dumping;
  
@@ -19,7 +19,7 @@ index 1eeb495..f4888f0 100644
  static void dump_surface_bmp(void)
  {
      const char *prefix = getenv("RECOMP_FB_DUMP");
-@@ -3942,7 +3952,7 @@ static void raster_batch(void)
+@@ -4341,7 +4351,7 @@ static void raster_batch(void)
       * triangles went down correctly just before it. A few frames that actually
       * contain geometry are worth more than any number of clears. */
      if (s_gpu.tris_drawn != before && s_drawn_dumps < FB_DUMP_AFTER_DRAW
@@ -28,7 +28,7 @@ index 1eeb495..f4888f0 100644
          s_drawn_dumps++;
          dump_surface_bmp();
      }
-@@ -5478,7 +5488,7 @@ void nv2a_pb_exec_report(void)
+@@ -5903,7 +5913,7 @@ void nv2a_pb_exec_report(void)
              s_gpu.min_x, s_gpu.max_x, s_gpu.min_y, s_gpu.max_y);
      /* One picture per report rather than per clear: a title clears hundreds of
       * times a second and nobody wants that many files. */

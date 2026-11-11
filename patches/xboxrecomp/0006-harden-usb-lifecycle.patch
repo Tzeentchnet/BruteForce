@@ -1,8 +1,8 @@
 diff --git a/src/kernel/kernel.h b/src/kernel/kernel.h
-index 4a6389d..3617c0d 100644
+index 0030a67..d9c95c8 100644
 --- a/src/kernel/kernel.h
 +++ b/src/kernel/kernel.h
-@@ -919,6 +919,8 @@ enum {
+@@ -922,6 +922,8 @@ enum {
   * hold-off, keyed on the gate when it is on and on the raised-IRQL count
   * (xbox_IrqlBlocksInterrupts) when it is off. */
  int     xbox_IrqSafePointsOn(void);
@@ -29,7 +29,7 @@ index 45d548c..9cc7142 100644
  {
      irq_config_once();
 diff --git a/src/usb/ohci.c b/src/usb/ohci.c
-index efa5046..958ba9d 100644
+index 5462e9a..33e76e3 100644
 --- a/src/usb/ohci.c
 +++ b/src/usb/ohci.c
 @@ -1,10 +1,7 @@
@@ -44,7 +44,7 @@ index efa5046..958ba9d 100644
   */
  #include "ohci.h"
  #include "../platform/mmio_decode.h"
-@@ -182,8 +179,18 @@ static int s_device_hc;
+@@ -188,8 +185,18 @@ static int s_device_hc;
   * 1-4). Which slot XAPI gives a pad is decided by its port: see OHCI_PORTS. */
  static unsigned s_ndp = OHCI_PORTS;
  static int s_npads = 1;          /* RECOMP_USB_PADS */
@@ -64,7 +64,7 @@ index efa5046..958ba9d 100644
  
  static uint32_t *reg_of(OhciController *hc, uint32_t off)
  {
-@@ -1040,14 +1047,8 @@ static void ohci_reset(OhciController *hc, uint32_t base, int index)
+@@ -1046,14 +1053,8 @@ static void ohci_reset(OhciController *hc, uint32_t base, int index)
   * hardware does -- an interrupt arrives when the controller decides, not when
   * the driver next reads a register.
   *
@@ -80,7 +80,7 @@ index efa5046..958ba9d 100644
  {
      /* This thread calls recompiled code, so it needs what any thread running
       * recompiled code needs: its own TIB. The guest register set is already
-@@ -1057,7 +1058,7 @@ static DWORD WINAPI ohci_thread(LPVOID unused)
+@@ -1063,7 +1064,7 @@ static DWORD WINAPI ohci_thread(LPVOID unused)
       * dereferences null before it executes a line of its own body. That is
       * what killed the process here, two interrupts in, with no fault report
       * because the fault was in the runtime rather than in the title. */
@@ -89,7 +89,7 @@ index efa5046..958ba9d 100644
      int plugged = 0;
      uint32_t last_status = 0;
      unsigned repeats = 0;
-@@ -1066,32 +1067,22 @@ static DWORD WINAPI ohci_thread(LPVOID unused)
+@@ -1072,32 +1073,22 @@ static DWORD WINAPI ohci_thread(LPVOID unused)
      unsigned last_ack = 0;
      unsigned first_port = 0, settle = 0;
  
@@ -126,7 +126,7 @@ index efa5046..958ba9d 100644
              continue;
          }
          if (!(enable & INTR_MIE))
-@@ -1117,7 +1108,8 @@ static DWORD WINAPI ohci_thread(LPVOID unused)
+@@ -1123,7 +1114,8 @@ static DWORD WINAPI ohci_thread(LPVOID unused)
              s_plugged_pads = 1;
              first_port = port;
              fprintf(stderr, "  [OHCI0] operational after %u ms; device "
@@ -136,7 +136,7 @@ index efa5046..958ba9d 100644
              fflush(stderr);
          }
  
-@@ -1127,7 +1119,7 @@ static DWORD WINAPI ohci_thread(LPVOID unused)
+@@ -1133,7 +1125,7 @@ static DWORD WINAPI ohci_thread(LPVOID unused)
           * RECOMP_USB_PADS sets how many (1-4). */
          if (plugged && s_plugged_pads < s_npads
              && usb_gamepad_configured(s_plugged_pads - 1)) {
@@ -145,7 +145,7 @@ index efa5046..958ba9d 100644
                  unsigned port = (first_port + (unsigned)s_plugged_pads) % s_ndp;
                  hc->reg[(HcRhPortStatus1 + port * 4) / 4] |= PORT_CCS | PORT_CSC;
                  hc->reg[HcInterruptStatus / 4] |= INTR_RHSC;
-@@ -1149,10 +1141,8 @@ static DWORD WINAPI ohci_thread(LPVOID unused)
+@@ -1155,10 +1147,8 @@ static DWORD WINAPI ohci_thread(LPVOID unused)
           * a frame ever starting, enumeration stops one transfer past
           * SET_ADDRESS with the driver waiting for time to pass.
           *
@@ -158,7 +158,7 @@ index efa5046..958ba9d 100644
          {
              uint32_t hcca = hc->reg[HcHCCA / 4];
  
-@@ -1310,7 +1300,7 @@ static DWORD WINAPI ohci_thread(LPVOID unused)
+@@ -1316,7 +1306,7 @@ static DWORD WINAPI ohci_thread(LPVOID unused)
                  fflush(stderr);
                  if (gated)
                      xbox_DispatchGateLeave();
@@ -167,7 +167,7 @@ index efa5046..958ba9d 100644
              }
          } else {
              last_status = status;
-@@ -1324,21 +1314,56 @@ static DWORD WINAPI ohci_thread(LPVOID unused)
+@@ -1330,21 +1320,56 @@ static DWORD WINAPI ohci_thread(LPVOID unused)
      return 0;
  }
  
@@ -231,13 +231,10 @@ index efa5046..958ba9d 100644
      s_trace   = getenv("RECOMP_USB_TRACE") != NULL;
      {
          const char *hcspec = getenv("RECOMP_USB_HC");
-@@ -1357,18 +1382,31 @@ void xbox_OhciInit(void)
-             s_ndp = (unsigned)s_npads;      /* a port for every pad */
-     }
- #if !defined(OHCI_TRAP_WIN32) && !defined(OHCI_TRAP_POSIX_A64)
--    /* No decoder for this host's instructions, so a trapped access could not
--     * be answered. Leave the aperture as plain memory -- the title then sees
--     * no controller, exactly as with RECOMP_USB unset -- and say so. */
+@@ -1366,15 +1391,31 @@ void xbox_OhciInit(void)
+     /* No decoder for this host's instructions, so a trapped access could not
+      * be answered. Leave the aperture as plain memory -- the title then sees
+      * no controller, exactly as with RECOMP_USB unset -- and say so. */
 -    s_enabled = 0;
      fprintf(stderr, "  OHCI: no trapped-MMIO decoder for this host; "
                      "USB controllers disabled\n");
@@ -268,7 +265,7 @@ index efa5046..958ba9d 100644
  
      /* The registers have to fault to be answered. The MCPX aperture is mapped
       * as plain committed memory, so both blocks are made inaccessible here and
-@@ -1380,46 +1418,98 @@ void xbox_OhciInit(void)
+@@ -1386,46 +1427,98 @@ void xbox_OhciInit(void)
       * A failed protect switches the model off rather than leaving it half on:
       * a controller whose registers read as zero out of RAM is exactly the
       * situation this exists to end, and it would look identical. */
@@ -394,7 +391,7 @@ index efa5046..958ba9d 100644
          return NULL;
      for (i = 0; i < 2; i++)
          if (va >= s_hc[i].base && va < s_hc[i].base + XBOX_OHCI_SIZE)
-@@ -1500,7 +1590,7 @@ void xbox_OhciReport(void)
+@@ -1511,7 +1604,7 @@ void xbox_OhciReport(void)
  {
      int i;
  
@@ -454,10 +451,10 @@ index 8aa0b35..530820a 100644
  /* 1 if the address is inside a controller this model owns. */
  int  xbox_OhciOwnsAddress(uint32_t xbox_va);
 diff --git a/tests/usb_ohci_posix/test_main.c b/tests/usb_ohci_posix/test_main.c
-index e9adc61..0527782 100644
+index 1fa1f60..13b5cc1 100644
 --- a/tests/usb_ohci_posix/test_main.c
 +++ b/tests/usb_ohci_posix/test_main.c
-@@ -82,6 +82,12 @@ int main(int argc, char **argv)
+@@ -83,6 +83,12 @@ int main(int argc, char **argv)
      }
      /* The model is opt-in. */
      setenv("RECOMP_USB", "1", 1);
@@ -470,13 +467,13 @@ index e9adc61..0527782 100644
      if (!xbox_MemoryLayoutInit(xbe, xbe_len)) {
          fprintf(stderr, "xbox_MemoryLayoutInit failed\n");
          return 2;
-@@ -95,15 +101,15 @@ int main(int argc, char **argv)
+@@ -96,15 +102,15 @@ int main(int argc, char **argv)
      sigaction(SIGBUS, &sa, NULL);
      sigaction(SIGSEGV, &sa, NULL);
  
 -    xbox_OhciInit();
 -
- #if !defined(__aarch64__)
+ #if !defined(__aarch64__) && !(defined(__x86_64__) && defined(__linux__))
 +    check(xbox_OhciInit() < 0, "missing decoder is reported", NULL);
      check(!xbox_OhciOwnsAddress(XBOX_OHCI0_BASE),
            "no decoder on this host: the model stays off", NULL);
@@ -488,7 +485,7 @@ index e9adc61..0527782 100644
      {
          volatile uint32_t *hc0 = (volatile uint32_t *)(s_base + XBOX_OHCI0_BASE);
          volatile uint32_t *hc1 = (volatile uint32_t *)(s_base + XBOX_OHCI1_BASE);
-@@ -152,6 +158,7 @@ int main(int argc, char **argv)
+@@ -153,6 +159,7 @@ int main(int argc, char **argv)
      }
      check(!s_unhandled, "no access fell through to the crash path", NULL);
      xbox_OhciReport();

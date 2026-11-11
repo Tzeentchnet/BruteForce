@@ -20,11 +20,11 @@ index 280c1fb..42d4981 100644
  
  enum { NV2A_ZPASS_END = 0, NV2A_ZPASS_BEGIN = 1, NV2A_ZPASS_CLEAR = 2 };
 diff --git a/src/kernel/nv2a_pb_exec.c b/src/kernel/nv2a_pb_exec.c
-index 0a0fefc..fc7bb98 100644
+index 2d158c8..5f35f49 100644
 --- a/src/kernel/nv2a_pb_exec.c
 +++ b/src/kernel/nv2a_pb_exec.c
-@@ -858,6 +858,13 @@ void nv2a_backend_register(const Nv2aBackend *backend)
-     s_backend = backend;
+@@ -870,6 +870,13 @@ void nv2a_backend_register(const Nv2aBackend *backend)
+     nv2a_backend_register_with_present_sync(backend, NULL);
  }
  
 +/* Once per pass of the NV2A thread, busy or idle (xbox_memory_layout.c). */
@@ -37,7 +37,7 @@ index 0a0fefc..fc7bb98 100644
  void nv2a_backend_ext_register(const Nv2aBackendExt *backend)
  {
      s_xbackend = backend;
-@@ -4871,6 +4878,9 @@ void nv2a_pb_exec_method(uint32_t subch, uint32_t method, uint32_t param)
+@@ -5294,6 +5301,9 @@ void nv2a_pb_exec_method(uint32_t subch, uint32_t method, uint32_t param)
          uint64_t stamp = (uint64_t)s_gpu.reports++ * 1000u;
          /* A back end draws the pixels, so it counts them. One that cannot
           * leaves the count at 0, which a culling title reads as hidden. */
@@ -48,10 +48,10 @@ index 0a0fefc..fc7bb98 100644
              if (s_xbackend && s_xbackend->zpass_count) {
                  s_gpu.zpass_count = s_xbackend->zpass_count();
 diff --git a/src/kernel/xbox_memory_layout.c b/src/kernel/xbox_memory_layout.c
-index 9af4198..7bb983f 100644
+index 465833b..ff75ec2 100644
 --- a/src/kernel/xbox_memory_layout.c
 +++ b/src/kernel/xbox_memory_layout.c
-@@ -1464,7 +1464,11 @@ static DWORD WINAPI nv2a_ack_thread(LPVOID param)
+@@ -1477,7 +1477,11 @@ static DWORD WINAPI nv2a_ack_thread(LPVOID param)
           * its segment and the two are the same; a segment carrying two
           * flips paces only the last. */
          extern int nv2a_pb_exec_flip_poll(void);

@@ -119,6 +119,24 @@ existing saved renderer choices are retained. Graphical `build.py` runs also
 default to D3D11 unless `RECOMP_GPU` explicitly selects another path. The
 individual GPU paths have the limitations below.
 
+The guest-visible EEPROM video preference defaults to NTSC 4:3 480i/60.
+Set either option to the exact value `1` before launch to advertise widescreen
+or 480p to the title:
+
+```powershell
+$env:RECOMP_VIDEO_WIDESCREEN = "1"
+$env:RECOMP_VIDEO_480P = "1"
+python tools\build.py run --config Release --experimental-tutorial
+Remove-Item Env:\RECOMP_VIDEO_WIDESCREEN
+Remove-Item Env:\RECOMP_VIDEO_480P
+```
+
+Unset variables, `0`, and values other than `1` leave the corresponding mode
+off. These flags change the preference returned to guest code; they do not by
+themselves change the host window, internal render resolution, presentation
+aspect, or title camera. Brute Force has not yet been validated as a complete
+widescreen or progressive-scan path, so keep both opt-ins diagnostic.
+
 The Audio tab defaults to **Simple (recommended)**. Launcher settings from
 versions 1-3 that selected the old Accurate default migrate once to Simple;
 after that migration, explicitly selecting Accurate is retained. Accurate is

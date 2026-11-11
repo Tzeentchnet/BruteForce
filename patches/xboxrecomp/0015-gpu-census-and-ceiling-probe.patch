@@ -1,8 +1,8 @@
 diff --git a/src/kernel/CMakeLists.txt b/src/kernel/CMakeLists.txt
-index 3488265..9fdf44d 100644
+index 489e9df..9defad9 100644
 --- a/src/kernel/CMakeLists.txt
 +++ b/src/kernel/CMakeLists.txt
-@@ -31,6 +31,7 @@ set(KERNEL_SOURCES
+@@ -32,6 +32,7 @@ set(KERNEL_SOURCES
      nv2a_vsh_interp.c
      nv2a_combiner.c
      nv2a_frame_stats.c
@@ -201,10 +201,10 @@ index 0000000..b552417
 +
 +#endif /* NV2A_CENSUS_H */
 diff --git a/src/kernel/nv2a_pb_exec.c b/src/kernel/nv2a_pb_exec.c
-index a78e04d..e0aa62e 100644
+index 26e87a8..e09e9a2 100644
 --- a/src/kernel/nv2a_pb_exec.c
 +++ b/src/kernel/nv2a_pb_exec.c
-@@ -43,6 +43,7 @@
+@@ -47,6 +47,7 @@
  #include "nv2a_window_clip.h"
  #include "nv2a_texture_sample.h"
  #include "nv2a_frame_stats.h"
@@ -212,7 +212,7 @@ index a78e04d..e0aa62e 100644
  #if defined(_WIN32)
  #include <windows.h>
  #define NV_TLS __declspec(thread)
-@@ -539,6 +540,7 @@ static void note_unhandled(uint32_t method, uint32_t param)
+@@ -543,6 +544,7 @@ static void note_unhandled(uint32_t method, uint32_t param)
  {
      uint16_t *slot = &s_unhandled_slot[(method & 0x1FFC) / 4];
  
@@ -220,7 +220,7 @@ index a78e04d..e0aa62e 100644
      s_gpu.unhandled_total++;
      if (*slot) {
          s_unhandled[*slot - 1].count++;
-@@ -3145,15 +3147,136 @@ static void raster_batch_program(void)
+@@ -3541,15 +3543,136 @@ static void raster_batch_program(void)
          backend_flush(!s_xf_no_tex);
  }
  
@@ -357,7 +357,7 @@ index a78e04d..e0aa62e 100644
          raster_batch_program();
          return;
      }
-@@ -4186,6 +4309,11 @@ void nv2a_pb_exec_method(uint32_t subch, uint32_t method, uint32_t param)
+@@ -4609,6 +4732,11 @@ void nv2a_pb_exec_method(uint32_t subch, uint32_t method, uint32_t param)
              fprintf(stderr, "[FTRACE] clear %X surf %08X %ux%u colour %08X%c",
                      param, s_gpu.color_offset, s_gpu.clip_w, s_gpu.clip_h,
                      s_gpu.clear_color, 10);
@@ -369,7 +369,7 @@ index a78e04d..e0aa62e 100644
          clear_surface(param);
          if (param & 0x01)                         /* Z */
              zbuf_clear();
-@@ -4359,6 +4487,9 @@ void nv2a_pb_exec_method(uint32_t subch, uint32_t method, uint32_t param)
+@@ -4784,6 +4912,9 @@ void nv2a_pb_exec_method(uint32_t subch, uint32_t method, uint32_t param)
              }
          }
          frame_stats_flip();
@@ -379,7 +379,7 @@ index a78e04d..e0aa62e 100644
          s_gpu.drawn_stale = 1;
          if (s_backend && s_backend->flip)
              s_backend->flip();
-@@ -4706,6 +4837,7 @@ void nv2a_pb_exec_report(void)
+@@ -5131,6 +5262,7 @@ void nv2a_pb_exec_report(void)
          last_ms = now;
      }
      flip_hold_report();
@@ -388,17 +388,17 @@ index a78e04d..e0aa62e 100644
          uint32_t flips, distinct, unknown;
          nv2a_frame_stats_take_report(&s_frame_stats, &flips, &distinct, &unknown);
 diff --git a/tests/nv2a_ffp_backend/CMakeLists.txt b/tests/nv2a_ffp_backend/CMakeLists.txt
-index d24de2d..79bc2c2 100644
+index 8ffef32..1a3cd19 100644
 --- a/tests/nv2a_ffp_backend/CMakeLists.txt
 +++ b/tests/nv2a_ffp_backend/CMakeLists.txt
-@@ -6,6 +6,7 @@ add_executable(nv2a-ffp-backend-test nv2a_ffp_backend_test.c
+@@ -6,6 +6,7 @@ set(NV2A_BACKEND_TEST_SOURCES
      ../../src/kernel/nv2a_vsh_interp.c
      ../../src/kernel/nv2a_combiner.c
      ../../src/kernel/nv2a_frame_stats.c
 +    ../../src/kernel/nv2a_census.c
      ../../src/kernel/nv2a_flip_hold.c)
- target_include_directories(nv2a-ffp-backend-test PRIVATE ../../src/kernel ../../src)
- if(MSVC)
+ set(NV2A_BACKEND_FIXTURE nv2a_backend_fixture.c)
+ add_executable(nv2a-ffp-backend-test nv2a_ffp_backend_test.c
 diff --git a/tests/nv2a_raster_batch/CMakeLists.txt b/tests/nv2a_raster_batch/CMakeLists.txt
 index 0d519f9..1bc4d1c 100644
 --- a/tests/nv2a_raster_batch/CMakeLists.txt

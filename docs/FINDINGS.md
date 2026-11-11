@@ -2026,13 +2026,24 @@ roughly 6 fps with the default 480p launcher settings.
 ### Blood Wake feature review and true-widescreen investigation
 
 This was a source and static-executable review, not a widescreen
-implementation or runtime validation. The Blood Wake evidence is from public
-release v0.2.4 at commit
+implementation or runtime validation. The original Blood Wake evidence is
+from public release v0.2.4 at commit
 [`e631eddd`](https://github.com/minimalice92/bloodwake-recomp/tree/e631edddfe56d22344e9f696923aeb6d78a9e7ba);
 the Brute Force evidence is from North American retail generation
-`20261030-142754-81f8c6e6`. No game-derived code, captures or payloads were
-added to the repository. Blood Wake's published performance and completion
-claims were not independently reproduced.
+`20261030-142754-81f8c6e6`.
+
+On 2026-11-10, a second source-only review compared that recorded baseline
+with public Blood Wake v0.3.3 at
+[`62923407`](https://github.com/minimalice92/bloodwake-recomp/tree/6292340705d9b863351a45ba160174a346a81688),
+exactly ten commits later and covering releases v0.2.5 through v0.3.3. The
+current source still fingerprints xboxrecomp
+`f0f8a461496a4f23d9b0aeaa284b8d70ba7ab82b` (v0.16.0), so it is prior art,
+not a newer framework base than Brute Force's v0.17.0 integration. The public
+commits are large private-repository synchronizations; release-note
+performance and completion claims were not independently reproduced. The
+recorded adaptation checkout remains at `e631eddd`; `62923407` was inspected
+in a temporary worktree only. No game-derived code, captures, payloads, or
+new Blood Wake code were added to the repository.
 
 #### Blood Wake's end-to-end design
 
@@ -2150,11 +2161,29 @@ classes without changing matrices. It requires regeneration because
 `recomp_manual.c` participates in the generated-source fingerprint. No such
 hook has been added yet.
 
-#### Other Blood Wake candidates
+#### Blood Wake v0.2.5-v0.3.3 refresh
+
+The following assessments are based on the public source at `62923407`, not
+on runtime validation in either title:
+
+| Change | Source observation | Brute Force assessment |
+| --- | --- | --- |
+| Foreground-only display-awake policy (v0.3.3) | The Windows framebuffer thread calls `SetThreadExecutionState(ES_CONTINUOUS | ES_DISPLAY_REQUIRED)` only while its top-level game window is foreground and not minimized, and releases the hold in the background, on minimize, and on close. The behavior can be disabled and unattended runs leave the display timer alone. | Strongest small generic candidate. A framework adaptation should use a default-off `RECOMP_*` switch, preserve foreground/minimized/close behavior, report API failures, and have a Windows fixture that substitutes window state and execution-state calls. Exact upstream PR/issue searches found no equivalent through 2026-11-10. No patch was added during this review. |
+| 64-bit `MMX_PMADDWD` intermediate sum (v0.3.3) | Blood Wake patches the helper so each adjacent signed-word product pair is summed in 64 bits before retaining the low dword. | Already present in xboxrecomp v0.17.0 at the pinned Brute Force base, with dedicated `mmx_pmaddwd`, broader integer, and helper tests. Do not carry a duplicate patch. |
+| Native fixed-function and point-sprite drawing (v0.3.1) | The extended backend contract now offers fixed-function batches as raw or gathered inputs plus matrices, lighting, fog, and material state. Point batches can remain as points through the vertex shader and expand in a geometry shader. The CPU routes remain references and fallbacks. | Adapt individual optional contracts, not Blood Wake's renderer core wholesale. Brute Force already runs eligible vertex programs on D3D11 but still transforms fixed-function batches on the CPU and rejects primitives below triangles. Its partial retail audit saw 174 line-list requests and no points; point sprites do not repair that known line gap. First census fixed-function cost and establish visible point use, then add CPU/GPU parity fixtures before any default change. |
+| Load-time vertex-shader preparation (v0.3.1) | A title wrapper observes every `D3DDevice_CreateVertexShader` during Blood Wake's known boot groups, generates raw, gathered, point, and fixed-function variants, and compiles them into the persistent cache on workers without touching the device. First use finds cached bytecode or explicitly waits/falls back. | Promising startup-hitch work after the existing cache is accepted. Brute Force currently persists combiner pixel shaders only and lets a new vertex program fall back to CPU transformation while its worker compiles. It must discover programs through Brute Force's own title routes or a generic backend feed, preserve compiler/source identity and explicit failures, and prove that warm-up does not alter output. Blood Wake's wrapper addresses and shader groups cannot be copied. |
+| Audio-device recovery, MMCSS, and WASAPI output (v0.2.5-v0.3.0) | A normal-priority COM worker rebuilds a lost or changed output device away from the frame thread; sound workers join MMCSS; v0.3.0 adds shared-mode WASAPI output. | Useful generic prior art, but deferred with the rest of audio. Brute Force's current framework XAudio2 path has no comparable rebuild worker, while the listening-quality gate remains unresolved. A future adaptation must keep device-loss and shutdown errors explicit, preserve a reference output, test concurrent rebuild/close, and measure latency and continuity rather than assuming WASAPI is better. |
+| Native DSP engine and bit-exact hot loops (v0.3.0) | Blood Wake translates the GP/EP programs to native x64, keeps interpreter comparison paths, and specializes HRTF and resampler loops while preserving integer results. | High-effort future optimization, not a current fix. Brute Force already has an experimental GPL xemu interpreter and an unresolved narrow/crackly Accurate mode. Resume only after the listening gate identifies a DSP-side defect or performance need. Preserve GPL notices and require interpreter lockstep over representative programs. |
+| Just-in-time frames, present pacing, and process QoS (v0.3.1-v0.3.3) | The latency mode coordinates Blood Wake's title-specific high-frame-rate walk with present slots, GPU limits, measured pass work, and a process QoS/timer policy. | Do not transplant. Brute Force has no established high-frame-rate title mode, and its performance plan forbids weakening PFB flush, semaphore, report, or flip holds. Revisit only after native distinct-world-frame cadence and the existing event-driven wait work are established, with each wait and ownership boundary preserved in fixtures. |
+| CPU-written loading-screen upload and device recovery | Blood Wake restores CPU-written loading imagery to the GPU path and rebuilds graphics resources after device loss. | The loading/movie case is already covered by Brute Force's logical guest shadow and scaled GPU upload path. Graphics recovery is not: Brute Force intentionally stops on removal rather than claiming pending work completed. Recovery remains a separate ownership and synchronization design, not code to import opportunistically. |
+| Clang DSP trace stub (v0.3.2) | The xemu shim adds a no-op `trace_dsp56k_execute_instruction_disasm(...)` macro so the DSP sources compile with Clang. | Concrete and portable, but Brute Force is currently Windows/MSVC-only and has no failing Clang build. Add it with the existing GPL shim notice if a supported Clang or non-Windows DSP build is introduced; it is not an immediate runtime feature. |
+| API-neutral renderer core, HDR/EDID handling, and future D3D12 work | Blood Wake moved shared renderer policy into `src/gpu/core/`, hardened HDR monitor-data handling, and prepared API-neutral ownership. | The refactor is useful design evidence but does not justify replacing Brute Force's established D3D11 surface, readback, scaling, and synchronization contracts. HDR is premature while brightness/bloom equivalence is unresolved. Direct3D 12 remains explicitly deferred. |
+
+#### Earlier Blood Wake candidates that remain open
 
 | Candidate | Brute Force assessment |
 | --- | --- |
-| Persistent shader-cache warm-up | High-value next step after the existing cache is accepted for normal use. Blood Wake boots a measured, minimal set of hidden and silent scenes during setup. Brute Force can reuse the concept and its own scripted routes, but not Blood Wake's launch-page offsets or scene list. Warm-up failures and cache identity must remain explicit. |
+| Persistent shader-cache warm-up | High-value next step after the existing cache is accepted for normal use. Blood Wake's earlier hidden-scene warm-up and current load-time vertex-program preparation are two distinct discovery methods. Brute Force can reuse the concept and its own routes, but not Blood Wake's launch-page offsets, scene list, wrapper addresses, or shader groups. Warm-up failures and cache identity must remain explicit. |
 | Event-driven short waits, idle NV2A sleep and segment-at-a-time walking | Potentially high performance value. Blood Wake preserves the flush acknowledgement and wakes the waiter promptly instead of skipping it. This overlaps the existing pipeline plan, but is synchronization-sensitive and needs executor fixtures plus matched A/B/A measurements. |
 | Mip upload followed by anisotropic filtering | High visual value for scaled output, in that order. Blood Wake enables anisotropy only for eligible mipped samplers. Open [sp00nznet/xboxrecomp#253](https://github.com/sp00nznet/xboxrecomp/pull/253) is CPU-rasterizer filtering without mip levels and does not implement the D3D11 path. |
 | Original/enhanced fix registry and generated settings schema | Useful release-engineering patterns, but lower priority. Brute Force already has default-off `RECOMP_*` experiments and a table-driven launcher; an edition boundary becomes valuable only when a coherent enhanced preset and save-compatibility policy exist. |
@@ -2169,9 +2198,10 @@ Blood Wake's project-owned widescreen and tooling files are MIT-licensed.
 Its carried xboxrecomp files retain their own MIT notices, while patched APU
 files are LGPL-2.1-or-later and most of its vendored xemu DSP is
 GPL-2.0-or-later. Existing project attribution already covers adapted
-generic code. Any newly copied code still requires a corresponding
-`THIRD_PARTY_NOTICES.md` update; title code, generated C, assets and captures
-remain local.
+generic code from `e631eddd`. No code was copied from `62923407`, so
+`THIRD_PARTY_NOTICES.md` did not change. Any future adaptation from that
+revision still requires a corresponding notice update; title code, generated
+C, assets and captures remain local.
 
 ## Current validation boundary
 

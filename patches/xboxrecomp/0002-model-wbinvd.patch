@@ -1,5 +1,5 @@
 diff --git a/templates/runtime/recomp_types.h b/templates/runtime/recomp_types.h
-index 9425789..b6c201c 100644
+index 47491e5..dff9b32 100644
 --- a/templates/runtime/recomp_types.h
 +++ b/templates/runtime/recomp_types.h
 @@ -47,6 +47,7 @@
@@ -10,31 +10,56 @@ index 9425789..b6c201c 100644
  /* math.h is load-bearing, and its absence was invisible.
   *
   * The lifter emits sqrt() and fabs() for fsqrt/fabs -- 146 of them in one of
+diff --git a/tools/conformance/__main__.py b/tools/conformance/__main__.py
+index cfe2383..00dde40 100644
+--- a/tools/conformance/__main__.py
++++ b/tools/conformance/__main__.py
+@@ -89,7 +89,8 @@ def _find_vcvars():
+ 
+ def _cl(vcvars, workdir, args):
+     """Run cl.exe under a 32-bit toolchain environment."""
+-    cmd = f'"{vcvars}" >nul 2>&1 && cl /nologo {args}'
++    cmd = (f'"{vcvars}" >nul 2>&1 && cl /nologo /std:c11 '
++           f'/experimental:c11atomics {args}')
+     return subprocess.run(cmd, cwd=workdir, shell=True, capture_output=True,
+                           text=True)
+ 
+diff --git a/tools/recomp/fpdiff.py b/tools/recomp/fpdiff.py
+index 6fe008a..455baa0 100644
+--- a/tools/recomp/fpdiff.py
++++ b/tools/recomp/fpdiff.py
+@@ -649,7 +649,8 @@ def run(out, corpus, include=None, prelude=None):
+     include = (Path(include).resolve() if include
+                else Path(__file__).resolve().parents[2] / "templates" / "runtime")
+     built = runner._cl(vcvars, str(out),
+-                       f'/O2 /fp:strict /arch:SSE2 /I"{include}" lifted.c native.obj /Fecompare.exe')
++                       f'/O2 /fp:strict /arch:SSE2 /I"{include}" lifted.c '
++                       'native.obj /Fecompare.exe')
+     (out / "compile.txt").write_text(built.stdout + built.stderr)
+     if built.returncode:
+         raise RuntimeError(built.stdout + built.stderr)
 diff --git a/tools/recomp/lifter.py b/tools/recomp/lifter.py
-index 5f3196e..2ec335b 100644
+index 4174bca..01c7d77 100644
 --- a/tools/recomp/lifter.py
 +++ b/tools/recomp/lifter.py
-@@ -461,7 +461,7 @@ _EFLAGS_PRESERVE = frozenset({
-     "pushfd", "pushal", "pushad", "popal", "popad",
-     # cpuid writes eax..edx and no flags.
-     "cpuid",
--    "sgdt", "ljmp", "sfence",
-+    "sgdt", "ljmp", "sfence", "wbinvd",
-     "stmxcsr", "ldmxcsr",
-     # SSE scalar float
-     "movss", "movsd",
-@@ -1778,6 +1778,11 @@ class Lifter:
-         # following adc/sbb reads kept whatever the last arithmetic left in it.
-         # Only worth emitting when something downstream consumes CF -- that is
-         # also the only time the enclosing function declares _cf.
-+        if m == "wbinvd":
-+            # There is no guest CPU cache to invalidate. Host memory is
-+            # coherent, but the guest instruction also orders memory access.
-+            return ["atomic_thread_fence(memory_order_seq_cst); /* wbinvd */"]
-+
-         # Cache hints and store fences: nothing to model on a single-threaded
-         # interpreter over coherent host memory. Named so they stop showing up
-         # in the unimplemented report as if they were missing work.
+@@ -1840,10 +1840,14 @@ class Lifter:
+         if m.startswith("prefetch") or m in ("sfence", "lfence", "mfence"):
+             return [f"(void)0; /* {m}: cache/ordering hint, nothing to model */"]
+ 
+-        # The API-level host reads the same coherent memory as the guest CPU;
+-        # no emulated CPU cache can hold dirty bytes away from those readers.
++        # The API-level host reads the same coherent memory as the guest CPU,
++        # so there is no emulated CPU cache to write back. Preserve the guest's
++        # ordering point for host threads and devices that consume that memory.
+         if m == "wbinvd":
+-            return ["(void)0; /* wbinvd: coherent host memory, no separate guest cache */"]
++            return [
++                "atomic_thread_fence(memory_order_seq_cst); "
++                "/* wbinvd: coherent host memory, preserve guest ordering */"
++            ]
+ 
+         if m in ("stc", "clc", "cmc"):
+             if not self.needs_cf:
 diff --git a/tools/recomp/test_lifter_wbinvd.py b/tools/recomp/test_lifter_wbinvd.py
 new file mode 100644
 index 0000000..d530260

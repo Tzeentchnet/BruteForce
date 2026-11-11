@@ -25,6 +25,11 @@ Direct3D 11 is the default renderer for new launcher settings. The CPU
 reference renderer remains available from the launcher for comparison and
 troubleshooting.
 
+The pinned framework has been updated to xboxrecomp v0.17.0 plus selected
+post-release fixes. A fresh retail generation on that toolkit tree has not
+yet completed the project's bring-up and performance gates; the reviewed
+measurements still belong to the previous supported generation.
+
 See [current findings](docs/FINDINGS.md) and
 [next steps](docs/NEXTSTEPS.md) for the detailed validation boundary.
 

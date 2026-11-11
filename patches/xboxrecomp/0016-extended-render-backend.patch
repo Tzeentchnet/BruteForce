@@ -188,10 +188,10 @@ index 0000000..0e1d63d
 +
 +#endif /* NV2A_BACKEND_EXT_H */
 diff --git a/src/kernel/nv2a_pb_exec.c b/src/kernel/nv2a_pb_exec.c
-index e0aa62e..8ed6d41 100644
+index e09e9a2..1bbe214 100644
 --- a/src/kernel/nv2a_pb_exec.c
 +++ b/src/kernel/nv2a_pb_exec.c
-@@ -40,6 +40,7 @@
+@@ -44,6 +44,7 @@
  #include "nv2a_vsh_interp.h"
  #include "nv2a_combiner.h"
  #include "nv2a_backend.h"
@@ -199,7 +199,7 @@ index e0aa62e..8ed6d41 100644
  #include "nv2a_window_clip.h"
  #include "nv2a_texture_sample.h"
  #include "nv2a_frame_stats.h"
-@@ -392,6 +393,17 @@ static float reg_f(uint32_t method)
+@@ -396,6 +397,17 @@ static float reg_f(uint32_t method)
      return f;
  }
  
@@ -217,9 +217,9 @@ index e0aa62e..8ed6d41 100644
  /* Where BACK_END_WRITE_SEMAPHORE_RELEASE lands; see nv2a_backend.h. */
  #if defined(_WIN32)
  static volatile LONG s_sem_va;
-@@ -812,19 +824,28 @@ static void surface_apply_clip(void)
- 
+@@ -817,19 +829,28 @@ static void surface_apply_clip(void)
  static const Nv2aBackend *s_backend;
+ static void (*s_backend_present_sync)(void);
  
 +/* The extended entry (nv2a_backend_ext.h), used for transformed batches
 + * while a base back end is registered. */
@@ -248,8 +248,8 @@ index e0aa62e..8ed6d41 100644
          fprintf(stderr, "[GPU] RECOMP_PROGRAM_NEAR_ZERO requires the software rasterizer;"
                          " registered render back ends are unsupported\n");
          abort();
-@@ -837,6 +858,17 @@ void nv2a_backend_register(const Nv2aBackend *backend)
-     s_backend = backend;
+@@ -849,6 +870,17 @@ void nv2a_backend_register(const Nv2aBackend *backend)
+     nv2a_backend_register_with_present_sync(backend, NULL);
  }
  
 +void nv2a_backend_ext_register(const Nv2aBackendExt *backend)
@@ -266,7 +266,7 @@ index e0aa62e..8ed6d41 100644
  static int backend_draws(void)
  {
      return s_backend && s_backend->draw;
-@@ -2069,6 +2101,9 @@ static int s_xf_no_tex;
+@@ -2230,6 +2262,9 @@ static int s_xf_no_tex;
  static Nv2aVertex *s_bverts;     /* about 5.5 MB: allocated by the first vertex */
  static uint32_t   s_bcount;
  
@@ -276,7 +276,7 @@ index e0aa62e..8ed6d41 100644
  static Nv2aVertex *backend_slot(void)
  {
      if (!s_bverts
-@@ -2131,6 +2166,97 @@ static void backend_flush(int textured)
+@@ -2292,6 +2327,97 @@ static void backend_flush(int textured)
      note_drawn();
  }
  
@@ -374,7 +374,7 @@ index e0aa62e..8ed6d41 100644
  /* One triangle by vertex index: gather position and, if the batch has one,
   * texture coordinate 0. A vertex whose position cannot be read is not drawn;
   * a batch whose texcoords cannot be read is drawn untextured rather than not
-@@ -2757,6 +2883,16 @@ static void raster_xf_triangle(const Nv2aVshOutput *va, const Nv2aVshOutput *vb,
+@@ -3146,6 +3272,16 @@ static void raster_xf_triangle(const Nv2aVshOutput *va, const Nv2aVshOutput *vb,
          s_gpu.tris_culled++;
          return;
      }
@@ -391,7 +391,7 @@ index e0aa62e..8ed6d41 100644
      if (backend_draws()) {                     /* a back end rasterises */
          Nv2aVertex *o = backend_slot();
          if (o) {
-@@ -2852,8 +2988,8 @@ static void raster_xf_triangle(const Nv2aVshOutput *va, const Nv2aVshOutput *vb,
+@@ -3246,8 +3382,8 @@ static void raster_xf_triangle(const Nv2aVshOutput *va, const Nv2aVshOutput *vb,
   * check, which is correct, just slower for huge off-screen triangles. */
  #define NV_CLIP_W 1e-3f
  
@@ -402,7 +402,7 @@ index e0aa62e..8ed6d41 100644
  
  static void xf_lerp(const Nv2aVshOutput *a, const Nv2aVshOutput *b, float t,
                      Nv2aVshOutput *out)
-@@ -2896,19 +3032,26 @@ static int xf_clip_poly(const Nv2aVshOutput *in, int n, int pl,
+@@ -3290,19 +3426,26 @@ static int xf_clip_poly(const Nv2aVshOutput *in, int n, int pl,
      return m;
  }
  
@@ -435,7 +435,7 @@ index e0aa62e..8ed6d41 100644
      in[0] = a; in[1] = b; in[2] = c;
      for (i = 0; i < 3; i++) {
          p0[i] = *in[i];
-@@ -3143,7 +3286,9 @@ static void raster_batch_program(void)
+@@ -3539,7 +3682,9 @@ static void raster_batch_program(void)
      }
      /* The batch's triangles, all at once (see xf_queue_push). */
      xf_queue_flush();
@@ -446,7 +446,7 @@ index e0aa62e..8ed6d41 100644
          backend_flush(!s_xf_no_tex);
  }
  
-@@ -3867,6 +4012,8 @@ static void tex_stage_method(uint32_t method, uint32_t param)
+@@ -4266,6 +4411,8 @@ static void tex_stage_method(uint32_t method, uint32_t param)
   * back end the pixels are not in guest memory, so the hash is unknown. */
  static Nv2aFrameStats s_frame_stats;
  static int s_frame_stats_on = -1;
@@ -455,7 +455,7 @@ index e0aa62e..8ed6d41 100644
  /* Constant uploads since the last flip (TRANSFORM_CONSTANT words and the
   * load index), for the frame statistics' constants column. */
  static uint64_t s_frame_constants;
-@@ -3900,7 +4047,7 @@ static void frame_stats_flip(void)
+@@ -4299,7 +4446,7 @@ static void frame_stats_flip(void)
  
      if (!frame_stats_on())
          return;
@@ -464,7 +464,7 @@ index e0aa62e..8ed6d41 100644
          int drawn = s_gpu.drawn_offset != 0;
          uint32_t offset = drawn ? s_gpu.drawn_offset : s_gpu.color_offset;
          uint32_t pitch = drawn ? s_gpu.drawn_pitch : s_gpu.pitch;
-@@ -4275,8 +4422,13 @@ void nv2a_pb_exec_method(uint32_t subch, uint32_t method, uint32_t param)
+@@ -4698,8 +4845,13 @@ void nv2a_pb_exec_method(uint32_t subch, uint32_t method, uint32_t param)
      case 0x09C4: memcpy(&s_gpu.fog_param[1], &param, 4); break;
      case 0x17C8:                                  /* CLEAR_REPORT_VALUE */
          s_gpu.zpass_count = 0;
@@ -478,7 +478,7 @@ index e0aa62e..8ed6d41 100644
          s_gpu.zpass_enable = param;
          break;
      case 0x17D0: {                                /* GET_REPORT */
-@@ -4290,6 +4442,18 @@ void nv2a_pb_exec_method(uint32_t subch, uint32_t method, uint32_t param)
+@@ -4713,6 +4865,18 @@ void nv2a_pb_exec_method(uint32_t subch, uint32_t method, uint32_t param)
          uint8_t *mem = (uint8_t *)xbox_GetMemoryOffset();
          uint32_t at = dma_resolve(param & 0x00FFFFFFu);
          uint64_t stamp = (uint64_t)s_gpu.reports++ * 1000u;
@@ -497,7 +497,7 @@ index e0aa62e..8ed6d41 100644
          memcpy(mem + at, &stamp, 8);
          memcpy(mem + at + 8, &s_gpu.zpass_count, 4);
          memset(mem + at + 12, 0, 4);
-@@ -4447,6 +4611,15 @@ void nv2a_pb_exec_method(uint32_t subch, uint32_t method, uint32_t param)
+@@ -4872,6 +5036,15 @@ void nv2a_pb_exec_method(uint32_t subch, uint32_t method, uint32_t param)
           * here, rather than letting the window read guest memory on its own
           * clock, is what stops it showing a surface the rasteriser is still
           * writing. */

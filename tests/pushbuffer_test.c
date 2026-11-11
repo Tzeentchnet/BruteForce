@@ -37,6 +37,13 @@ void nv2a_pb_exec_method(uint32_t subch, uint32_t method, uint32_t value)
     }
 }
 
+int nv2a_pb_exec_constant_word(uint32_t method, uint32_t value)
+{
+    (void)method;
+    (void)value;
+    return 0;
+}
+
 void nv2a_pb_exec_report(void) {}
 void nv2a_pb_exec_walk_begin(void) {}
 void xbox_Nv2aAckBusyBits(void) {}

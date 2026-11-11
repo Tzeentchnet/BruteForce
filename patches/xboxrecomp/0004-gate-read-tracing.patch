@@ -1,8 +1,8 @@
 diff --git a/src/kernel/kernel_bridge.c b/src/kernel/kernel_bridge.c
-index 0f5d7e4..34f3242 100644
+index 9476517..3e70ef2 100644
 --- a/src/kernel/kernel_bridge.c
 +++ b/src/kernel/kernel_bridge.c
-@@ -4745,30 +4745,26 @@ static void bridge_NtReadFile(void)
+@@ -4748,30 +4748,26 @@ static void bridge_NtReadFile(void)
      g_eax = (uint32_t)xbox_NtReadFile(handle, NULL, NULL, NULL, &ios,
                  XBOX_TO_NATIVE(buffer_va), length, poff);
  

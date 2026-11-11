@@ -10,8 +10,42 @@ python -m pytest -q tests
 ```
 
 The tests include a synthetic disc image and do not require game data. The
-synthetic extraction test uses the installed toolkit's XISO reader. To exercise
-the native host and all synthetic fixtures, including crash diagnostics, guest
+synthetic extraction test uses the installed toolkit's XISO reader.
+
+After changing the xboxrecomp base, selected commits, or local framework
+patches, verify the reproducible checkout and run its recompiler suite:
+
+```powershell
+python tools\toolkit.py --verify
+Push-Location .deps\xboxrecomp
+python -m pytest -q tools
+Pop-Location
+```
+
+The direct MSVC differential cases require the Visual Studio 2022 x86 C/C++
+tools. The focused native fixtures that cover the current selected backend
+contract, EEPROM options, GPU audit, PFB wait, and raster diagnostic can be
+rebuilt without game data:
+
+```powershell
+$fixtures = @(
+  "kernel_eeprom_settings",
+  "nv2a_ffp_backend",
+  "nv2a_gpu_audit",
+  "nv2a_pfb_flush",
+  "nv2a_raster_batch"
+)
+foreach ($fixture in $fixtures) {
+  $build = "build\xboxrecomp-$fixture"
+  cmake -S ".deps\xboxrecomp\tests\$fixture" -B $build `
+    -G "Visual Studio 17 2022" -A x64
+  cmake --build $build --config Release --parallel 4
+  ctest --test-dir $build -C Release --output-on-failure
+}
+```
+
+To exercise the native host and all synthetic fixtures, including crash
+diagnostics, guest
 memory accounting, pushbuffer control flow, and graphics interrupts:
 
 ```powershell

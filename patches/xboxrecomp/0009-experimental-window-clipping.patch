@@ -1,8 +1,8 @@
 diff --git a/src/kernel/nv2a_pb_exec.c b/src/kernel/nv2a_pb_exec.c
-index f73152c..87175a2 100644
+index cb013aa..5329827 100644
 --- a/src/kernel/nv2a_pb_exec.c
 +++ b/src/kernel/nv2a_pb_exec.c
-@@ -40,6 +40,7 @@
+@@ -44,6 +44,7 @@
  #include "nv2a_vsh_interp.h"
  #include "nv2a_combiner.h"
  #include "nv2a_backend.h"
@@ -10,7 +10,7 @@ index f73152c..87175a2 100644
  #if defined(_WIN32)
  #include <windows.h>
  #define NV_TLS __declspec(thread)
-@@ -180,6 +181,9 @@ static int surface_write_refused(uint32_t base, uint32_t bytes, const char *what
+@@ -184,6 +185,9 @@ static int surface_write_refused(uint32_t base, uint32_t bytes, const char *what
  #define NV097_SET_SURFACE_FORMAT          0x0208
  #define NV097_SET_SURFACE_PITCH           0x020C
  #define NV097_SET_SURFACE_COLOR_OFFSET    0x0210
@@ -20,7 +20,7 @@ index f73152c..87175a2 100644
  #define NV097_SET_COLOR_CLEAR_VALUE       0x1D90
  #define NV097_CLEAR_SURFACE               0x1D94
  #define NV097_SET_VERTEX_DATA_ARRAY_OFFSET 0x1720   /* +i*4, 16 attributes */
-@@ -310,6 +314,8 @@ static struct {
+@@ -314,6 +318,8 @@ static struct {
      uint32_t pixel_max;   /* brightest value any pixel write carried */
      uint32_t clip_x, clip_w, clip_y, clip_h;       /* real (anti-aliased) pixels */
      uint32_t clip_raw_h, clip_raw_v;    /* SET_SURFACE_CLIP_* as sent: logical */
@@ -29,9 +29,9 @@ index f73152c..87175a2 100644
      float    aa_sx, aa_sy;              /* anti-aliasing scale of the surface */
      uint32_t clear_color;
      uint32_t clears, unhandled_total;
-@@ -794,8 +800,18 @@ static void surface_apply_clip(void)
- 
+@@ -799,9 +805,19 @@ static void surface_apply_clip(void)
  static const Nv2aBackend *s_backend;
+ static void (*s_backend_present_sync)(void);
  
 +static void check_window_clip_backend(const Nv2aBackend *backend)
 +{
@@ -42,13 +42,14 @@ index f73152c..87175a2 100644
 +    }
 +}
 +
- void nv2a_backend_register(const Nv2aBackend *backend)
+ void nv2a_backend_register_with_present_sync(const Nv2aBackend *backend,
+                                              void (*present_sync)(void))
  {
 +    check_window_clip_backend(backend);
      s_backend = backend;
+     s_backend_present_sync = backend ? present_sync : NULL;
  }
- 
-@@ -804,6 +820,13 @@ static int backend_draws(void)
+@@ -816,6 +832,13 @@ static int backend_draws(void)
      return s_backend && s_backend->draw;
  }
  
@@ -62,7 +63,7 @@ index f73152c..87175a2 100644
  static void current_surface(Nv2aSurface *out)
  {
      out->color_va        = dma_resolve(s_gpu.color_offset);
-@@ -1618,6 +1641,8 @@ static void raster_triangle(const float a[2], const float b[2],
+@@ -1748,6 +1771,8 @@ static void raster_triangle(const float a[2], const float b[2],
              if (!((w0 >= 0 && w1 >= 0 && w2 >= 0)
                 || (w0 <= 0 && w1 <= 0 && w2 <= 0)))
                  continue;
@@ -71,7 +72,7 @@ index f73152c..87175a2 100644
              if (textured) {
                  /* Barycentric, straight from the edge functions already
                   * computed: w1 is the area opposite a, w2 opposite b, w0
-@@ -2422,6 +2447,8 @@ static void xf_rows(const XfTri *T, int y0, int step, XfCount *cnt)
+@@ -2664,6 +2689,8 @@ static void xf_rows(const XfTri *T, int y0, int step, XfCount *cnt)
              if (!((w0 >= 0 && w1 >= 0 && w2 >= 0)
                 || (w0 <= 0 && w1 <= 0 && w2 <= 0)))
                  continue;
@@ -80,10 +81,10 @@ index f73152c..87175a2 100644
              /* w1 is opposite a, w2 opposite b, w0 opposite c. */
              l0 = w1 * T->inv_area; l1 = w2 * T->inv_area; l2 = w0 * T->inv_area;
              z = l0 * a[2] + l1 * b[2] + l2 * c[2];
-@@ -3779,7 +3806,19 @@ void nv2a_pb_exec_method(uint32_t subch, uint32_t method, uint32_t param)
+@@ -4206,7 +4233,19 @@ void nv2a_pb_exec_method(uint32_t subch, uint32_t method, uint32_t param)
          }
      }
-     if (!inited) {
+     if (!s_exec_inited) {
 +        const char *window_clip = getenv("RECOMP_WINDOW_CLIP");
 +
 +        if (window_clip && *window_clip &&
@@ -91,7 +92,7 @@ index f73152c..87175a2 100644
 +            fprintf(stderr, "[GPU] RECOMP_WINDOW_CLIP must be 0 or 1\n");
 +            abort();
 +        }
-         inited = 1;
+         s_exec_inited = 1;
 +        s_gpu.window_clip_enabled = window_clip && strcmp(window_clip, "1") == 0;
 +        check_window_clip_backend(s_backend);
 +        if (s_gpu.window_clip_enabled)
@@ -100,7 +101,7 @@ index f73152c..87175a2 100644
          s_gpu.aa_sx = s_gpu.aa_sy = 1.0f;
          /* Stencil state as the hardware resets it: GL_ALWAYS, masks 0xFF,
           * GL_KEEP, until the title says otherwise. */
-@@ -3895,6 +3934,12 @@ void nv2a_pb_exec_method(uint32_t subch, uint32_t method, uint32_t param)
+@@ -4322,6 +4361,12 @@ void nv2a_pb_exec_method(uint32_t subch, uint32_t method, uint32_t param)
          s_gpu.format = param;
          surface_apply_clip();
          break;
@@ -113,7 +114,7 @@ index f73152c..87175a2 100644
      case 0x1D98:                       /* SET_CLEAR_RECT_HORIZONTAL */
          s_gpu.clear_rect_h = param;
          s_gpu.clear_rect_set |= 1;
-@@ -4216,6 +4261,21 @@ void nv2a_pb_exec_method(uint32_t subch, uint32_t method, uint32_t param)
+@@ -4645,6 +4690,21 @@ void nv2a_pb_exec_method(uint32_t subch, uint32_t method, uint32_t param)
      case 0x1D8C: s_gpu.zstencil_clear = param; break; /* ZSTENCIL_CLEAR_VALUE */
  
      default:

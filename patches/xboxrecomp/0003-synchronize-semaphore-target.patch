@@ -1,8 +1,8 @@
 diff --git a/src/kernel/nv2a_pb_exec.c b/src/kernel/nv2a_pb_exec.c
-index a513bc7..aaf118f 100644
+index a5ea9cc..7ea9367 100644
 --- a/src/kernel/nv2a_pb_exec.c
 +++ b/src/kernel/nv2a_pb_exec.c
-@@ -376,8 +376,27 @@ static float reg_f(uint32_t method)
+@@ -380,8 +380,27 @@ static float reg_f(uint32_t method)
  }
  
  /* Where BACK_END_WRITE_SEMAPHORE_RELEASE lands; see nv2a_backend.h. */
@@ -31,7 +31,7 @@ index a513bc7..aaf118f 100644
  
  /* Unhandled methods, ranked. The interesting output is not that something was
   * skipped but which things dominate, because that is the order to implement
-@@ -3751,10 +3770,13 @@ void nv2a_pb_exec_method(uint32_t subch, uint32_t method, uint32_t param)
+@@ -4178,10 +4197,13 @@ void nv2a_pb_exec_method(uint32_t subch, uint32_t method, uint32_t param)
      /* BACK_END_WRITE_SEMAPHORE_RELEASE. The title's pointer already names the
       * semaphore word; SET_SEMAPHORE_OFFSET is not added (in X-Men Legends it
       * held 0xFF000000 at times, which put the write outside guest memory). */
@@ -47,9 +47,9 @@ index a513bc7..aaf118f 100644
 +            return;
 +        }
      }
-     if (!inited) {
-         inited = 1;
-@@ -3844,7 +3866,7 @@ void nv2a_pb_exec_method(uint32_t subch, uint32_t method, uint32_t param)
+     if (!s_exec_inited) {
+         s_exec_inited = 1;
+@@ -4271,7 +4293,7 @@ void nv2a_pb_exec_method(uint32_t subch, uint32_t method, uint32_t param)
  
          if (!r)
              return;

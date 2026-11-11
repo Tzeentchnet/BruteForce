@@ -1,5 +1,5 @@
 diff --git a/src/kernel/nv2a_backend.h b/src/kernel/nv2a_backend.h
-index 327f01d..8be176f 100644
+index 87788ed..0a8cdbc 100644
 --- a/src/kernel/nv2a_backend.h
 +++ b/src/kernel/nv2a_backend.h
 @@ -51,6 +51,7 @@ typedef struct {
@@ -11,10 +11,10 @@ index 327f01d..8be176f 100644
  
  typedef struct {
 diff --git a/src/kernel/nv2a_pb_exec.c b/src/kernel/nv2a_pb_exec.c
-index 76cf7f7..760a29f 100644
+index 15fc4df..6184971 100644
 --- a/src/kernel/nv2a_pb_exec.c
 +++ b/src/kernel/nv2a_pb_exec.c
-@@ -966,7 +966,7 @@ int nv2a_backend_decode_texture(const Nv2aTexture *tex, uint32_t *argb_out)
+@@ -978,7 +978,7 @@ int nv2a_backend_decode_texture(const Nv2aTexture *tex, uint32_t *argb_out)
      s_gpu.texs[0].color  = tex->color;
      s_gpu.texs[0].addr_u = 3;
      s_gpu.texs[0].addr_v = 3;
@@ -23,7 +23,7 @@ index 76cf7f7..760a29f 100644
      s_gpu.texs[0].levels = 1;
      s_gpu.texs[0].filter = 0;
      s_gpu.texs[0].cube   = 0;
-@@ -2163,8 +2163,9 @@ static void backend_flush(int textured)
+@@ -2324,8 +2324,9 @@ static void backend_flush(int textured)
          tex.color  = s_gpu.texs[0].color;
          tex.addr_u = s_gpu.texs[0].addr_u;
          tex.addr_v = s_gpu.texs[0].addr_v;
@@ -34,7 +34,7 @@ index 76cf7f7..760a29f 100644
          batch.texture = &tex;
      }
      s_backend->draw(&surf, &batch);
-@@ -2211,8 +2212,9 @@ static void copy_texture(const Texture *t, Nv2aTexture *o)
+@@ -2372,8 +2373,9 @@ static void copy_texture(const Texture *t, Nv2aTexture *o)
      o->color  = t->color;
      o->addr_u = t->addr_u;
      o->addr_v = t->addr_v;

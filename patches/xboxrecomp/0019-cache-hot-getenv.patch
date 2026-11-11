@@ -1,8 +1,8 @@
 diff --git a/src/kernel/nv2a_pb_exec.c b/src/kernel/nv2a_pb_exec.c
-index fc7bb98..76cf7f7 100644
+index 5f35f49..15fc4df 100644
 --- a/src/kernel/nv2a_pb_exec.c
 +++ b/src/kernel/nv2a_pb_exec.c
-@@ -4070,7 +4070,11 @@ static void draw_primitive(void)
+@@ -4469,7 +4469,11 @@ static void draw_primitive(void)
          }
      }
  
@@ -16,10 +16,10 @@ index fc7bb98..76cf7f7 100644
          if (shown++ < 6) {
              fprintf(stderr, "  [GPU] prim %u, %u indices, pos attr:"
 diff --git a/src/kernel/nv2a_pb_scan.c b/src/kernel/nv2a_pb_scan.c
-index 89b7294..51e5666 100644
+index 9cb124e..ce1d93c 100644
 --- a/src/kernel/nv2a_pb_scan.c
 +++ b/src/kernel/nv2a_pb_scan.c
-@@ -308,6 +308,16 @@ static void pb_consume(const uint8_t *mem, uint32_t put, uint32_t *words)
+@@ -320,6 +320,16 @@ static void pb_consume(const uint8_t *mem, uint32_t put, uint32_t *words)
      }
  }
  
@@ -36,7 +36,7 @@ index 89b7294..51e5666 100644
  static void pb_walk(uint32_t put_phys, int publish_get)
  {
      const uint8_t *mem = (const uint8_t *)xbox_GetMemoryOffset();
-@@ -426,7 +436,7 @@ static void pb_walk(uint32_t put_phys, int publish_get)
+@@ -438,7 +448,7 @@ static void pb_walk(uint32_t put_phys, int publish_get)
              *s_dma_subroutine = s_ret | NV2A_DMA_SUBROUTINE_STATE;
              s_tot_calls++;
              pb_flow(at, w, target);
@@ -45,7 +45,7 @@ index 89b7294..51e5666 100644
                  fprintf(stderr, "  [PB] CALL #%u at 0x%08X -> 0x%08X "
                                  "(PUT 0x%08X)\n", s_tot_calls, at, target, put);
              s_get = target;
-@@ -636,7 +646,7 @@ static uint32_t pb_walk_segment(uint32_t va, uint32_t end_va, int in_call,
+@@ -648,7 +658,7 @@ static uint32_t pb_walk_segment(uint32_t va, uint32_t end_va, int in_call,
                      sub_end = 0x80000000u + PB_RAM_BYTES;
                  s_tot_calls++;
                  pb_flow(at, w, target);

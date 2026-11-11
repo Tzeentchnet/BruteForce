@@ -1,0 +1,12 @@
+diff --git a/src/kernel/nv2a_pb_exec.c b/src/kernel/nv2a_pb_exec.c
+index 53fe2ca..0e29e3f 100644
+--- a/src/kernel/nv2a_pb_exec.c
++++ b/src/kernel/nv2a_pb_exec.c
+@@ -3152,6 +3152,7 @@ static void xf_rows_parallel(const XfTri *T, int ntris, long px,
+     int n = raster_pool_size(), k;
+ 
+     if (n <= 1 || px < NV_RASTER_MT_MIN_PIXELS) {
++        s_raster_last_workers = 1;
+         for (k = 0; k < ntris; k++)
+             xf_rows(&T[k], T[k].miny, 1, total);
+         return;

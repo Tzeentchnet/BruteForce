@@ -1,8 +1,8 @@
 diff --git a/docs/technical/pushbuffer-executor.md b/docs/technical/pushbuffer-executor.md
-index dfd15aa..a4796af 100644
+index 85b2164..7a06c0f 100644
 --- a/docs/technical/pushbuffer-executor.md
 +++ b/docs/technical/pushbuffer-executor.md
-@@ -56,7 +56,11 @@ the thread that would otherwise answer.
+@@ -58,7 +58,11 @@ the thread that would otherwise answer.
    With the bits cleared only between passes of the poll loop, one pass can be a
    whole rendered frame, so a level load — thousands of kickoffs — looked
    frozen. The walker now clears them every 256 words
@@ -16,13 +16,13 @@ index dfd15aa..a4796af 100644
    poll thread copy the title's "submitted" fence into its "consumed" one. The
    walk now follows every CALL and JUMP, so a pass can be long, and a mirror
 diff --git a/src/kernel/CMakeLists.txt b/src/kernel/CMakeLists.txt
-index fce12ca..58c5aaa 100644
+index 3c64093..4f551e8 100644
 --- a/src/kernel/CMakeLists.txt
 +++ b/src/kernel/CMakeLists.txt
-@@ -25,6 +25,7 @@ set(KERNEL_SOURCES
-     guest_vmem.c
+@@ -26,6 +26,7 @@ set(KERNEL_SOURCES
      icall_feedback.c
      recomp_trace.c
+     recomp_diff.c
 +    nv2a_pfb_flush.c
      nv2a_pb_scan.c
      nv2a_pb_exec.c
@@ -408,7 +408,7 @@ index 0000000..8138af0
 +
 +#endif
 diff --git a/src/kernel/xbox_memory_layout.c b/src/kernel/xbox_memory_layout.c
-index 7bb983f..a38ea54 100644
+index ff75ec2..e7a72f6 100644
 --- a/src/kernel/xbox_memory_layout.c
 +++ b/src/kernel/xbox_memory_layout.c
 @@ -20,6 +20,7 @@
@@ -419,7 +419,7 @@ index 7bb983f..a38ea54 100644
  #include <stdio.h>
  #include <stdlib.h>
  #include <string.h>
-@@ -1406,8 +1407,10 @@ static void nv2a_ack_busy_bits(int flip_held)
+@@ -1419,8 +1420,10 @@ static void nv2a_ack_busy_bits(int flip_held)
          volatile uint32_t *r =
              (volatile uint32_t *)((char *)regs + NV2A_ACK[i].offset);
          uint32_t mask = NV2A_ACK[i].busy_mask;
@@ -431,7 +431,7 @@ index 7bb983f..a38ea54 100644
          /* Once the vblank is delivered its two bits belong to the
           * vblank-ack thread (kernel_bridge.c), which clears them on the
           * DPC's ack. Cleared here too, a pass that landed between the
-@@ -1438,6 +1441,26 @@ void xbox_Nv2aAckBusyBits(void)
+@@ -1451,6 +1454,26 @@ void xbox_Nv2aAckBusyBits(void)
      nv2a_ack_busy_bits(0);
  }
  
@@ -459,7 +459,7 @@ index 7bb983f..a38ea54 100644
   * before it is mapped. The pushbuffer executor writes what the GPU would when
   * it executes a command: PGRAPH state a title reads back, and DMA_GET. */
 diff --git a/src/kernel/xbox_memory_layout.h b/src/kernel/xbox_memory_layout.h
-index 46a366e..6c58d64 100644
+index 31a9453..0aec8bd 100644
 --- a/src/kernel/xbox_memory_layout.h
 +++ b/src/kernel/xbox_memory_layout.h
 @@ -182,6 +182,11 @@ void xbox_Nv2aFrameCounterFlip(void);

@@ -3,27 +3,52 @@
 The rendering architecture is in [RENDERING.md](RENDERING.md),
 the performance plan is in [PERFPLAN.md](PERFPLAN.md), measured
 results are in [FINDINGS.md](FINDINGS.md), and framework work is
-tracked in [UPSTREAM.md](UPSTREAM.md). State as of 2026-11-03: current
-framework tree `25a2a713738b7aabb1c21ef6720765ff93ccffea`. Supported retail
-generation `20261103-145850-21e3091e` was built in Release against that tree;
-its executable SHA-256 is
+tracked in [UPSTREAM.md](UPSTREAM.md). State as of 2026-11-10: the current
+toolkit uses xboxrecomp v0.17.0 at
+`343b6d8901723b37ce568b2418c5df4e1fe1d223`, selected post-release commits
+from #314, #319 and #320, and 34 local patches. Its verified tree is
+`131abd8d1f4559bb36dba4391e4c644925cff5df`.
+
+Supported retail generation `20261103-145850-21e3091e` is still the Release
+build from the previous framework tree
+`25a2a713738b7aabb1c21ef6720765ff93ccffea`; its executable SHA-256 is
 `0bd6a9835ebc411fb757ea510fb15dee4e4848b700ea6afef2e78a85d8904328`.
 It still reports 12 unresolved call targets and 34 untranslated instruction
-sites. Both current reviewed performance campaigns use this exact generation.
+sites. Both current reviewed performance campaigns use this exact old
+generation; do not compare their measurements with a future v0.17 generation
+without a fresh A/B/A campaign.
 
-Framework patches 0001, 0035 and 0005 were filed upstream as
-[sp00nznet/xboxrecomp#297](https://github.com/sp00nznet/xboxrecomp/pull/297),
-[sp00nznet/xboxrecomp#298](https://github.com/sp00nznet/xboxrecomp/pull/298),
-and
-[sp00nznet/xboxrecomp#300](https://github.com/sp00nznet/xboxrecomp/pull/300).
-[sp00nznet/xboxrecomp#299](https://github.com/sp00nznet/xboxrecomp/pull/299)
-is the standalone reporting correction. The raw
-`XC_VIDEO` layout and policy are filed as
-[sp00nznet/xboxrecomp#301](https://github.com/sp00nznet/xboxrecomp/issues/301).
-The firmware-exit half of patch 0032, patch 0013, and the current-main half
-of patch 0019 are the strongest next PRs to prepare. Patch 0007 is held until
-its accounting covers or deliberately excludes every exported allocator. Do
-not file another PR, amend these PRs or comment upstream without approval.
+sp00nznet/xboxrecomp#297, sp00nznet/xboxrecomp#298,
+sp00nznet/xboxrecomp#299 and sp00nznet/xboxrecomp#300 merged in v0.17.0;
+local patches 0001, 0005 and 0035 were removed. Issue
+[sp00nznet/xboxrecomp#301](https://github.com/sp00nznet/xboxrecomp/issues/301)
+closed after v0.17.0 corrected the raw `XC_VIDEO` encoding. Selected
+sp00nznet/xboxrecomp#320 supplies exact-value widescreen and 480p opt-ins.
+sp00nznet/xboxrecomp#314 and sp00nznet/xboxrecomp#319 are also selected and
+validated. sp00nznet/xboxrecomp#315 remains unselected because the 32-bit
+MSVC differential test found 2,643 signed 16-bit `IDIV` mismatches.
+
+The next framework completion gate is a fresh retail generation and focused
+bring-up on tree `131abd8d1f4559bb36dba4391e4c644925cff5df`; until then the
+old generation remains the supported measurement baseline. Patch 0037's
+one-line Windows raster diagnostic correction is the strongest small upstream
+candidate, followed by the software-interrupt ABI fix, immediate-entry guard,
+firmware-exit half of patch 0032, patch 0013, and the current-main half of
+patch 0019. Patch 0007 is held until its accounting covers or deliberately
+excludes every exported allocator. Do not file another PR, amend an existing
+PR or comment upstream without approval.
+
+A 2026-11-10 Blood Wake refresh compared the recorded adaptation baseline
+v0.2.4 at `e631edddfe56d22344e9f696923aeb6d78a9e7ba` with public v0.3.3 at
+`6292340705d9b863351a45ba160174a346a81688`, ten commits later. The recorded
+checkout remains on `e631eddd`; the newer revision was reviewed only as prior
+art and still fingerprints xboxrecomp v0.16.0. No code was imported. The
+strongest small generic candidate is its foreground-only display-awake
+policy; shader preparation and native fixed-function work need title evidence
+and parity fixtures, while audio, latency, HDR, and Direct3D 12 work remain
+deferred. See
+[FINDINGS](FINDINGS.md#blood-wake-v025-v033-refresh) and the new
+[UPSTREAM candidates](UPSTREAM.md#performance-and-gpu-back-end-candidates).
 
 ## Current boundary
 
@@ -252,14 +277,17 @@ crackly, mono-sounding dialogue/gunfire report failed its listening gate;
 Simple stereo fold-down is now the recommended default. The licence decision
 is recorded under "Decisions" at the end.
 
-Blood Wake is the main source, as it was for the renderer. It pins the same
-xboxrecomp base, and its checkout is in `.deps/bloodwake-recomp` at
-`e631edddfe56d22344e9f696923aeb6d78a9e7ba`. Follow the AGENTS rules when
-adapting it: copy only generic code, keep the MIT notice, add the files to
-`THIRD_PARTY_NOTICES.md`, and name the source in the UPSTREAM entry. Its
-title-specific hooks, addresses and Remastered features do not apply. Its
-`xemu_dsp` directory is GPL-2.0-or-later; adopting it also means choosing
-this project's licence (see C4).
+Blood Wake remains the main prior-art source, as it was for the renderer. The
+adapted-code baseline is the checkout in `.deps/bloodwake-recomp` at
+`e631edddfe56d22344e9f696923aeb6d78a9e7ba`; the latest reviewed source is
+v0.3.3 at `6292340705d9b863351a45ba160174a346a81688`. Both use the older
+xboxrecomp v0.16.0 base, not Brute Force's current v0.17.0 tree. Follow the
+AGENTS rules when adapting it: copy only generic code, preserve the applicable
+notice, add new adaptations to `THIRD_PARTY_NOTICES.md`, and name the exact
+source revision in the UPSTREAM entry. Its title-specific hooks, addresses
+and Remastered features do not apply. Its `xemu_dsp` directory is
+GPL-2.0-or-later; adopting it also means choosing this project's licence
+(see C4).
 
 ## Work cadence
 
@@ -344,8 +372,11 @@ GPU methods in the CPU-path census.
    default. Establish first whether the unsupported format affects any
    visible pixels.
 7. **Points, lines and other dropped primitives.** Use the A1 inventory to
-   establish whether the title draws any, then adapt Blood Wake's vertex
-   program point-size output and sprite path only if it does.
+   establish whether the title draws any. Blood Wake v0.3.1 now keeps
+   eligible point batches on the GPU and expands point sprites there, but it
+   does not solve Brute Force's observed line-list drops. Adapt its optional
+   point-size/sprite contract only if a visible point route is established;
+   investigate the 174 recorded line-list requests separately.
 8. **GPU window clipping.** Validate it in gameplay, then make it the default
    if no regression remains.
 
@@ -548,11 +579,16 @@ artifacts that the fixtures do not cover, and G5 is recorded.
    stereo reversal, spatial/reverb behavior, and cutscene synchronization.
 4. Repeat host-continuity probes only if the listening route reaches a
    materially different audio-heavy scene or exposes a symptom.
-5. Patch 0035 is isolated and filed as
-   [sp00nznet/xboxrecomp#298](https://github.com/sp00nznet/xboxrecomp/pull/298);
-   do not bundle follow-up changes with the external-DSP series. Patches
-   0030-0034 still require the generic pieces and policy changes to be split
-   before upstream review.
+5. The mono-HRTF correction merged as
+   [sp00nznet/xboxrecomp#298](https://github.com/sp00nznet/xboxrecomp/pull/298)
+   and local patch 0035 was removed; do not bundle follow-up changes with the
+   external-DSP series. Patches 0030-0034 still require the generic pieces and
+   policy changes to be split before upstream review.
+6. Do not import Blood Wake v0.3.0's native DSP, WASAPI path, or bit-exact hot
+   loops while audio is deferred. If work resumes, first assess its
+   off-thread device-rebuild and MMCSS policy against the existing XAudio2
+   reference, then consider native DSP only with interpreter lockstep and the
+   existing GPL obligations.
 
 *Done when:* after audio work resumes, a human listener signs off the fixed
 Simple scene list above, the Accurate defect is either fixed or remains
@@ -619,10 +655,19 @@ mainly where they gate 4K, widescreen and audio.
 - Investigate the small differences between content-matched cold/warm
   stationary captures and measure gameplay compile stutter. Synthetic and
   title cold/warm timing is recorded in FINDINGS; Blood Wake's `bw_pscache.c`
-  is prior art. Vertex and other shaders are not cached.
+  is prior art. Vertex and other shaders are not cached. Blood Wake v0.3.1
+  now observes every vertex program through a title-specific creation wrapper
+  and precompiles raw, gathered, point, and fixed-function variants during
+  loading. Reuse the cache/preparation concept only through Brute Force's own
+  routes and identities; do not copy its wrapper addresses or shader groups.
 - Investigate the intermittent loading hang, including the stalled candidate
   boot. Re-check upstream overlap and coordinate with Blood Wake's authors
   before preparing a contribution; do not file or comment without approval.
+- After the fresh v0.17 retail bring-up, optionally prepare the independent
+  foreground-only display-awake candidate. Keep it behind a default-off
+  `RECOMP_*` switch, release the hold when backgrounded, minimized, or closed,
+  surface API failures, and cover the Windows window-state transitions in a
+  synthetic fixture before changing launcher policy.
 
 ## E. True Hor+ widescreen (investigation complete; implementation pending)
 

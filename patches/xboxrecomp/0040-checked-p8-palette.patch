@@ -1,0 +1,392 @@
+diff --git a/docs/technical/pushbuffer-executor.md b/docs/technical/pushbuffer-executor.md
+index 7a06c0f..bf793e7 100644
+--- a/docs/technical/pushbuffer-executor.md
++++ b/docs/technical/pushbuffer-executor.md
+@@ -207,6 +207,17 @@ contiguous window); a read outside it returns no vertex and the batch is dropped
+ All calls come from the NV2A poll thread, one at a time, so a back end can
+ create its window and device lazily and pump messages from `flip`.
+ 
++P8 texture metadata includes the programmed 32, 64, 128 or 256 palette
++entries; zero in a caller-constructed `Nv2aTexture` means the previous
++256-entry default. Out-of-range indices are rejected, not wrapped or used to
++read past that range. The CPU rasterizer uses its existing failed-sample
++fallback; whole-texture P8 decoding reports failure without changing the
++output. `nv2a_backend_decode_p8_data` accepts explicit source, palette and
++output extents for stable caller-owned snapshots. On Windows the guest-memory
++whole-texture decoder also rejects inaccessible pages without consuming a
++guard. These checks do not determine undocumented NV2A out-of-range behaviour
++or discover an unreported suballocation boundary.
++
+ Things a back end should get right. These come from a Direct3D 11 back end
+ written against this interface for one title; that back end is not in this
+ tree, so treat them as advice from one implementation, not as tested behaviour
+diff --git a/src/kernel/nv2a_backend.h b/src/kernel/nv2a_backend.h
+index 446a300..493fa59 100644
+--- a/src/kernel/nv2a_backend.h
++++ b/src/kernel/nv2a_backend.h
+@@ -27,6 +27,7 @@
+ #ifndef NV2A_BACKEND_H
+ #define NV2A_BACKEND_H
+ 
++#include <stddef.h>
+ #include <stdint.h>
+ #include "nv2a_window_clip.h"
+ 
+@@ -55,8 +56,19 @@ typedef struct {
+      * 16-23). A back end that ignores them samples level 0. */
+     uint32_t levels, filter;
+     uint32_t palette;           /* guest address of the P8 palette, or 0 */
++    /* Programmed P8 entries: 32, 64, 128 or 256. Zero retains the old
++     * interface's 256-entry assumption for callers constructing this type. */
++    uint32_t palette_entries;
+ } Nv2aTexture;
+ 
++static inline uint32_t nv2a_p8_palette_entries(uint32_t entries)
++{
++    if (!entries)
++        return 256;
++    return entries == 32 || entries == 64 || entries == 128 || entries == 256
++         ? entries : 0;
++}
++
+ typedef struct {
+     float    x, y, z;           /* surface pixels; z as the title produced it */
+     float    rhw;               /* 1/w, 1 for pre-transformed batches */
+@@ -118,9 +130,20 @@ void nv2a_backend_register_with_present_sync(const Nv2aBackend *backend,
+ 
+ /* Decode a whole texture to 0xAARRGGBB, row-major, width*height entries.
+  * Handles every format the executor can sample (swizzled, linear, DXT).
+- * Returns 0 if the format is not supported. */
++ * Returns 0 if the format or a P8 index is not supported. For P8, failure
++ * leaves argb_out unchanged. On Windows, inaccessible P8 pages are rejected
++ * without consuming a guard page. */
+ int nv2a_backend_decode_texture(const Nv2aTexture *tex, uint32_t *argb_out);
+ 
++/* Decode a single swizzled P8 level from caller-owned, stable snapshots.
++ * Both input sizes and the output capacity are in bytes/texels respectively.
++ * Rejects malformed dimensions, short ranges and any out-of-range index
++ * before writing output; no NV2A hardware behaviour is assumed. */
++int nv2a_backend_decode_p8_data(const Nv2aTexture *tex,
++                                const void *indices, size_t index_bytes,
++                                const void *palette, size_t palette_bytes,
++                                uint32_t *argb_out, size_t output_texels);
++
+ /* Where BACK_END_WRITE_SEMAPHORE_RELEASE (0x1D70) values land: the guest VA
+  * of the semaphore the title reads GPU progress from (for XDK D3D, the
+  * pointer at device+0x30). The executor writes each release there once it
+diff --git a/src/kernel/nv2a_pb_exec.c b/src/kernel/nv2a_pb_exec.c
+index 0e29e3f..2876940 100644
+--- a/src/kernel/nv2a_pb_exec.c
++++ b/src/kernel/nv2a_pb_exec.c
+@@ -295,6 +295,7 @@ typedef struct {
+     uint32_t color;                     /* NV097 colour-format code      */
+     uint32_t addr_u, addr_v;            /* wrap mode per axis            */
+     uint32_t palette;                   /* guest address of the CLUT, P8 */
++    uint32_t palette_entries;           /* zero means legacy 256 entries */
+     uint32_t levels;                    /* mip levels, from FORMAT       */
+     uint32_t filter;                    /* SET_TEXTURE_FILTER            */
+     uint32_t border;                    /* SET_TEXTURE_BORDER_COLOR      */
+@@ -1059,12 +1060,91 @@ static void current_render_state(Nv2aRenderState *r)
+ 
+ static int sample_texture(uint32_t u, uint32_t v, uint32_t *argb);
+ 
++int nv2a_backend_decode_p8_data(const Nv2aTexture *tex,
++                                const void *indices, size_t index_bytes,
++                                const void *palette, size_t palette_bytes,
++                                uint32_t *argb_out, size_t output_texels)
++{
++    const uint8_t *src = (const uint8_t *)indices;
++    const uint8_t *pal = (const uint8_t *)palette;
++    uint32_t entries, x, y;
++    size_t count, i;
++
++    if (!tex || tex->color != 0x0B || !src || !pal || !argb_out ||
++        !tex->width || !tex->height || tex->width > 4096 || tex->height > 4096 ||
++        (tex->width & (tex->width - 1)) || (tex->height & (tex->height - 1)))
++        return 0;
++    entries = nv2a_p8_palette_entries(tex->palette_entries);
++    count = (size_t)tex->width * tex->height;
++    if (!entries || index_bytes < count || palette_bytes < (size_t)entries * 4 ||
++        output_texels < count)
++        return 0;
++    for (i = 0; i < count; ++i)
++        if (src[i] >= entries)
++            return 0;
++    for (y = 0; y < tex->height; ++y)
++        for (x = 0; x < tex->width; ++x) {
++            size_t index = swizzle_offset(x, y, tex->width, tex->height);
++            memcpy(&argb_out[(size_t)y * tex->width + x],
++                   pal + (size_t)src[index] * 4, 4);
++        }
++    return 1;
++}
++
++static int decode_p8_guest(const Nv2aTexture *tex, uint32_t *out)
++{
++    uintptr_t offset = (uintptr_t)xbox_GetMemoryOffset();
++    uint32_t entries = nv2a_p8_palette_entries(tex->palette_entries);
++    size_t count, pal_bytes;
++    uint8_t *snapshot;
++    int ok;
++
++    if (!entries || !tex->palette || !tex->width || !tex->height ||
++        tex->width > 4096 || tex->height > 4096 ||
++        (tex->width & (tex->width - 1)) || (tex->height & (tex->height - 1)))
++        return 0;
++    count = (size_t)tex->width * tex->height;
++    pal_bytes = (size_t)entries * 4;
++    if (!guest_span_ok(tex->offset, (uint32_t)count) ||
++        !guest_span_ok(tex->palette, (uint32_t)pal_bytes) ||
++        offset > UINTPTR_MAX - tex->offset || offset > UINTPTR_MAX - tex->palette ||
++        count > UINTPTR_MAX - (offset + tex->offset) ||
++        pal_bytes > UINTPTR_MAX - (offset + tex->palette))
++        return 0;
++    snapshot = (uint8_t *)malloc(count + pal_bytes);
++    if (!snapshot)
++        return 0;
++#if defined(_WIN32)
++    {
++        SIZE_T read = 0;
++        ok = ReadProcessMemory(GetCurrentProcess(), (const void *)(offset + tex->offset),
++                               snapshot, count, &read) && read == count;
++        read = 0;
++        ok = ok && ReadProcessMemory(GetCurrentProcess(), (const void *)(offset + tex->palette),
++                                     snapshot + count, pal_bytes, &read) && read == pal_bytes;
++    }
++#else
++    memcpy(snapshot, (const void *)(offset + tex->offset), count);
++    memcpy(snapshot + count, (const void *)(offset + tex->palette), pal_bytes);
++    ok = 1;
++#endif
++    if (ok)
++        ok = nv2a_backend_decode_p8_data(tex, snapshot, count, snapshot + count,
++                                         pal_bytes, out, count);
++    free(snapshot);
++    return ok;
++}
++
+ int nv2a_backend_decode_texture(const Nv2aTexture *tex, uint32_t *argb_out)
+ {
+     Texture saved = s_gpu.texs[0];
+     uint32_t x, y;
+     int ok = 1;
+ 
++    if (!tex || !argb_out)
++        return 0;
++    if (tex->color == 0x0B)
++        return decode_p8_guest(tex, argb_out);
+     s_gpu.texs[0].offset = tex->offset;
+     s_gpu.texs[0].width  = tex->width;
+     s_gpu.texs[0].height = tex->height;
+@@ -1073,6 +1153,7 @@ int nv2a_backend_decode_texture(const Nv2aTexture *tex, uint32_t *argb_out)
+     s_gpu.texs[0].addr_u = 3;
+     s_gpu.texs[0].addr_v = 3;
+     s_gpu.texs[0].palette = tex->palette;
++    s_gpu.texs[0].palette_entries = tex->palette_entries;
+     s_gpu.texs[0].levels = 1;
+     s_gpu.texs[0].filter = 0;
+     s_gpu.texs[0].cube   = 0;
+@@ -1431,11 +1512,15 @@ static int sample_tex(const Texture *t, uint32_t face_offset,
+     /* 8-bit palette index, swizzled. Burnout 3 draws its logo and frontend
+      * header art this way; without a case every such quad came out as the
+      * unsupported-format fill, a white box where the logo should be. */
+-    case 0x0B:                                      /* SZ_I8_A8R8G8B8 */
+-        if (!t->palette)
++    case 0x0B: {                                    /* SZ_I8_A8R8G8B8 */
++        uint32_t entries = nv2a_p8_palette_entries(t->palette_entries);
++        uint32_t index = p[u];
++        uint64_t address = (uint64_t)t->palette + (uint64_t)index * 4;
++        if (!t->palette || !entries || index >= entries || !guest_span_ok(address, 4))
+             return 0;
+-        *argb = ((const uint32_t *)(mem + t->palette))[p[u]];
++        memcpy(argb, mem + (size_t)address, 4);
+         return 1;
++    }
+ 
+     /* 32-bit, other channel orders. The name gives the byte order from the
+      * top of the dword down, so each is a permutation of the same four. */
+@@ -2431,6 +2516,7 @@ static void backend_flush(int textured)
+         tex.levels = tex_size_from_format(tex.color) ? s_gpu.texs[0].levels : 1;
+         tex.filter = s_gpu.texs[0].filter;
+         tex.palette = s_gpu.texs[0].palette;
++        tex.palette_entries = s_gpu.texs[0].palette_entries;
+         batch.texture = &tex;
+     }
+     s_backend->draw(&surf, &batch);
+@@ -2485,6 +2571,7 @@ static void copy_texture(const Texture *t, Nv2aTexture *o)
+     o->levels = tex_size_from_format(t->color) ? t->levels : 1;
+     o->filter = t->filter;
+     o->palette = t->palette;
++    o->palette_entries = t->palette_entries;
+ }
+ 
+ /* The batch state an extended back end needs besides the vertices. */
+@@ -4996,6 +5083,7 @@ static void tex_stage_method(uint32_t method, uint32_t param)
+     case NV097_SET_TEXTURE_PALETTE:
+         /* The low six bits carry the DMA context and the entry count. */
+         t->palette = dma_resolve(param & ~0x3Fu);
++        t->palette_entries = 256u >> ((param >> 2) & 3u);
+         break;
+     case NV097_SET_TEXTURE_ADDRESS:
+         /* Four bits per axis: 1 wrap, 2 mirror, 3 clamp-to-edge, 4 border
+diff --git a/tests/nv2a_ffp_backend/nv2a_ffp_backend_test.c b/tests/nv2a_ffp_backend/nv2a_ffp_backend_test.c
+index 487ec13..f4b9e29 100644
+--- a/tests/nv2a_ffp_backend/nv2a_ffp_backend_test.c
++++ b/tests/nv2a_ffp_backend/nv2a_ffp_backend_test.c
+@@ -22,13 +22,18 @@
+ #include <stdlib.h>
+ #include <string.h>
+ #include "nv2a_backend.h"
++#include "nv2a_backend_ext.h"
+ #include "nv2a_backend_fixture.h"
++#if defined(_WIN32)
++#include <windows.h>
++#endif
+ 
+ #define MEM_BYTES 0x10000u
+ static uint8_t s_mem[MEM_BYTES];
++static uint8_t *s_mem_base = s_mem;
+ 
+ /* ---- what the executor expects the runtime to provide ------------------ */
+-ptrdiff_t xbox_GetMemoryOffset(void) { return (ptrdiff_t)s_mem; }
++ptrdiff_t xbox_GetMemoryOffset(void) { return (ptrdiff_t)s_mem_base; }
+ uint32_t g_xbox_image_lo, g_xbox_image_hi;
+ uint32_t g_xbox_stack_base, g_xbox_stack_size;   /* #189 made the stack placement runtime state */
+ uint32_t xbox_ContiguousAllocatedBytes(void) { return 0; }
+@@ -69,6 +74,101 @@ static int s_fail;
+ #define CHECK(c) do { if (!(c)) { printf("FAIL line %d: %s\n", __LINE__, #c); s_fail = 1; } } while (0)
+ static int near_(float a, float b) { return fabsf(a - b) < 1e-3f; }
+ 
++static Nv2aXBatch s_extended;
++static void extended_draw(const Nv2aSurface *surf, const Nv2aXBatch *batch)
++{
++    (void)surf;
++    s_extended = *batch;
++}
++
++static void p8_decoder_tests(void)
++{
++    Nv2aTexture tex = {0};
++    uint32_t output[16], palette[256];
++    uint8_t indices[16];
++    unsigned code, i;
++
++    tex.offset = 0x7000;
++    tex.palette = 0x7400;
++    tex.width = tex.height = 4;
++    tex.color = 0x0B;
++    for (i = 0; i < 256; ++i)
++        palette[i] = 0xFF000000u | i;
++    for (code = 0; code < 4; ++code) {
++        unsigned entries = 256u >> code;
++        tex.palette_entries = entries;
++        memset(indices, entries - 1, sizeof indices);
++        memcpy(s_mem + tex.offset, indices, sizeof indices);
++        memcpy(s_mem + tex.palette, palette, entries * 4);
++        CHECK(nv2a_backend_decode_texture(&tex, output));
++        for (i = 0; i < 16; ++i)
++            CHECK(output[i] == palette[entries - 1]);
++        CHECK(nv2a_backend_decode_p8_data(&tex, indices, sizeof indices,
++                                          palette, entries * 4, output, 16));
++        CHECK(!nv2a_backend_decode_p8_data(&tex, indices, sizeof indices - 1,
++                                           palette, entries * 4, output, 16));
++        CHECK(!nv2a_backend_decode_p8_data(&tex, indices, sizeof indices,
++                                           palette, entries * 4 - 1, output, 16));
++        CHECK(!nv2a_backend_decode_p8_data(&tex, indices, sizeof indices,
++                                           palette, entries * 4, output, 15));
++        if (entries < 256) {
++            indices[15] = (uint8_t)entries;
++            memcpy(s_mem + tex.offset, indices, sizeof indices);
++            for (i = 0; i < 16; ++i)
++                output[i] = 0x12345678u;
++            CHECK(!nv2a_backend_decode_texture(&tex, output));
++            CHECK(!nv2a_backend_decode_p8_data(&tex, indices, sizeof indices,
++                                               palette, entries * 4, output, 16));
++            for (i = 0; i < 16; ++i)
++                CHECK(output[i] == 0x12345678u);
++        }
++    }
++    tex.palette_entries = 0;
++    memset(indices, 255, sizeof indices);
++    CHECK(nv2a_backend_decode_p8_data(&tex, indices, sizeof indices,
++                                      palette, sizeof palette, output, 16));
++    CHECK(output[0] == palette[255]);
++    tex.palette_entries = 33;
++    CHECK(!nv2a_backend_decode_p8_data(&tex, indices, sizeof indices,
++                                       palette, sizeof palette, output, 16));
++    tex.palette_entries = 32;
++    tex.width = 3;
++    CHECK(!nv2a_backend_decode_p8_data(&tex, indices, sizeof indices,
++                                       palette, sizeof palette, output, 16));
++
++#if defined(_WIN32)
++    {
++        DWORD old, ignored;
++        MEMORY_BASIC_INFORMATION info;
++        uint8_t *pages = (uint8_t *)VirtualAlloc(NULL, 8192, MEM_RESERVE | MEM_COMMIT,
++                                                 PAGE_READWRITE);
++        CHECK(pages != NULL);
++        if (pages) {
++            s_mem_base = pages;
++            tex.width = tex.height = 4;
++            tex.offset = 0x100;
++            tex.palette = 4096 - 32 * 4;
++            memset(pages + tex.offset, 31, 16);
++            memcpy(pages + tex.palette, palette, 32 * 4);
++            CHECK(VirtualProtect(pages + 4096, 4096, PAGE_READWRITE | PAGE_GUARD, &old));
++            CHECK(nv2a_backend_decode_texture(&tex, output));
++            CHECK(output[0] == palette[31]);
++            memset(pages + tex.offset, 32, 16);
++            output[0] = 0x12345678u;
++            CHECK(!nv2a_backend_decode_texture(&tex, output));
++            CHECK(output[0] == 0x12345678u);
++            tex.palette = 4096 - 16 * 4;
++            CHECK(!nv2a_backend_decode_texture(&tex, output));
++            CHECK(VirtualQuery(pages + 4096, &info, sizeof info) == sizeof info);
++            CHECK((info.Protect & PAGE_GUARD) != 0);
++            CHECK(VirtualProtect(pages + 4096, 4096, old, &ignored));
++            CHECK(VirtualFree(pages, 0, MEM_RELEASE));
++            s_mem_base = s_mem;
++        }
++    }
++#endif
++}
++
+ int main(void)
+ {
+     uint32_t i;
+@@ -269,6 +369,34 @@ int main(void)
+     CHECK(s_be.flips == 1);
+     CHECK(s_be.thread_mismatches == 0 && s_be.dropped_events == 0);
+ 
++    p8_decoder_tests();
++    /* Each stage's register length must survive both backend interfaces. */
++    for (i = 0; i < 3; ++i) {
++        putf(0x4800 + i * 8, 0);
++        putf(0x4804 + i * 8, 0);
++    }
++    m(0x1744, 0x4800);
++    m(0x1784, 2 | (2 << 4) | (8 << 8));
++    m(0x1B00, 0x7000);
++    m(0x1B04, 2u << 4 | 0x0Bu << 8 | 1u << 16 | 2u << 20 | 2u << 24);
++    for (i = 0; i < 4; ++i) {
++        m(0x1B20, 0x7400 | (i << 2));
++        m(0x17FC, 5); m(0x1810, 2u << 24); m(0x17FC, 0);
++        CHECK(s_be.textured && s_be.texture.palette_entries == (256u >> i));
++    }
++    {
++        Nv2aBackendExt ext = {0};
++        ext.draw = extended_draw;
++        nv2a_backend_ext_register(&ext);
++        m(0x1B40, 0x7000);
++        m(0x1B44, 2u << 4 | 0x0Bu << 8 | 1u << 16 | 2u << 20 | 2u << 24);
++        m(0x1B60, 0x7400 | (2u << 2));
++        m(0x17FC, 5); m(0x1810, 2u << 24); m(0x17FC, 0);
++        CHECK(s_extended.tex_valid[0] && s_extended.tex[0].palette_entries == 32);
++        CHECK(s_extended.tex_valid[1] && s_extended.tex[1].palette_entries == 64);
++        nv2a_backend_ext_register(NULL);
++    }
++
+     if (!s_fail)
+         printf("nv2a fixed-function path through a back end: ok\n");
+     return s_fail;

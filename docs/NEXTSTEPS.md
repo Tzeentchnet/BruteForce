@@ -3,11 +3,11 @@
 The rendering architecture is in [RENDERING.md](RENDERING.md),
 the performance plan is in [PERFPLAN.md](PERFPLAN.md), measured
 results are in [FINDINGS.md](FINDINGS.md), and framework work is
-tracked in [UPSTREAM.md](UPSTREAM.md). State as of 2026-11-10: the current
+tracked in [UPSTREAM.md](UPSTREAM.md). The current
 toolkit uses xboxrecomp v0.17.0 at
 `343b6d8901723b37ce568b2418c5df4e1fe1d223`, selected post-release commits
-from #314, #319 and #320, and 35 local patches. Its isolated verified tree is
-`86dcf92c99a87940b3346b3cd3b55b8f6145a881`.
+from #314, #319 and #320, and 40 local patches. Its isolated and independently
+replayed tree is `e9c4349117b38482bd8ec3a64556996f549682b1`.
 
 Supported retail generation `20261111-002138-a9dbc18a` is a Release build on
 the earlier v0.17 tree `131abd8d1f4559bb36dba4391e4c644925cff5df`;
@@ -57,10 +57,11 @@ v0.2.4 at `e631edddfe56d22344e9f696923aeb6d78a9e7ba` with public v0.3.3 at
 `6292340705d9b863351a45ba160174a346a81688`, ten commits later. The recorded
 checkout remains on `e631eddd`; the newer revision was reviewed only as prior
 art and still fingerprints xboxrecomp v0.16.0. No code was imported. The
-strongest small generic candidate is its foreground-only display-awake
-policy; shader preparation and native fixed-function work need title evidence
-and parity fixtures, while audio, latency, HDR, and Direct3D 12 work remain
-deferred. See
+independent foreground-only display-awake policy is now implemented and
+synthetic-tested behind a default-off switch. Shader-preparation diagnostics
+are bounded and opt-in; actual precompilation and native fixed-function work
+still need title evidence and parity fixtures. Audio, latency, HDR, and
+Direct3D 12 work remain deferred. See
 [FINDINGS](FINDINGS.md#blood-wake-v025-v033-refresh) and the new
 [UPSTREAM candidates](UPSTREAM.md#performance-and-gpu-back-end-candidates).
 
@@ -124,12 +125,16 @@ deferred. See
   `RECOMP_GPU_TEX_CACHE_APPROX=1` and can miss rewrites. Synthetic WARP and
   hardware fixtures cover same-frame and sparse-blind-spot changes. The
   memory and runtime cost of the new default has not been isolated.
-- Renderer-local P8 uploads honor the programmed 32/64/128/256-entry lengths,
-  validate sampled indices, and reject known short or unreadable allocations.
-  Guard-page and cube fixtures pass on WARP and hardware, but actual NV2A
-  out-of-range behavior, untracked suballocations, GPU render-target aliases,
-  and concurrent guest writes remain unresolved. The CPU reference path is
-  unchanged; these synthetic results do not establish hardware equivalence.
+- P8 metadata and the framework CPU decoder now preserve programmed
+  32/64/128/256-entry lengths; invalid indices fail deterministically rather
+  than reading beyond the palette. Renderer inputs use checked snapshots,
+  allocation/mapping identities and, optionally, explicit suballocation
+  bounds. Compatible colour aliases reconcile guest changes, and a bound
+  render target is sampled from an ordered GPU copy; unsafe GPU-dirty overlaps
+  are rejected. Synthetic guard, reuse, reset and alias cases exercise these
+  paths; actual NV2A out-of-range behavior, unregistered suballocations and
+  concurrent-write atomicity remain unresolved. These results do not establish
+  retail or hardware equivalence.
 - Renderer-device loss is reported and stops execution instead of silently
   completing outstanding GPU work. Mocked removed/reset/hung/driver and
   pending-query cases pass. The separate presenter's loss and resource
@@ -676,8 +681,13 @@ Stereo remains the acceptance target.
 
 ## D. Remaining pipeline and compatibility work
 
-These items are unchanged in substance from earlier plans; they matter now
-mainly where they gate 4K, widescreen and audio.
+The directly implementable texture, P8, checked-copy, diagnostic and
+display-awake candidates below are synthetic-tested; their external
+correctness and measurement gates remain open. The complete D3D11 matrix
+passed 377 cases with WARP and the RTX 5070 hardware adapter; the framework
+memory, decoder, PFB and display-awake fixtures passed 17 cases, and the
+separate synchronization, presenter, pushbuffer and toolkit suite passed 61.
+These are synthetic results, not a title comparison.
 
 - Continue the guest surface-read investigation with the null backend and
   `BRUTEFORCE_SURFACE_GUARD`, covering stationary and movement in one
@@ -694,26 +704,36 @@ mainly where they gate 4K, widescreen and audio.
   frequent busy shared slot and remaining packed-depth conversions. The
   current state-aware guard is conservative for potentially writing draws;
   prove fragment-level changes before attempting to reuse those conversions.
-- The final rebuilt default renderer now has reviewed world captures,
-  caller-attributed profiles and detailed validation/cache counters. First
-  isolate synchronous versus ordered asynchronous visibility in an
-  alternating campaign with all other options and instrumentation fixed.
-  Then address repeated page-query validation with checked accesses that
-  retain guard-page, reprotection, allocation and reset detection. Retain a
-  normal uninstrumented baseline because the counter switch adds timing and
-  atomic-accounting overhead.
+- Checked texture and colour-shadow reads replace their repeated
+  page-query-then-dereference validation; colour-clear mirrors and readbacks
+  use checked, exception-guarded writes. Guard, reprotection, tracked
+  allocation reuse, logical registration, mapping reset and observed
+  colour-shadow races have synthetic coverage. GPU-owned short-pitch colour
+  aliases and freed tracked surfaces are rejected; a layout replacement with
+  uncertain ownership or a failed/partial write cannot be sampled until a
+  successful full clear or readback. A failed tracked readback stops the process
+  before the flip completes.
+  Concurrent reprotection can still consume a newly installed guard or cause a
+  partial write after the preflight.
+  `guest_word` and
+  depth-seed validation still use their existing mechanisms. Rebenchmark the
+  current implementation on one generation with matched scene/input and
+  alternating A/B/A runs; retain an uninstrumented baseline because detailed
+  counters add overhead.
 - First measure the event-driven flush acknowledgement alone with three
   poll/event pairs, caller profiles, fixed counters and reviewed world
   captures. Explain its high smoke-run timer/recheck counts and keep it
   default-off until G2, G3 and correctness gates pass. Only then add the idle
   NV2A-thread wait and segment-at-a-time walking behind separate switches;
   compare the combined milestone and isolate switches to diagnose regressions.
-- Extend the synthetic cache and P8 fixes in the current boundary to tracked
-  guest writes, render-target aliases and untracked suballocations; establish
-  NV2A out-of-range palette behavior and preserve palette length through the
-  framework's CPU decoder. Validate on the title and additional drivers, and
-  compare the new cache's cost with an A/B/A campaign before upstreaming.
-  Implement and test device/resource recreation for both devices without
+- Validate the checked cache, explicit logical-bound registrations, alias and
+  layout-replacement behavior and framework P8 decoder on the title and
+  additional drivers;
+  determine NV2A out-of-range palette behavior and an ordered guest-write
+  contract. Unknown suballocations cannot be inferred, and snapshots alone
+  do not serialize concurrent writers. Compare cache cost with an A/B/A
+  campaign before upstreaming. Implement and test device/resource recreation
+  for both devices without
   violating pending flush, semaphore, report or flip ordering. The synthetic
   fail-stop paths are not recovery or real-driver fault coverage. Mipmaps are
   now wanted for 4K (B10); LOD-transition enhancements beyond that remain
@@ -736,13 +756,15 @@ mainly where they gate 4K, widescreen and audio.
   loading. Reuse the cache/preparation concept only through Brute Force's own
   routes and identities; do not copy its wrapper addresses or shader groups.
 - Investigate the intermittent loading hang, including the stalled candidate
-  boot. Re-check upstream overlap and coordinate with Blood Wake's authors
-  before preparing a contribution; do not file or comment without approval.
-- After the fresh v0.17 retail bring-up, optionally prepare the independent
-  foreground-only display-awake candidate. Keep it behind a default-off
-  `RECOMP_*` switch, release the hold when backgrounded, minimized, or closed,
-  surface API failures, and cover the Windows window-state transitions in a
-  synthetic fixture before changing launcher policy.
+  boot. Default-off bounded PFB-wait and shader-preparation diagnostics and
+  bounded verification-skip reports provide evidence without satisfying a
+  wait or changing shader-worker ordering; no hang root cause is established.
+- The independent `RECOMP_DISPLAY_AWAKE=1` candidate requests a display hold
+  only for a visible foreground, non-minimized host and releases on background,
+  minimize or close. Synthetic API-substitution covers failures and window
+  transitions; hosted/standalone real-window validation and launcher policy
+  remain open. Recheck upstream overlap and coordinate before preparing any
+  contribution; do not file or comment without approval.
 
 ## E. True Hor+ widescreen (camera diagnostic implemented; mode pending)
 

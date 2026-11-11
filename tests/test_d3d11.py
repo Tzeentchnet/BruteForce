@@ -115,6 +115,70 @@ def test_detailed_performance_counters(tmp_path):
     )
 
 
+@pytest.mark.parametrize("device", [
+    "warp",
+    pytest.param("hardware", marks=pytest.mark.skipif(
+        not HARDWARE, reason="set BRUTEFORCE_TEST_D3D11_HARDWARE=1 for a hardware device")),
+])
+@pytest.mark.parametrize("decoder", ["compute", "software-texture"])
+@pytest.mark.parametrize("strict", ["0", "1"])
+def test_texture_allocation_lifetimes_and_checked_reads(tmp_path, device, decoder, strict):
+    result = render_compatibility_fixture(
+        f"gpu-texture-lifetime-{decoder}-{device}", tmp_path / "unused.raw",
+        RECOMP_GPU_TEXTURE_BOUNDS=strict,
+    )
+    assert result.returncode == 0, result.stderr
+    assert "texture lifetime, bounds and checked reads verified" in result.stdout
+
+
+@pytest.mark.parametrize("device", [
+    "warp",
+    pytest.param("hardware", marks=pytest.mark.skipif(
+        not HARDWARE, reason="set BRUTEFORCE_TEST_D3D11_HARDWARE=1 for a hardware device")),
+])
+@pytest.mark.parametrize("scale", ["", "-scale2"])
+@pytest.mark.parametrize("strict", ["0", "1"])
+def test_color_alias_validity_and_bound_target_snapshot(tmp_path, device, scale, strict):
+    result = render_compatibility_fixture(
+        f"gpu-color-alias{scale}-{device}", tmp_path / "unused.raw",
+        RECOMP_GPU_TEXTURE_BOUNDS=strict)
+    assert result.returncode == 0, result.stderr
+    assert "color surface alias validity verified" in result.stdout
+
+
+def test_texture_bounds_option_rejects_invalid_values(tmp_path):
+    result = render_compatibility_fixture(
+        "gpu-texture-lifetime-warp", tmp_path / "unused.raw",
+        RECOMP_GPU_TEXTURE_BOUNDS="invalid")
+    assert result.returncode != 0
+    assert "RECOMP_GPU_TEXTURE_BOUNDS must be 0 or 1" in result.stderr
+
+
+@pytest.mark.parametrize("event_failure", [False, True])
+def test_shader_preparation_diagnostics_are_bounded(tmp_path, event_failure):
+    mode = "gpu-vsh-shader-diag-event" if event_failure else "gpu-vsh"
+    result = render_compatibility_fixture(
+        mode, tmp_path / "shader.raw", RECOMP_GPU_SHADER_DIAG="1")
+    assert result.returncode == 0, result.stderr
+    lines = [line for line in result.stderr.splitlines() if "[GPU-SHADER]" in line]
+    assert 0 < len(lines) <= 32
+    assert any("queued key=" in line for line in lines)
+    assert any("compile-start key=" in line for line in lines)
+    assert any("prepare-ready key=" in line for line in lines)
+    if event_failure:
+        assert any("worker event creation failed" in line for line in lines)
+
+
+def test_shader_diagnostics_are_off_by_default_and_validate_option(tmp_path):
+    result = render_compatibility_fixture("gpu-vsh", tmp_path / "shader.raw")
+    assert result.returncode == 0, result.stderr
+    assert "[GPU-SHADER]" not in result.stderr
+    invalid = render_compatibility_fixture(
+        "gpu-vsh", tmp_path / "bad.raw", RECOMP_GPU_SHADER_DIAG="bad")
+    assert invalid.returncode != 0
+    assert "RECOMP_GPU_SHADER_DIAG must be 0 or 1" in invalid.stderr
+
+
 def assert_vsh_verification(result, expected_fetch=None):
     reports = re.findall(
         r"\[VSH-VERIFY\] (\d+) batches checked, (\d+) differ; "
@@ -550,6 +614,9 @@ def test_pipeline_backpressures_work_even_without_flips(tmp_path, device):
     ("queue-wait", "GetData(GPU work) failed"),
     ("queue-device", "device lost during waiting for GPU work"),
     ("readback-failure", "cannot make tracked color surface"),
+    ("readback-failure-guard", "cannot make tracked color surface"),
+    ("readback-failure-readonly", "cannot make tracked color surface"),
+    ("readback-failure-race", "changed during readback"),
     ("readback-loss", "device lost during mapping surface readback"),
 ])
 def test_pipeline_failure_never_completes_guest_visible_work(tmp_path, mode, diagnostic):

@@ -82,11 +82,15 @@ Thirty-three existing patches applied in order with ordinary
 `git apply --index`; patch 0037 corrects stale Windows serial-raster worker
 telemetry. The earlier 34-patch tree was
 `131abd8d1f4559bb36dba4391e4c644925cff5df` and passed clean reconstruction.
-The corrected 0027 fixture and added presenter-loss patch 0038 produce 35
-local patches and tree `86dcf92c99a87940b3346b3cd3b55b8f6145a881`.
-The isolated checkout's index and working files pass
-`python tools/toolkit.py --verify --checkout build\pipeline-toolkit`; this
-change did not rerun shared setup. The earlier integrated framework reported
+The previously recorded 35-patch tree was
+`86dcf92c99a87940b3346b3cd3b55b8f6145a881`; a clean local replay of that
+patch list instead produced `3978863d9bcbe6f26536315c65daa9313932c8b5`.
+The former tree object was unavailable locally, so the discrepancy has not
+been attributed to a specific change. The five additional patches 0039-0043
+produce the independently replayed and verified 40-patch tree
+`e9c4349117b38482bd8ec3a64556996f549682b1`. The isolated index and working
+files pass `python tools/toolkit.py --verify --checkout build\compat-work\replay`;
+shared setup was not rerun. The earlier integrated framework reported
 992 Python tests passed, 2 skipped and 134 subtests passed; the Release
 backend-contract, PFB-flush, GPU-audit, raster-batch and EEPROM fixtures also
 pass.
@@ -787,6 +791,9 @@ own GPU back end, an extended interface for it, and its own pacing fixes.
     not acknowledge while a flip is held. The title-specific address,
     structure checks, kickoff write and generated-function wrapper remain in
     `src/recomp_manual.c`.
+    [0042-bounded-nv2a-diagnostics.patch](../patches/xboxrecomp/0042-bounded-nv2a-diagnostics.patch)
+    adds default-off, at-most-eight prolonged-wait reports without clearing
+    the bit or altering the acknowledgement.
     *Tests:* five native helper cases and six project wrapper cases cover
     disabled, normal, spurious, lost-event/timer recovery, reuse, flip-held
     and invalid-value behavior. Fence/semaphore, interrupt, PGRAPH trap,
@@ -795,8 +802,10 @@ own GPU back end, an extended interface for it, and its own pacing fixes.
     disabled and enabled paths to consume exactly one guest return. The first
     title build stalled because that title wrapper omitted the generated
     routine's four-byte `ret` effect; this was corrected without changing the
-    framework helper. One corrected enabled movement smoke passed. A reviewed
-    alternating title comparison remains outstanding.
+    framework helper. One corrected enabled movement smoke passed. The
+    diagnostic fixture exercises off/on, bounded reports and flip-held
+    acknowledgement. A reviewed alternating title comparison remains
+    outstanding.
     *Overlap:* checked open and merged work plus the tracking index
     [sp00nznet/xboxrecomp#184](https://github.com/sp00nznet/xboxrecomp/pull/184)
     on 2026-11-03. No current change implements this handshake.
@@ -952,14 +961,14 @@ own GPU back end, an extended interface for it, and its own pacing fixes.
     *Problem:* `Nv2aTexture` omitted the P8 palette, and a stale linear
     pitch incorrectly made a swizzled or compressed texture report one mip
     level. A back end could not decode P8 or locate cube faces correctly.
-    The palette address is now passed, but the executor still discards its
-    programmed length bits. The CPU P8 sampler indexes the palette without
-    that length, so it cannot check indices against the programmed range.
+    Before the current change, the palette address was passed but the executor
+    discarded its programmed length bits; the CPU P8 sampler therefore could
+    not check indices against that range.
     *Evidence:* the Brute Force tutorial census recorded P8 and cube use;
     the CPU decoder already samples P8 through the guest palette. Synthetic
-    guarded allocations exercise all four palette lengths in the D3D11 path;
-    no short-palette safety or out-of-range hardware behavior is established
-    for the CPU path.
+    guarded allocations exercise all four palette lengths in the D3D11 path.
+    Synthetic CPU decoder cases now cover short ranges and invalid indices;
+    out-of-range hardware behavior is not established.
     *Change:* [0020-texture-metadata.patch](../patches/xboxrecomp/0020-texture-metadata.patch)
     passes the palette through both backend paths and the reference decoder,
     and preserves the programmed level count for format-sized textures.
@@ -967,25 +976,35 @@ own GPU back end, an extended interface for it, and its own pacing fixes.
     Blood Wake's `drop_stale_pitch` does, and includes mip padding in cube
     face offsets. The project renderer separately reads the raw stage
     register, snapshots the programmed palette length, and rejects invalid
-    indices and known-short or unreadable ranges. This does not fix the
-    framework's CPU decoder or prove actual hardware behavior.
+    indices and known-short or unreadable ranges.
+    [0040-checked-p8-palette.patch](../patches/xboxrecomp/0040-checked-p8-palette.patch)
+    carries the programmed length through generic state and both backend
+    interfaces, bounds CPU samples and adds a checked snapshot decoder.
+    An invalid index fails without modifying whole-decoder output; per-pixel
+    software sampling retains its failed-sample fallback. Zero length on
+    caller-constructed metadata keeps the former 256-entry default. Follow-up
+    [0043](../patches/xboxrecomp/0043-checked-snapshot-lifetimes.patch)
+    rejects input/output overlap before validating and decoding snapshots, so
+    output cannot change an index after its bounds check.
     *Tests:* CPU/GPU P8 decoding and same-frame palette rewrite, plus cube
     faces with multiple levels on WARP and hardware. Project D3D11 fixtures
     also cover guarded 32/64/128/256-entry palettes, invalid indices and
-    known-short allocations. They do not prove safety for untracked
-    suballocations, concurrent guest writes or render-target aliases.
+    known-short allocations. The framework fixture checks all programmed
+    lengths, malformed indices, guard/readability, overlapping buffers and
+    unchanged output on failure. These do not establish original-hardware
+    behavior or serialize concurrent guest writes.
     *Overlap:* [#145](https://github.com/sp00nznet/xboxrecomp/pull/145)
     added CPU P8 sampling; #184 tracks the GPU interface. Checked
-    2026-10-31. [xemu's texture code](https://github.com/xemu-project/xemu/blob/dc10b4cea96e403d30c17ed53551fdaf023bc17f/hw/xbox/nv2a/pgraph/texture.c)
+    2026-10-31; no new upstream check was made for this work.
+    [xemu's texture code](https://github.com/xemu-project/xemu/blob/dc10b4cea96e403d30c17ed53551fdaf023bc17f/hw/xbox/nv2a/pgraph/texture.c)
     derives a 32/64/128/256-entry palette length from the register; its
     OpenGL backend hashes and bounds-checks that selected range. Its
     conversion directly indexes the palette, so it does not establish
     hardware behavior for out-of-range indices.
-    *Before filing:* coordinate the backend interface with #184, preserve
-    the palette length in generic texture state and bound CPU reads, establish
+    *Before filing:* coordinate the backend interface with #184, establish
     hardware behavior for out-of-range indices, and test shorter allocations,
     cube layouts and guest-write synchronization on other titles.
-    *Status:* local patch and planned framework follow-up.
+    *Status:* local patches 0020, 0040 and 0043; synthetic-tested, not filed.
 
 25. **Support depth textures and depth-surface aliases.**
     *Problem:* the CPU reference decoder and this project's D3D11 backend
@@ -1366,10 +1385,17 @@ own GPU back end, an extended interface for it, and its own pacing fixes.
     logical surface before the first GPU draw or at flip. Scaled modes filter
     that upload into the physical target before shared submission. A detected
     guest/GPU ordering conflict is reported and preserves the GPU frame.
+    Checked snapshots now reconcile exact texture aliases as well; currently
+    bound targets use an ordered GPU copy, and ambiguous or conflicting
+    GPU-dirty overlaps reject the draw. This remains a project-side policy,
+    not a generic write-notification or synchronization contract.
     *Tests:* CPU-written colour frames survive scale 1 and scale 2, both alone
     and with a later GPU overlay. The complete D3D11 matrix passes 190 cases
     on hardware and 123 with 67 hardware cases skipped under WARP. Bounded
     scale-1 and 4.5x retail opening probes retained visible movie content.
+    Additional synthetic WARP/hardware cases cover exact aliases, guest
+    changes, partial overlap rejection and sampling a bound target. No new
+    retail run exercised the current alias logic.
     *Overlap:* checked 2026-10-31. Open
     [#285](https://github.com/sp00nznet/xboxrecomp/pull/285) establishes
     backend readback before snapshots but does not define guest writes after a
@@ -1604,27 +1630,29 @@ own GPU back end, an extended interface for it, and its own pacing fixes.
     framebuffer-window thread holding
     `ES_CONTINUOUS | ES_DISPLAY_REQUIRED` only while the top-level play window
     is foreground and not minimized, then releasing to `ES_CONTINUOUS` on
-    background, minimize, and close. Brute Force has no equivalent call. This
-    is prior-art evidence of a host policy, not a Brute Force runtime report.
-    *Change:* planned generic Windows behavior behind exact-value,
-    default-off `RECOMP_DISPLAY_AWAKE=1`. Resolve a child window to its
-    top-level host, update only on state changes, release every held state on
-    close, and log a failed `SetThreadExecutionState` call. Non-Windows
-    behavior remains unchanged. Do not copy Blood Wake's `BW_*` policy or
-    unattended-run conventions.
+    background, minimize, and close. This is prior-art evidence of a host
+    policy, not a Brute Force runtime report.
+    *Change:* [0039-foreground-display-awake.patch](../patches/xboxrecomp/0039-foreground-display-awake.patch)
+    independently implements generic Windows behavior behind exact-value,
+    default-off `RECOMP_DISPLAY_AWAKE=1`. It resolves child and foreground
+    windows to top-level hosts, updates only on state changes, releases on
+    close, and reports and retries failed API calls. Non-Windows behavior is
+    unchanged. The idea is credited to Blood Wake; no code or title-specific
+    `BW_*` policy was copied.
     *Tests:* a Windows fixture with substituted window and execution-state
-    calls should cover disabled, foreground, background, minimized,
-    restored, repeated-tick, child/host, close, and API-failure cases, and
-    prove that no stale hold survives shutdown.
+    calls covers disabled, invalid, foreground, background, minimized,
+    restored, repeated-tick, child/host, close and API-failure cases, including
+    failed acquire/release retry and shutdown.
     *Overlap:* exact PR/issue searches for `SetThreadExecutionState`,
     `ES_DISPLAY_REQUIRED`, display-awake, and screensaver behavior found no
     xboxrecomp equivalent through 2026-11-10. Blood Wake's implementation is
-    the identified prior art.
+    the identified prior art. A fresh overlap check is an external gate; no
+    upstream interaction was made for this work.
     *Before filing:* ask Blood Wake's authors whether they intend to upstream
     it, test the framework's hosted and standalone Windows topologies, decide
     whether SDL owns a separate cross-platform policy, and request approval
     before filing.
-    *Status:* planned framework candidate; no patch or upstream action.
+    *Status:* local default-off framework patch; synthetic-tested, not filed.
 
 43. **Offer fixed-function and point batches to capable GPU back ends.**
     *Problem:* the extended interface can hand vertex-program batches to a
@@ -1723,6 +1751,91 @@ own GPU back end, an extended interface for it, and its own pacing fixes.
     resizing, shutdown and pending guest-visible work on multiple drivers.
     Request approval before filing or commenting.
     *Status:* local framework patch; synthetic-tested, not prepared or filed.
+
+46. **Expose allocation lifetimes and checked texture snapshots.**
+    *Problem:* a backend caching a guest texture cannot distinguish a reused
+    tracked allocation from its previous occupant, infer a guest-managed
+    suballocation from parent pages, or safely rely on a page query followed
+    by an unchecked copy. Colour-surface output writes also need a checked
+    failure path. A CPU decoder that rereads guest memory can consume bytes
+    different from those validated by the backend.
+    *Evidence:* source inspection and synthetic guard, reprotection,
+    allocator-reuse, reset, byte-rewrite and colour-alias cases demonstrate
+    these boundaries. They are not a retail write trace or evidence that
+    concurrent snapshots are atomic.
+    *Change:* [0041-texture-snapshots-and-bounds.patch](../patches/xboxrecomp/0041-texture-snapshots-and-bounds.patch)
+    adds a checked non-P8 immutable-buffer CPU decoder, tracked heap and
+    contiguous allocation identities with remaining extents, mapping
+    generations and an explicit logical-range registry. Follow-up
+    [0043](../patches/xboxrecomp/0043-checked-snapshot-lifetimes.patch)
+    rechecks parent identity and generation during registration, recognizes
+    mirrored RAM and tiled contiguous parents, and rejects decoder
+    input/output overlap. These generic APIs are inert until used; checked
+    decoder behavior is a safety fix. The project D3D11 backend uses checked
+    snapshots and compares exact bytes by default, while
+    `RECOMP_GPU_TEXTURE_BOUNDS=1` separately opts
+    into requiring registered logical extents. Owners must unregister a
+    logical suballocation before reuse. Exact colour aliases reconcile guest
+    changes or use a bound-target GPU copy; unsafe GPU-dirty overlaps reject.
+    The Windows project backend preflights colour output and uses
+    exception-guarded writes rather than the debugger-oriented
+    `WriteProcessMemory`, which can override executable read-only protection.
+    Failed or partial output invalidates the alias; failure or an observed
+    post-copy race stops a tracked flip. Concurrent reprotection remains
+    non-atomic and may consume a newly set guard or leave a partial write.
+    *Tests:* Release framework memory-regression and decoder fixtures check
+    tracked and mirrored/tiled parent reuse, unknown parents, logical range
+    replacement, reset, input extents and overlapping decoder buffers.
+    Project WARP and hardware fixtures cover checked source and palette
+    spans, guards, reprotection, rewrites, freed and short-pitch aliases,
+    raced colour-shadow boundaries, read-only/guarded and partial colour
+    writes with retry, padded rows, and CPU/GPU decoding. They do not prove
+    race-free guest-write ordering,
+    register every title allocation, cover other platforms/drivers or measure
+    title throughput.
+    *Overlap:* the last recorded checks in this worklist cover #184 and
+    #306's backend contract on 2026-11-11 and #261/#269/#286's related
+    physical-page identity on 2026-11-10. No fresh search or upstream contact
+    was made. These references do not establish that the current APIs are
+    non-overlapping today.
+    *Before filing:* recheck current upstream, agree on cross-backend
+    ownership/write-notification and explicit suballocation lifetime, test
+    reset and concurrent writes on other platforms and titles, and run a
+    same-generation A/B/A cost and matched-image campaign. Request approval
+    before coordination or filing.
+    *Status:* local framework patches plus project-side use; synthetic-tested,
+    not prepared or filed.
+
+47. **Bound verification and stalled-work diagnostics.**
+    *Problem:* GPU vertex verification can silently skip unavailable or
+    failed readback, and a long event-driven flush wait gives little evidence
+    about its last hold state. Shader preparation may also remain pending
+    without identifying whether work was queued, compiled or failed.
+    *Evidence:* synthetic missing/failed-readback and held-flush cases
+    exercise the diagnostic paths. The existing intermittent title loading
+    hang has no established root cause.
+    *Change:* [0042-bounded-nv2a-diagnostics.patch](../patches/xboxrecomp/0042-bounded-nv2a-diagnostics.patch)
+    reports at most 16 verification skips when verification is enabled, and
+    offers default-off `RECOMP_NV2A_WAIT_DIAG=1` with at most eight
+    prolonged PFB wait reports. The project backend independently offers
+    default-off `RECOMP_GPU_SHADER_DIAG=1` with at most 32 vertex-preparation
+    events. None completes a wait, acknowledges a flush, or forces shader
+    synchronization.
+    *Tests:* the framework fixture forces 23 verification skips and verifies
+    the 16-report cap; the event-wait fixture checks off/on reporting, cap,
+    flip hold and real acknowledgement. Project fixtures check off, invalid,
+    queued, compiled, ready and injected event-creation failure diagnostics.
+    No title hang, actual device removal or prolonged real shader compile was
+    reproduced.
+    *Overlap:* previous checks through #321 and tracking index #184 were
+    recorded 2026-11-10/11; no fresh overlap search or upstream contact was
+    made for this work.
+    *Before filing:* refresh the overlap search, separate verification,
+    wait and project-backend diagnostics into independently reviewable
+    changes, validate prolonged cases and log volume on real workloads, and
+    request approval for upstream interaction.
+    *Status:* local framework patch and project diagnostics; synthetic-tested,
+    not filed.
 
 ### Open upstream work to select or coordinate with
 

@@ -39,8 +39,9 @@ To build the game and selected native fixtures in one build, repeat
 --extra-target bruteforce_gpu_shared_present_test`.
 
 `setup` installs the pinned framework and fixes in `.deps\xboxrecomp`. It
-refuses to overwrite a different or modified checkout. `extract` verifies the
-executable before extraction and compares existing files byte-for-byte instead
+refuses to overwrite a different or modified checkout; preserve and move an
+older checkout before rerunning setup for the current patch set. `extract`
+verifies the executable before extraction and compares existing files byte-for-byte instead
 of overwriting them. `generate` analyzes all executable sections, recovers
 ABIs, includes the observed function entries in `fingerprints\retail-seeds.json`,
 and writes each run to a fresh directory. It records logs and a manifest under
@@ -104,6 +105,14 @@ Alt+Enter or F11 toggles fullscreen during play. Window sizing and display
 filtering do not themselves increase internal resolution or add widescreen.
 If the D3D11 presenter falls back to GDI, its filtering and VSync settings do
 not apply.
+
+For controller-only play, the independent Windows experiment
+`RECOMP_DISPLAY_AWAKE=1` requests that the display stay awake only while the
+visible top-level game host is foreground and not minimized. It releases the
+request when backgrounded, minimized, closed or shut down. Unset or `0`
+leaves this behavior off; other values log an error and leave it off. Windows
+API failures are reported and retried on subsequent state updates. This is
+not a launcher default and has only synthetic window-state coverage so far.
 
 The Graphics tab selects the default D3D11 renderer or the CPU reference,
 internal resolution, GPU or CPU vertex and texture processing, and the
@@ -375,13 +384,21 @@ renderer uses the D3DCompiler runtime
 (`d3dcompiler_47.dll`, part of Windows 10 and 11). `RECOMP_GPU_VSH=0` keeps
 vertex programs on the CPU. `RECOMP_GPU_VSH_VERIFY=<n>` compares every nth
 GPU-program batch with the CPU interpreter; fully culled batches are logged
-as skipped because they have no GPU vertex output. Common uncompressed and
+as skipped because they have no GPU vertex output. Missing or failed readback
+and interpreter failures also report skips, capped at 16 messages.
+`RECOMP_GPU_SHADER_DIAG=1` logs at most 32 vertex-program queue, compilation,
+ready/failure or prolonged-pending events; unset or `0` leaves it off and
+other values reject D3D11 initialization. It does not force synchronous
+compilation or change submission ordering. Common uncompressed and
 paletted textures are decoded on the GPU; `RECOMP_GPU_TEX_DECODE=0` keeps
 their CPU decoder for comparison. Compressed textures can be uploaded
 directly. Set `RECOMP_GPU_TEXLOG=1` to log texture uploads locally.
 The D3D11 texture cache compares saved source and palette bytes on each
 ordinary cache use; retained snapshots have a 128 MiB budget, excluding
-transient copies and GPU resources. One instrumented reviewed campaign
+transient copies and GPU resources. Checked guest copies reject inaccessible
+or guarded pages, changed tracked allocation identities, known-short ranges,
+and mapping resets; they do not consume the guard-page flag. One instrumented
+reviewed campaign
 measured exact comparison at 0.832 ms/flip over fully contained periodic
 intervals; this is diagnostic overhead in one scene, not a general cost
 bound. `RECOMP_GPU_TEX_CACHE_APPROX=1` restores the old approximate checks
@@ -432,13 +449,43 @@ and atomic aggregation in the measured paths, so use it to identify work in
 a controlled diagnostic run, keep it fixed within any comparison, and retain
 an uninstrumented baseline. The standard renderer line separately labels
 bytes hashed by the unsafe approximate texture-cache mode; it is not an
-exact-comparison or snapshot-copy estimate.
+exact-comparison or snapshot-copy estimate. For compatibility with existing
+report parsers, checked texture and colour-shadow copies contribute to the
+`readable_guest_range` call/time counters without issuing `VirtualQuery`;
+depth-seed checks can still query pages. Compare counters across versions
+with that change in meaning in mind.
 
-The D3D11 P8 path uses the programmed 32, 64, 128 or 256-entry palette and
-rejects unreadable or known-short allocations and out-of-range indices.
-Actual hardware behavior for out-of-range indices, untracked suballocations,
-render-target aliases and concurrent guest writes remain unverified. The CPU
-reference path is unchanged. Device loss in the renderer or separate
+The framework CPU decoder and D3D11 P8 path use the programmed 32, 64, 128
+or 256-entry palette; an out-of-range index fails deterministically instead
+of reading beyond it. The CPU rasterizer retains its failed-sample fallback.
+Actual hardware behavior for such indices remains unknown. Compatible exact
+colour-surface aliases are reconciled with guest writes; a currently bound
+target is sampled from an ordered GPU copy, while conflicting or ambiguous
+GPU-dirty overlaps reject the draw. This is not a general guest-write
+synchronization contract. A changed colour layout may continue rendering, but
+its alias is rejected until a full clear or readback if old GPU-owned contents
+or conflicting writes make ownership uncertain. Short-pitch GPU aliases are
+also rejected rather than sampled from stale data.
+
+Colour-clear mirrors and readback use checked guest-surface writes; failures
+are reported with bounded diagnostics. A failed or partial mirror leaves the
+GPU contents unresolved and blocks its alias. If write access is restored
+before the flip, a successful full clear or readback can resolve the surface.
+Failed or raced tracked readback stops the process before the flip is reported
+complete; a retry then requires a new run. Existing guards are preserved by the
+preflight read, but concurrent reprotection is not atomic and can still
+consume a newly installed guard or leave partial writes.
+
+`RECOMP_GPU_TEXTURE_BOUNDS=1` is an experimental strict diagnostic. It
+requires explicit logical suballocation registrations from framework owners
+for source and palette spans, including eligible colour aliases; unregistered
+spans are rejected. Registered colour-surface identities are also tracked
+across logical-range reuse. Unset or `0` retains compatibility with unknown
+suballocations; other values reject D3D11 initialization. No title
+registrations are assumed, so enabling it alone can reject ordinary game
+textures. In either mode, byte snapshots do not make unsynchronized concurrent
+writes transactional, and owners must unregister logical ranges before reuse.
+Device loss in the renderer or separate
 presenter is reported and stops execution rather than reporting GPU work as
 complete. Synthetic fault injection covers both; actual loss races and
 device recovery have not been validated.
@@ -493,8 +540,9 @@ error because a guest-sized CPU frame cannot carry the higher-resolution
 result. Experimental depth and packed-stencil aliases are also rejected in
 scaled modes; their guest-layout seed and sampling semantics have not been
 defined at physical resolution. The CPU renderer remains at guest resolution.
-The synthetic D3D11 matrix passes 234 cases with hardware enabled, including
-CPU-written frames with and without a GPU overlay at scale 1 and scale 2.
+The complete synthetic D3D11 matrix passes 377 cases with WARP and RTX 5070
+hardware enabled, including CPU-written frames with and without a GPU overlay
+at scale 1 and scale 2.
 Focused synthetic WARP and hardware fixtures also exercise native resize
 failures, retry and visibility normalization; a hardware fixture resizes a
 hidden presenter window. An earlier bounded retail 4.5x run captured visible
@@ -792,6 +840,12 @@ and mandatory rechecks. It is default-off and has completed only one corrected
 automated movement smoke. It has not passed the reviewed alternating
 performance comparison, G2, G3, or CPU-reference equivalence, and may change
 guest interrupt timing. Do not use it as a general performance preset yet.
+
+To investigate a long event-driven wait, set `RECOMP_NV2A_WAIT_DIAG=1` as
+well. It logs the still-busy register, elapsed time, last observed flip hold
+and counters after two seconds, at most eight times. It never clears the bit,
+acknowledges a flush or bypasses a hold; the diagnostic is off unless set to
+the exact value `1` and does not apply to the original polling path.
 
 ## Experimental face culling
 

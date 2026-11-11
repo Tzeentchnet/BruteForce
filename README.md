@@ -33,13 +33,21 @@ Default-off clean-surface readback elision has synthetic coverage only; dirty
 frames still read back and tracked-surface flips still wait. Retail correctness and
 performance of this experiment are unverified.
 
+Texture and colour-shadow inputs now use checked snapshots and tracked
+allocation identities; colour-surface writes, compatible render-target aliases
+and bounded P8 palettes have synthetic coverage. Unknown suballocations and
+concurrent guest writes still need an ownership contract, and retail image
+parity and cost remain unvalidated. `RECOMP_DISPLAY_AWAKE=1` is an
+independent, default-off foreground-only Windows display-awake experiment; it
+is not a launcher default.
+
 True Hor+ widescreen is not implemented; internal-resolution choices retain
 the 4:3 picture. The camera trace is diagnostic only.
 
 The pinned framework has been updated to xboxrecomp v0.17.0 plus selected
 post-release fixes. Fresh Release generation `20261111-002138-a9dbc18a`
 completed focused CPU and D3D11 tutorial/movement bring-up on the prior
-v0.17 tree, before the current pipeline changes.
+v0.17 tree, before the current pipeline and compatibility changes.
 Matched-reference and reviewed performance gates remain open, and the
 published measurements still belong to the previous reviewed generation.
 
@@ -104,9 +112,14 @@ Input is read from the focused game window.
 To rebuild after source changes:
 
 ```powershell
+python tools\build.py setup
 python tools\build.py generate
 python tools\build.py build --config Release --parallel 4
 ```
+
+If the existing `.deps\xboxrecomp` checkout has an older or modified patch
+set, setup refuses to overwrite it. Preserve and move that checkout before
+running setup again.
 
 The build pipeline verifies the game fingerprint, generated-code provenance,
 selected framework revision, local patch set, and build metadata before it

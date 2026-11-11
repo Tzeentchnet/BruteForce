@@ -6,6 +6,7 @@ int bruteforce_d3d11_install(void);
 
 #ifdef BRUTEFORCE_D3D11_TESTING
 #include <d3d11.h>
+#include <stddef.h>
 #include <stdint.h>
 #include "nv2a_backend.h"
 
@@ -37,6 +38,7 @@ int bruteforce_d3d11_test_snapshot(uint32_t color_va, uint32_t depth_va,
                                    BruteforceD3D11TestSnapshot *snapshot);
 int bruteforce_d3d11_test_shared_busy(int busy);
 int bruteforce_d3d11_test_readback(uint32_t color_va);
+int bruteforce_d3d11_test_guarded_write(void *destination, const void *source, size_t bytes);
 int bruteforce_d3d11_test_pipeline(uint32_t color_va, uint32_t depth_va,
                                     BruteforceD3D11PipelineStats *stats);
 void bruteforce_d3d11_test_pending_work(unsigned polls);

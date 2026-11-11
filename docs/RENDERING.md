@@ -117,11 +117,13 @@ guest-visible releases remain open. Do not equate command submission,
 
 The backend tracks colour and depth surfaces by guest address. A new colour
 surface can be initialized from guest memory when its layout permits it;
-the GPU copy then holds rendering results. A tracked colour surface can be
-sampled directly as a texture when its address matches and it is not the
-current render target. Partial overlaps are counted but do not imply a
-supported render-to-texture alias. The backend unbinds texture views when
-binding a surface for drawing.
+the GPU copy then holds rendering results. A compatible exact colour alias
+is sampled after reconciling its checked guest shadow; a currently bound
+target uses an ordered GPU copy, with the target restored before drawing.
+Partial or ambiguous GPU-dirty overlaps and conflicting guest writes are
+rejected rather than sampled from stale backing bytes. Aliased views do not
+establish a general guest-reader or guest-writer synchronization contract.
+The backend unbinds texture views when binding a surface for drawing.
 
 Depth and stencil use D3D11 depth resources. With the optional depth-view
 paths enabled, an eligible new linear Z24S8 surface can be seeded from guest
@@ -282,8 +284,14 @@ comparison. By default the renderer exposes level 0 only, while retaining
 the guest's declared mip padding for cube-face spacing.
 
 Render-target and enabled depth/stencil aliases are checked before the
-ordinary texture cache. For ordinary successful textures, the default cache
-compares retained source bytes and, for P8, palette bytes on each use.
+ordinary texture cache. For ordinary successful textures, checked copies
+snapshot the source and, for P8, the programmed palette on each use, and the
+default cache compares those bytes with its retained snapshots. Tracked
+heap/contiguous allocation identities and the mapping generation are checked
+around each copy and are part of cache validity. Known-short ranges and failed
+copies, including guarded or reprotected pages, are rejected; checked reads
+do not clear a guard flag. The CPU texture-decoding fallback uses the same
+immutable input snapshot rather than rereading guest memory.
 Retained snapshots have a 128 MiB budget; transient copies, decoded buffers
 and GPU resources are outside that budget. Evicted snapshots require another
 upload. The approximate cache is opt-in and can miss same-frame or sparse
@@ -291,13 +299,52 @@ rewrites, leaving stale textures. Exposed mip chains always use exact
 snapshots even when approximate caching is requested; declared and uploaded
 level counts participate in their cache identity.
 
-P8 binds check page readability and remaining size of known allocations for
-the source and programmed 32-, 64-, 128- or 256-entry palette; sampled
-indices are validated on upload. Invalid ranges or indices stop with a
-diagnostic rather than guessing hardware behavior. Exact render-target
-aliases bypass the ordinary path. Page queries and snapshots cannot prevent
-concurrent guest writes or protection changes from racing subsequent reads;
-untracked suballocation boundaries are also not established.
+P8 binds validate sampled indices against the programmed 32-, 64-, 128- or
+256-entry palette. Framework texture metadata carries this length into both
+backend interfaces and the CPU reference; zero on manually constructed
+metadata retains the legacy 256-entry default. The whole-texture CPU decoder
+rejects invalid indices before changing its output; per-pixel CPU sampling
+uses its existing failed-sample fallback. Snapshot decoders reject
+input/output overlap before writing. The policy is deterministic, not a claim
+about NV2A hardware.
+
+An untracked suballocation's logical extent cannot be inferred from its host
+pages or parent heap block. Framework owners may register non-overlapping
+logical ranges and must unregister them before reuse; parent allocation reuse
+or mapping reset invalidates their identity, including registrations through
+mirrored RAM and tiled contiguous views. Default-off
+`RECOMP_GPU_TEXTURE_BOUNDS=1` requires such registrations for texture and
+palette inputs, including eligible exact colour aliases, and tracks any
+registered colour-surface lifetime so logical-range reuse cannot expose its
+previous GPU contents. With it off, unregistered ranges retain legacy
+treatment. Checked copies, protection and
+allocation rechecks detect the tested changes but cannot make concurrent
+guest writes transactional or replace an ordered write-notification contract.
+
+The legacy exact `0x06` swizzled-colour and `0x2E` compatibility aliases are
+retained for their supported cases; the latter applies only with the
+experimental depth-texture path off. They are backend compatibility behavior,
+not proof that those reinterpretations match hardware. Other GPU-dirty
+overlaps are rejected conservatively, including recognized physical aliases
+through RAM and tiled apertures. A freed tracked surface cannot fall back to
+its stale guest bytes, and a GPU-owned surface with a short row pitch is not
+treated as an exact alias. A logical colour-layout replacement remains usable
+for rendering, but an alias is rejected until a full clear or readback when
+its old GPU-owned contents or conflicting writes make ownership uncertain.
+Scaled migrations retain GPU ownership and mark observed migration races
+uncertain. A clean old surface with changed guest bytes is seeded from the
+current guest snapshot.
+
+Full colour-clear mirrors and GPU readback also preflight the guest surface
+and recheck its identity. Windows exception-guarded writes respect read-only
+protection and leave row padding untouched. An already-guarded surface is
+rejected by the checked read without consuming the guard. A failed or partial
+mirror leaves GPU ownership unresolved; a failed readback or a detected
+post-copy write rejects aliases and stops the process before reporting the
+tracked flip as guest-visible. Before a failed flip, a successful full clear
+or readback can resolve the ambiguity. These checks are not
+atomic: a concurrent reprotection after the preflight can still consume a
+newly set guard or leave a partial write.
 
 #### Experimental mipmaps and anisotropy
 
@@ -482,8 +529,12 @@ The default-off `RECOMP_GPU_SKIP_CLEAN_READBACK=1` elides that copy only for
 an unscaled, native-sized 32-bit surface whose guest bytes are already known
 to match its clean GPU image. Initial seeds, guest uploads, GPU draws, partial
 clears and migration require the ordinary readback before establishing that
-proof. Full-clear mirrors and readbacks validate their snapshots against the
-GPU-bound bytes, and the guest snapshot is checked again after the GPU wait.
+proof. Colour shadows retain the guest bytes used for a seed or upload,
+expected clear bytes, or GPU staging bytes after readback. An observed
+guest-write race is treated as a conflict rather than silently publishing a
+stale surface alias. Full-clear mirrors and readbacks validate their snapshots
+against those expected bytes, and the guest snapshot is checked again after
+the GPU wait.
 Statistics, frame-dump and presenter-capture settings force the ordinary
 readback. Screenshots and the CPU-composited route still use guest memory. A
 tracked surface flip, including an elided copy, waits for prior GPU work; this
@@ -547,6 +598,10 @@ settings and the scene controlled. Full setup and options are in the
   waits, submitted-work batches/backpressure, alias activity and
   shared-presentation counts. `RECOMP_GPU_TEXLOG=1` logs individual
   texture uploads.
+- `RECOMP_GPU_SHADER_DIAG=1` bounds vertex-program preparation reports to 32
+  events. `RECOMP_GPU_VSH_VERIFY` caps skip reports at 16; the separate
+  `RECOMP_NV2A_WAIT_DIAG=1` reports prolonged event-driven PFB waits at most
+  eight times without advancing the handshake. All are off by default.
 - `RECOMP_FRAME_STATS` records flip and whole-frame change statistics;
   `RECOMP_GPU_CENSUS` records requested features; `BRUTEFORCE_PROFILE`
   collects samples. [bench.py](../tools/bench.py) can coordinate these with

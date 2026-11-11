@@ -37,7 +37,9 @@ rebuilt without game data:
 
 ```powershell
 $fixtures = @(
+  "display_awake",
   "kernel_eeprom_settings",
+  "memory_regressions",
   "nv2a_ffp_backend",
   "nv2a_gpu_audit",
   "nv2a_pfb_flush",
@@ -156,6 +158,33 @@ rewrites, including guarded base-level fallback under approximate-cache mode.
 Rendered 2D and cube scenes exercise supplied levels, stage-specific clamps,
 the disabled path and 2x physical-scale LOD selection. It does not prove title
 image equivalence, hardware NV2A behavior, resource budgets or performance.
+
+For the checked texture, colour-alias and preparation-diagnostic changes:
+
+```powershell
+cmake --build build\smoke --config Release --target bruteforce_d3d11_test
+$env:BRUTEFORCE_TEST_D3D11 = "$PWD\build\smoke\Release\bruteforce_d3d11_test.exe"
+$env:BRUTEFORCE_TEST_D3D11_HARDWARE = "1" # omit to use WARP only
+python -m pytest -q --basetemp build\p tests\test_d3d11.py `
+  -k "texture or mip or cache or render_target or readback or depth or gpu_matches_cpu_reference or detailed_performance_counters or shader or color_alias"
+```
+
+Use a short workspace-local `--basetemp`: the Windows shader-cache fixture
+appends long key and temporary filenames. The synthetic matrix includes
+checked guard and reprotection behavior, tracked allocation reuse through
+RAM mirrors and tiled mappings, registered and unregistered bounds, P8 lengths
+and invalid indices, exact, freed, short-pitch and conflicting colour aliases,
+seed/upload/clear/readback races, layout migration and replacement, guarded
+and read-only colour writes, failed partial writes and retry, padded rows, a
+bound-target copy, CPU/GPU parity and shader diagnostics. The fixture also
+checks that a guarded write respects executable read-only protection.
+`memory_regressions` separately
+checks logical-range registration/reuse and mapping reset; `nv2a_ffp_backend`
+checks checked CPU decoding, input/output overlap and bounded verification
+skips; `nv2a_pfb_flush` checks diagnostic
+bounds and the real handshake; `display_awake` substitutes window and power
+APIs. These do not prove retail behavior, unsynchronized write coherence,
+real display policy or actual device loss.
 
 For the GPU pipeline, synchronization and presenter failure boundaries:
 

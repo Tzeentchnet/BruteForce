@@ -1,0 +1,358 @@
+diff --git a/docs/runtime/environment-variables.md b/docs/runtime/environment-variables.md
+index 1a73e9c..fd504ff 100644
+--- a/docs/runtime/environment-variables.md
++++ b/docs/runtime/environment-variables.md
+@@ -86,6 +86,7 @@ The executor is itself opt-in: set `RECOMP_PB_EXEC=1` to execute the pushbuffer.
+ | `RECOMP_PB_SCAN` | off | Read-only survey of the pushbuffer; ranks what is not implemented. | `nv2a_pb_scan.c`, `xbox_memory_layout.c` |
+ | `RECOMP_PB_WALK=dma` | off | Walks the pushbuffer as the DMA engine does, which delivers D3D's software-method interrupt. | `nv2a_pb_scan.c` |
+ | `RECOMP_NV2A_TRACE` | off | Shows whether `DMA_PUT` moves at all. | `xbox_memory_layout.c` |
++| `RECOMP_NV2A_WAIT_DIAG=1` | off | With `RECOMP_PFB_FLUSH_WAIT=1`, reports a still-busy flush after two seconds, at most eight times, including the last observed flip hold. It never completes the wait. | `nv2a_pfb_flush.c` |
+ | `RECOMP_PB_REPORT_MS=N` | 10000 | Milliseconds between `[GPU]` reports (minimum 100). | `xbox_memory_layout.c` |
+ | `RECOMP_PB_EXEC_VERBOSE` | off | Per-batch trace. | `nv2a_pb_exec.c` |
+ | `RECOMP_PB_UNHANDLED_ALL` | top 10 | Lists every method the executor does not model, not only the top ten. | `nv2a_pb_exec.c` |
+@@ -104,6 +105,7 @@ The executor is itself opt-in: set `RECOMP_PB_EXEC=1` to execute the pushbuffer.
+ | `RECOMP_RASTER_TEST` | off | Bring-up aid: draws a magenta triangle after every clear, to prove the rasteriser and presenter work. | `nv2a_pb_exec.c` |
+ | `RECOMP_FFP_TRACE` | off | Matrix and first vertices of the first fixed-function batches. | `nv2a_pb_exec.c` |
+ | `RECOMP_VSH_TRACE=N` | 0 | Prints N vertex-program batches. | `nv2a_pb_exec.c` |
++| `RECOMP_GPU_VSH_VERIFY=N` | off | Compares every Nth GPU vertex batch with the CPU interpreter; missing/failed readback and interpreter failures are explicitly reported, with at most 16 skip messages. | `nv2a_pb_exec.c` |
+ | `RECOMP_VSH_DUMP` | off | Vertex-program constant traffic. | `nv2a_vsh_interp.c` |
+ | `RECOMP_FRAME_TRACE` | off | Traces one frame in detail. | `nv2a_pb_exec.c` |
+ | `RECOMP_FRAME_TRACE_METHODS` | off | With the above: every method of the traced frame, less the bulk uploads. | `nv2a_pb_exec.c` |
+diff --git a/src/kernel/nv2a_pb_exec.c b/src/kernel/nv2a_pb_exec.c
+index cae84b0..0efc62c 100644
+--- a/src/kernel/nv2a_pb_exec.c
++++ b/src/kernel/nv2a_pb_exec.c
+@@ -4043,6 +4043,20 @@ static int xvs_close(float a, float b, float abs_tol, float rel_tol)
+ 
+ static int transform_vertex(uint32_t index, Nv2aVshOutput *out);
+ 
++static unsigned s_vsh_verify_skips, s_vsh_verify_skip_reports;
++
++static void vsh_verify_skip(const char *reason, uint32_t nv, uint32_t mask)
++{
++    if (s_vsh_verify_skips != UINT32_MAX)
++        ++s_vsh_verify_skips;
++    if (s_vsh_verify_skip_reports < 16) {
++        ++s_vsh_verify_skip_reports;
++        fprintf(stderr, "[VSH-VERIFY] skipped batch: %s (vertices=%u inputs=%08X)%s\n",
++                reason, nv, mask, s_vsh_verify_skip_reports == 16
++                ? " (further skip reports suppressed)" : "");
++    }
++}
++
+ /* RECOMP_GPU_VSH_VERIFY: the shader's outputs against the interpreter. The
+  * tolerances allow float rounding: positions 0.01 px plus 1e-4 relative, the
+  * rest 1e-3. A vertex whose inputs are not finite or are denormal is counted
+@@ -4060,13 +4074,20 @@ static void gpu_vsh_verify(uint32_t nv, uint32_t mask, uint32_t nin)
+         const char *e = getenv("RECOMP_GPU_VSH_VERIFY");
+         every = e ? atoi(e) : 0;
+     }
+-    if (every <= 0 || !s_xbackend->vsh_readback || ++batches % (unsigned)every)
++    if (every <= 0 || ++batches % (unsigned)every)
+         return;
+-    if (!g && !(g = (Nv2aXVsOut *)malloc(NV_MAX_INDICES * sizeof *g)))
++    if (!s_xbackend || !s_xbackend->vsh_readback) {
++        vsh_verify_skip("backend has no verification readback", nv, mask);
+         return;
+-    if (!s_xbackend->vsh_readback(g, nv))
++    }
++    if (!g && !(g = (Nv2aXVsOut *)malloc(NV_MAX_INDICES * sizeof *g))) {
++        vsh_verify_skip("cannot allocate verification buffer", nv, mask);
+         return;
+-    checked++;
++    }
++    if (!s_xbackend->vsh_readback(g, nv)) {
++        vsh_verify_skip("backend verification readback failed", nv, mask);
++        return;
++    }
+     for (l = 0; l < nv; l++) {
+         Nv2aVshOutput c;
+         const Nv2aXVsOut *o = &g[l];
+@@ -4087,8 +4108,10 @@ static void gpu_vsh_verify(uint32_t nv, uint32_t mask, uint32_t nin)
+                 if (!isfinite(in[k]) || (in[k] != 0.0f && fabsf(in[k]) < 1.17549435e-38f))
+                     odd = 1;
+         }
+-        if (!transform_vertex(s_xvs_uidx[l], &c))
++        if (!transform_vertex(s_xvs_uidx[l], &c)) {
++            vsh_verify_skip("CPU interpreter could not transform a vertex", nv, mask);
+             return;
++        }
+         verts++;
+         if (odd) {
+             odd_verts++;
+@@ -4124,6 +4147,7 @@ static void gpu_vsh_verify(uint32_t nv, uint32_t mask, uint32_t nin)
+                     c.pos[0], c.pos[1], c.pos[2], c.pos[3]);
+     }
+     (void)nin;
++    checked++;
+     bad_batches += bad;
+     if (checked % 100 == 0 || checked <= 3)
+         fprintf(stderr, "[VSH-VERIFY] %u batches checked, %u differ; %llu vertices, %llu differ,"
+@@ -4131,6 +4155,12 @@ static void gpu_vsh_verify(uint32_t nv, uint32_t mask, uint32_t nin)
+                 checked, bad_batches, verts, bad_verts, odd_verts);
+ }
+ 
++#if defined(NV2A_DIAGNOSTIC_TESTING)
++void nv2a_test_verify_batch(void) { gpu_vsh_verify(0, 0, 0); }
++unsigned nv2a_test_verify_skips(void) { return s_vsh_verify_skips; }
++unsigned nv2a_test_verify_reports(void) { return s_vsh_verify_skip_reports; }
++#endif
++
+ static int gpu_vsh_batch(void)
+ {
+     uint32_t n = s_gpu.idx_count, i, a, nins = 0, mask, nin, nv = 0, ni = 0, first = 0;
+diff --git a/src/kernel/nv2a_pfb_flush.c b/src/kernel/nv2a_pfb_flush.c
+index 67bc725..e08453a 100644
+--- a/src/kernel/nv2a_pfb_flush.c
++++ b/src/kernel/nv2a_pfb_flush.c
+@@ -13,6 +13,9 @@
+ #endif
+ 
+ #define PFB_FLUSH_BACKSTOP_NS 200000u
++#ifndef NV2A_PFB_DIAG_INTERVAL_MS
++#define NV2A_PFB_DIAG_INTERVAL_MS 2000u
++#endif
+ 
+ enum PfbWake {
+     PFB_WAKE_EVENT,
+@@ -29,6 +32,9 @@ static volatile LONGLONG s_spurious_wakes;
+ static volatile LONGLONG s_rechecks;
+ static volatile LONGLONG s_safe_points;
+ static volatile LONG s_last_report_ms;
++static volatile LONG s_wait_diag;
++static volatile LONG s_wait_diag_reports;
++static volatile LONG s_last_flip_held = -1;
+ 
+ static void counter_increment(volatile LONGLONG *counter)
+ {
+@@ -61,6 +67,30 @@ static int parse_enabled(void)
+     abort();
+ }
+ 
++static int parse_wait_diag(void)
++{
++    const char *value = getenv("RECOMP_NV2A_WAIT_DIAG");
++    if (!value || !*value || strcmp(value, "0") == 0)
++        return 0;
++    if (strcmp(value, "1") == 0)
++        return 1;
++    fprintf(stderr, "[NV2A-WAIT] RECOMP_NV2A_WAIT_DIAG must be 0 or 1\n");
++    fflush(stderr);
++    abort();
++}
++
++static int reserve_wait_diag_report(void)
++{
++    LONG count = InterlockedCompareExchange(&s_wait_diag_reports, 0, 0);
++    while (count < 8) {
++        LONG previous = InterlockedCompareExchange(&s_wait_diag_reports, count + 1, count);
++        if (previous == count)
++            return 1;
++        count = previous;
++    }
++    return 0;
++}
++
+ #if defined(_WIN32)
+ 
+ #ifndef CREATE_WAITABLE_TIMER_HIGH_RESOLUTION
+@@ -75,6 +105,7 @@ static BOOL CALLBACK pfb_flush_init(PINIT_ONCE once, PVOID parameter,
+                                     PVOID *context)
+ {
+     int enabled = parse_enabled();
++    int diagnostic = parse_wait_diag();
+     (void)once;
+     (void)parameter;
+     (void)context;
+@@ -91,6 +122,7 @@ static BOOL CALLBACK pfb_flush_init(PINIT_ONCE once, PVOID parameter,
+                         "(200 us IRQ backstop)\n");
+         fflush(stderr);
+     }
++    InterlockedExchange(&s_wait_diag, diagnostic);
+     InterlockedExchange(&s_enabled, enabled);
+     return TRUE;
+ }
+@@ -166,6 +198,7 @@ static uint64_t s_ack_generation;
+ static void pfb_flush_init(void)
+ {
+     int enabled = parse_enabled();
++    int diagnostic = parse_wait_diag();
+ 
+     if (enabled) {
+ #if defined(__APPLE__)
+@@ -187,6 +220,7 @@ static void pfb_flush_init(void)
+                         "(200 us IRQ backstop)\n");
+         fflush(stderr);
+     }
++    InterlockedExchange(&s_wait_diag, diagnostic);
+     InterlockedExchange(&s_enabled, enabled);
+ }
+ 
+@@ -301,6 +335,8 @@ int nv2a_pfb_flush_wait_enabled(void)
+ void nv2a_pfb_flush_wait(volatile uint32_t *reg,
+                          Nv2aPfbFlushSafePoint safe_point)
+ {
++    int diagnostic;
++    DWORD started = 0, last = 0;
+     if (!reg || !safe_point) {
+         fprintf(stderr, "[PFB-WAIT] flush register and safe point are required\n");
+         abort();
+@@ -311,6 +347,9 @@ void nv2a_pfb_flush_wait(volatile uint32_t *reg,
+     }
+ 
+     counter_increment(&s_waits);
++    diagnostic = InterlockedCompareExchange(&s_wait_diag, 0, 0) == 1;
++    if (diagnostic)
++        started = last = GetTickCount();
+     while (*reg & NV2A_PFB_FLUSH_BUSY_MASK) {
+         enum PfbWake wake = wait_once();
+ 
+@@ -324,6 +363,25 @@ void nv2a_pfb_flush_wait(volatile uint32_t *reg,
+         counter_increment(&s_safe_points);
+         if (*reg & NV2A_PFB_FLUSH_BUSY_MASK)
+             counter_increment(&s_rechecks);
++        if (diagnostic && (*reg & NV2A_PFB_FLUSH_BUSY_MASK)) {
++            DWORD now = GetTickCount();
++            if ((DWORD)(now - last) >= NV2A_PFB_DIAG_INTERVAL_MS) {
++                last = now;
++                if (reserve_wait_diag_report()) {
++                    fprintf(stderr, "[NV2A-WAIT] PFB flush still busy after %lu ms:"
++                                    " register=%08X last_flip_hold=%ld waits=%lld acks=%lld"
++                                    " rechecks=%lld%s\n",
++                            (unsigned long)(DWORD)(now - started), (unsigned)*reg,
++                            (long)InterlockedCompareExchange(&s_last_flip_held, 0, 0),
++                            (long long)counter_read(&s_waits),
++                            (long long)counter_read(&s_acks),
++                            (long long)counter_read(&s_rechecks),
++                            InterlockedCompareExchange(&s_wait_diag_reports, 0, 0) >= 8
++                                ? " (further wait reports suppressed)" : "");
++                    fflush(stderr);
++                }
++            }
++        }
+     }
+     maybe_report();
+ }
+@@ -336,6 +394,8 @@ int nv2a_pfb_flush_ack(volatile uint32_t *reg, int flip_held)
+         fprintf(stderr, "[PFB-WAIT] acknowledgement requires a flush register\n");
+         abort();
+     }
++    if (s_wait_diag == 1)
++        InterlockedExchange(&s_last_flip_held, flip_held != 0);
+     if (flip_held)
+         return 0;
+     if (!(*reg & NV2A_PFB_FLUSH_BUSY_MASK))
+diff --git a/tests/nv2a_ffp_backend/CMakeLists.txt b/tests/nv2a_ffp_backend/CMakeLists.txt
+index 05c389f..cf6ef22 100644
+--- a/tests/nv2a_ffp_backend/CMakeLists.txt
++++ b/tests/nv2a_ffp_backend/CMakeLists.txt
+@@ -12,6 +12,7 @@ set(NV2A_BACKEND_TEST_SOURCES
+ set(NV2A_BACKEND_FIXTURE nv2a_backend_fixture.c)
+ add_executable(nv2a-ffp-backend-test nv2a_ffp_backend_test.c
+     ${NV2A_BACKEND_FIXTURE} ${NV2A_BACKEND_TEST_SOURCES})
++target_compile_definitions(nv2a-ffp-backend-test PRIVATE NV2A_DIAGNOSTIC_TESTING)
+ add_executable(nv2a-present-sync-test nv2a_present_sync_test.c
+     ${NV2A_BACKEND_FIXTURE} ${NV2A_BACKEND_TEST_SOURCES})
+ add_executable(nv2a-backend-contract-test nv2a_backend_contract_test.c
+@@ -26,6 +27,10 @@ foreach(target nv2a-ffp-backend-test nv2a-present-sync-test
+     endif()
+ endforeach()
+ add_test(NAME nv2a-ffp-backend COMMAND nv2a-ffp-backend-test)
++add_test(NAME nv2a-verify-diagnostics COMMAND nv2a-ffp-backend-test)
++set_tests_properties(nv2a-verify-diagnostics PROPERTIES ENVIRONMENT
++    "RECOMP_GPU_VSH_VERIFY=1;RECOMP_TEST_VSH_VERIFY_DIAG=1"
++    PASS_REGULAR_EXPRESSION "verification skip diagnostics bounded")
+ add_test(NAME nv2a-backend-contract COMMAND nv2a-backend-contract-test)
+ add_test(NAME nv2a-present-sync COMMAND nv2a-present-sync-test
+          "${CMAKE_CURRENT_BINARY_DIR}/nv2a-present-sync-")
+diff --git a/tests/nv2a_ffp_backend/nv2a_ffp_backend_test.c b/tests/nv2a_ffp_backend/nv2a_ffp_backend_test.c
+index df98630..4b05ad1 100644
+--- a/tests/nv2a_ffp_backend/nv2a_ffp_backend_test.c
++++ b/tests/nv2a_ffp_backend/nv2a_ffp_backend_test.c
+@@ -81,6 +81,17 @@ static void extended_draw(const Nv2aSurface *surf, const Nv2aXBatch *batch)
+     s_extended = *batch;
+ }
+ 
++#if defined(NV2A_DIAGNOSTIC_TESTING)
++extern void nv2a_test_verify_batch(void);
++extern unsigned nv2a_test_verify_skips(void);
++extern unsigned nv2a_test_verify_reports(void);
++static int failed_verify_readback(Nv2aXVsOut *out, uint32_t count)
++{
++    (void)out; (void)count;
++    return 0;
++}
++#endif
++
+ static void p8_decoder_tests(void)
+ {
+     Nv2aTexture tex = {0};
+@@ -218,6 +229,20 @@ int main(void)
+     nv2a_backend_fixture_init(&s_be);
+     nv2a_backend_register(nv2a_backend_fixture_bind(&s_be));
+ 
++#if defined(NV2A_DIAGNOSTIC_TESTING)
++    if (getenv("RECOMP_TEST_VSH_VERIFY_DIAG")) {
++        Nv2aBackendExt ext = {0};
++        nv2a_backend_ext_register(&ext);
++        for (i = 0; i < 3; ++i) nv2a_test_verify_batch();
++        ext.vsh_readback = failed_verify_readback;
++        for (i = 0; i < 20; ++i) nv2a_test_verify_batch();
++        CHECK(nv2a_test_verify_skips() == 23);
++        CHECK(nv2a_test_verify_reports() == 16);
++        puts("verification skip diagnostics bounded");
++        return s_fail ? 1 : 0;
++    }
++#endif
++
+     /* The flip hold is opt-in: unset, RECOMP_FLIP_PACING leaves every flip
+      * completing at once and method 0x100 an unhandled no-op, as before. */
+     if (!getenv("RECOMP_FLIP_PACING")) {
+diff --git a/tests/nv2a_pfb_flush/CMakeLists.txt b/tests/nv2a_pfb_flush/CMakeLists.txt
+index 534b6e4..3fdc4aa 100644
+--- a/tests/nv2a_pfb_flush/CMakeLists.txt
++++ b/tests/nv2a_pfb_flush/CMakeLists.txt
+@@ -9,8 +9,17 @@ target_include_directories(nv2a_pfb_flush_test PRIVATE
+     ../../src
+     ../../src/kernel)
+ target_link_libraries(nv2a_pfb_flush_test PRIVATE platform)
++add_executable(nv2a_pfb_flush_diag_test
++    test_main.c
++    ../../src/kernel/nv2a_pfb_flush.c)
++target_include_directories(nv2a_pfb_flush_diag_test PRIVATE ../../src ../../src/kernel)
++target_compile_definitions(nv2a_pfb_flush_diag_test PRIVATE NV2A_PFB_DIAG_INTERVAL_MS=1)
++target_link_libraries(nv2a_pfb_flush_diag_test PRIVATE platform)
+ enable_testing()
+ foreach(mode IN ITEMS disabled normal spurious timeout reuse)
+     add_test(NAME nv2a_pfb_flush_${mode}
+              COMMAND nv2a_pfb_flush_test ${mode})
+ endforeach()
++add_test(NAME nv2a_pfb_flush_diagnostics
++    COMMAND ${CMAKE_COMMAND} -DTEST_EXEC=$<TARGET_FILE:nv2a_pfb_flush_diag_test>
++            -P ${CMAKE_CURRENT_SOURCE_DIR}/check_diag.cmake)
+diff --git a/tests/nv2a_pfb_flush/check_diag.cmake b/tests/nv2a_pfb_flush/check_diag.cmake
+new file mode 100644
+index 0000000..16cbc44
+--- /dev/null
++++ b/tests/nv2a_pfb_flush/check_diag.cmake
+@@ -0,0 +1,20 @@
++foreach(enabled IN ITEMS 0 1)
++    execute_process(
++        COMMAND ${CMAKE_COMMAND} -E env RECOMP_NV2A_WAIT_DIAG=${enabled}
++                "${TEST_EXEC}" normal
++        RESULT_VARIABLE result OUTPUT_VARIABLE output ERROR_VARIABLE error
++        TIMEOUT 5)
++    if(NOT result EQUAL 0)
++        message(FATAL_ERROR "flush diagnostic fixture failed: ${result}\n${output}\n${error}")
++    endif()
++    string(REGEX MATCHALL "\\[NV2A-WAIT\\] PFB flush still busy" lines "${error}")
++    list(LENGTH lines count)
++    if(enabled AND (count LESS 1 OR count GREATER 8))
++        message(FATAL_ERROR "expected 1..8 wait reports, got ${count}\n${error}")
++    elseif(NOT enabled AND count)
++        message(FATAL_ERROR "wait diagnostics are not default-off\n${error}")
++    endif()
++    if(count EQUAL 8 AND NOT error MATCHES "further wait reports suppressed")
++        message(FATAL_ERROR "wait diagnostic suppression was not reported")
++    endif()
++endforeach()

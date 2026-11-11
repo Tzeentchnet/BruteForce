@@ -304,24 +304,21 @@ int gpu_texture_decode_p8_cpu(const GpuTextureLayout *layout, unsigned face,
                               uint32_t *output, size_t output_texels)
 {
     const uint8_t *src = (const uint8_t *)bytes;
-    const uint8_t *pal = (const uint8_t *)palette;
     const GpuTextureSubresource *sub;
-    uint32_t x, y;
+    Nv2aTexture texture = {0};
 
     if (!p8_header_valid(layout, bytes, byte_count, palette_entries)
         || face >= layout->faces || level >= layout->levels || !palette || !output
         || !p8_subresource_valid(layout, face, level, src, palette_entries, NULL))
         return 0;
     sub = &layout->subresource[face][level];
-    if (output_texels < (size_t)sub->width * sub->height)
-        return 0;
-    for (y = 0; y < sub->height; ++y)
-        for (x = 0; x < sub->width; ++x) {
-            size_t source = sub->offset + swizzle_offset(x, y, sub->width, sub->height);
-            size_t dest = (size_t)y * sub->width + x;
-            memcpy(&output[dest], pal + (size_t)src[source] * 4, 4);
-        }
-    return 1;
+    texture.color = 0x0B;
+    texture.width = sub->width;
+    texture.height = sub->height;
+    texture.palette_entries = palette_entries;
+    return nv2a_backend_decode_p8_data(&texture, src + sub->offset, sub->size,
+                                       palette, (size_t)palette_entries * 4,
+                                       output, output_texels);
 }
 
 static int init_decoder(GpuTextureDecoder *decoder, ID3D11Device *device)

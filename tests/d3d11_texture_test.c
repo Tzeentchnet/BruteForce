@@ -91,6 +91,7 @@ static int check_texture(ID3D11Device *device, ID3D11DeviceContext *context,
         reference.height = sub->height;
         reference.pitch = swizzled ? 0 : (uint32_t)sub->row_pitch;
         reference.levels = 1;
+        reference.palette_entries = palette_entries;
         if (!nv2a_backend_decode_texture(&reference, expected)) {
             fprintf(stderr, "FAIL: CPU texture decode format 0x%02X\n", t->color);
             goto done;

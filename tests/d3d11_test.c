@@ -41,6 +41,9 @@ extern void nv2a_pb_exec_report(void);
 extern int bruteforce_test_textures(int hardware);
 extern int bruteforce_test_mipmaps(void);
 extern int bruteforce_test_mip_p8_invalid(void);
+extern int bruteforce_test_texture_lifetime(int strict);
+extern int bruteforce_test_srv_pixel(ID3D11ShaderResourceView *srv, unsigned x,
+                                    unsigned y, uint32_t *argb);
 extern int bruteforce_test_shader_cache_keys(void);
 extern int bruteforce_test_shader_cache_publication(int readonly, int different, int corrupt);
 extern int bruteforce_test_shader_cache_temp_collision(int exhausted);
@@ -784,9 +787,9 @@ static int scene_perf_counters(const char *out_path)
     REQUIRE(counters.guest_range.calls >= 8 &&
             counters.guest_range.accepted == counters.guest_range.calls &&
             counters.guest_range.rejected == 0 &&
-            counters.guest_range.virtual_queries >= counters.guest_range.calls &&
+            counters.guest_range.virtual_queries == 0 &&
             counters.guest_range.query_failures == 0,
-            "readable guest-range counters");
+            "checked guest-range counters");
     REQUIRE(counters.texture.lookups >= 4 &&
             counters.texture.probes >= 3 &&
             counters.texture.key_hits >= 3 &&
@@ -2638,6 +2641,8 @@ static int test_pipeline_guest_coherence(const char *mode)
     uint32_t color = xbox_ContiguousAlloc(B_SIZE * B_SIZE * 4, 4096);
     uint32_t raced;
     BruteforceD3D11PipelineStats stats;
+    Nv2aTexture texture = {0};
+    unsigned levels;
 
     REQUIRE(color, "allocate coherence race fixture");
     identity_matrix();
@@ -2662,6 +2667,13 @@ static int test_pipeline_guest_coherence(const char *mode)
         *(uint32_t *)guest(color) ^= 2u;
         bruteforce_d3d11_test_fail("guest-change-upload", 1);
     }
+    texture.offset = color;
+    texture.width = texture.height = B_SIZE;
+    texture.pitch = B_SIZE * 4;
+    texture.color = 0x12;
+    if (strstr(mode, "seed") || strstr(mode, "mirror") || strstr(mode, "upload"))
+        REQUIRE(!bruteforce_d3d11_test_texture(&texture, 0, 0, &levels),
+                "a raced seed, mirror or upload cannot publish a stale GPU alias");
     if (strstr(mode, "wait"))
         bruteforce_d3d11_test_fail("guest-change-wait", 1);
     if (strstr(mode, "readback")) {
@@ -2670,14 +2682,21 @@ static int test_pipeline_guest_coherence(const char *mode)
         screen_quad(0xFF40A020u);
         bruteforce_d3d11_test_fail("guest-change-readback", 1);
     }
-    REQUIRE(bruteforce_d3d11_test_readback(color) &&
-            bruteforce_d3d11_test_pipeline(color, 0, &stats),
-            "complete raced surface readback");
+    if (strstr(mode, "readback"))
+        REQUIRE(!bruteforce_d3d11_test_readback(color),
+                "a raced readback reports failure before the flip");
+    else
+        REQUIRE(bruteforce_d3d11_test_readback(color),
+                "resolve the raced surface through readback");
+    REQUIRE(bruteforce_d3d11_test_pipeline(color, 0, &stats),
+            "inspect the raced surface readback");
     REQUIRE(stats.readbacks == 1 && stats.coherent == 0,
             "a raced surface retains the ordinary GPU copy");
     if (strstr(mode, "readback")) {
         raced = *(uint32_t *)guest(color);
         REQUIRE(!stats.guest_exact, "a raced readback shadow is not byte-exact");
+        REQUIRE(!bruteforce_d3d11_test_texture(&texture, 0, 0, &levels),
+                "a raced readback cannot publish a stale GPU alias");
         REQUIRE(bruteforce_d3d11_test_readback(color) &&
                 bruteforce_d3d11_test_pipeline(color, 0, &stats) &&
                 stats.readbacks == 2 && stats.coherent == 0 &&
@@ -2689,6 +2708,357 @@ static int test_pipeline_guest_coherence(const char *mode)
                 "ordinary readback restores the GPU's captured image");
     }
     puts("guest coherence race safely fell back");
+    return 1;
+}
+
+static int test_color_texture_aliases(void)
+{
+    uint32_t prefix = xbox_ContiguousAlloc(4096, 4096);
+    uint32_t a = xbox_ContiguousAlloc(B_SIZE * B_SIZE * 4, 4096);
+    uint32_t b = xbox_ContiguousAlloc(B_SIZE * B_SIZE * 4, 4096);
+    uint32_t vb = xbox_ContiguousAlloc(4096, 4096);
+    uint32_t c = xbox_ContiguousAlloc(B_SIZE * B_SIZE * 4, 4096);
+    uint32_t dirty_resize = xbox_ContiguousAlloc(B_SIZE * B_SIZE * 4, 4096);
+    uint32_t clean_resize = xbox_ContiguousAlloc(B_SIZE * B_SIZE * 4, 4096);
+    uint32_t race_resize = xbox_ContiguousAlloc(B_SIZE * B_SIZE * 4, 4096);
+    uint32_t migrated_resize = xbox_ContiguousAlloc(B_SIZE * B_SIZE * 4, 4096);
+    uint32_t protected_surface = xbox_ContiguousAlloc(B_SIZE * (B_SIZE * 4 + 16), 4096);
+    uint32_t tiled = XBOX_TILED_BASE + (c - XBOX_CONTIG_BASE);
+    uint32_t color, saved, reused, i;
+    uint8_t *protected_bytes = (uint8_t *)guest(protected_surface);
+    uint32_t *executable_page;
+    Nv2aTexture t = {0};
+    ID3D11ShaderResourceView *view;
+    BruteforceD3D11TestSnapshot state;
+    BruteforceD3D11PipelineStats stats;
+    DWORD old, ignored;
+    MEMORY_BASIC_INFORMATION info;
+    unsigned levels;
+    int strict = getenv("RECOMP_GPU_TEXTURE_BOUNDS") &&
+                 strcmp(getenv("RECOMP_GPU_TEXTURE_BOUNDS"), "1") == 0;
+
+    REQUIRE(prefix && a && b && vb && c && dirty_resize && clean_resize &&
+            race_resize && migrated_resize && protected_surface && prefix + 4096 == a,
+            "allocate adjacent synthetic color surfaces");
+    if (strict)
+        REQUIRE(xbox_GuestBoundsRegister(a, B_SIZE * B_SIZE * 4) &&
+                xbox_GuestBoundsRegister(b, B_SIZE * B_SIZE * 4),
+                "register exact logical bounds for color surfaces");
+    t.offset = a; t.width = t.height = B_SIZE; t.pitch = B_SIZE * 4; t.color = 0x12;
+    identity_matrix();
+    surface(a, B_SIZE, 0);
+    clear(0xF0, 0xFFFF0000u, 0);
+    combiners(0);
+    method(0x030C, 0);
+    method(0x035C, 0);
+    screen_quad(0xFF00FF00u);
+    view = bruteforce_d3d11_test_texture(&t, 0, 0, &levels);
+    REQUIRE(view && bruteforce_test_srv_pixel(view, 8, 8, &color) && color == 0xFF00FF00u,
+            "currently bound target samples an ordered GPU snapshot");
+    REQUIRE(bruteforce_d3d11_test_snapshot(a, 0, &state) && state.bound_color == state.color,
+            "snapshot restores the current render target");
+    texture_linear(a, B_SIZE);
+    combiners(1);
+    sample_quad(2, 2, 0.03f, 0.03f, vb);
+    view = bruteforce_d3d11_test_texture(&t, 0, 0, &levels);
+    REQUIRE(view && bruteforce_test_srv_pixel(view, 5, 5, &color) && color == 0xFF00FF00u,
+            "drawing with the current target alias retains GPU content");
+
+    saved = *(uint32_t *)guest(a);
+    *(uint32_t *)guest(a) ^= 1u;
+    REQUIRE(!bruteforce_d3d11_test_texture(&t, 0, 0, &levels),
+            "guest write conflicting with dirty GPU data rejects the alias");
+    *(uint32_t *)guest(a) = saved;
+    REQUIRE(VirtualProtect(guest(a), 4096, PAGE_READWRITE | PAGE_GUARD, &old),
+            "guard an aliased surface page");
+    REQUIRE(!bruteforce_d3d11_test_texture(&t, 0, 0, &levels),
+            "unreadable surface shadow rejects the alias");
+    REQUIRE(VirtualQuery(guest(a), &info, sizeof info) == sizeof info &&
+            (info.Protect & PAGE_GUARD), "alias check preserves the guard page");
+    REQUIRE(VirtualProtect(guest(a), 4096, old, &ignored), "restore alias page");
+
+    t.offset = a + 4; t.width = t.height = 4; t.pitch = 16;
+    REQUIRE(!bruteforce_d3d11_test_texture(&t, 0, 0, &levels),
+            "partial GPU-owned surface overlap is rejected");
+    t.offset = a - 16; t.width = 8; t.height = 1; t.pitch = 32;
+    REQUIRE(!bruteforce_d3d11_test_texture(&t, 0, 0, &levels),
+            "overlap beginning before the surface is rejected");
+
+    surface(b, B_SIZE, 0);
+    clear(0xF0, 0xFF000000u, 0);
+    texture_linear_stage(0, a + 4, 4, 4, 16, 0x12);
+    combiners(1);
+    sample_quad(2, 2, 0.03f, 0.03f, vb);
+    REQUIRE(bruteforce_d3d11_test_readback(b) &&
+            ((uint32_t *)guest(b))[5 * B_SIZE + 5] == 0xFF000000u,
+            "unsafe partial alias rejects the draw rather than using a null texture");
+    t.offset = a; t.width = t.height = B_SIZE; t.pitch = B_SIZE * 4;
+    view = bruteforce_d3d11_test_texture(&t, 0, 0, &levels);
+    REQUIRE(view && bruteforce_test_srv_pixel(view, 8, 8, &color) && color == 0xFF00FF00u,
+            "noncurrent GPU-owned surface remains sampleable");
+
+    if (strict) {
+        REQUIRE(xbox_GuestBoundsUnregister(a) &&
+                xbox_GuestBoundsRegister(a, B_SIZE * B_SIZE * 4),
+                "replace a logical surface suballocation within its live parent");
+        for (i = 0; i < B_SIZE * B_SIZE; ++i)
+            ((uint32_t *)guest(a))[i] = 0xFF0000FFu;
+        view = bruteforce_d3d11_test_texture(&t, 0, 0, &levels);
+        REQUIRE(view && bruteforce_test_srv_pixel(view, 8, 8, &color) && color == 0xFF0000FFu,
+                "logical range reuse cannot expose the old GPU-owned surface");
+        surface(a, B_SIZE, 0);
+        clear(2, 0, 0);
+        REQUIRE(bruteforce_d3d11_test_readback(a) &&
+                ((uint32_t *)guest(a))[8 * B_SIZE + 8] == 0xFF0000FFu,
+                "recreated logical surface uses the replacement range");
+        REQUIRE(xbox_GuestBoundsUnregister(a), "unregister the old logical range");
+    }
+    REQUIRE(xbox_ContiguousFree(a), "free GPU-owned surface allocation");
+    REQUIRE(!bruteforce_d3d11_test_texture(&t, 0, 0, &levels),
+            "a freed GPU-owned allocation cannot fall back to stale guest bytes");
+    reused = xbox_ContiguousAlloc(B_SIZE * B_SIZE * 4, 4096);
+    REQUIRE(reused == a, "reuse the surface address");
+    if (strict)
+        REQUIRE(xbox_GuestBoundsRegister(a, B_SIZE * B_SIZE * 4),
+                "register the reused parent allocation");
+    for (i = 0; i < B_SIZE * B_SIZE; ++i)
+        ((uint32_t *)guest(a))[i] = 0xFF0000FFu;
+    view = bruteforce_d3d11_test_texture(&t, 0, 0, &levels);
+    REQUIRE(view && bruteforce_test_srv_pixel(view, 8, 8, &color) && color == 0xFF0000FFu,
+            "reused allocation cannot alias the previous GPU surface");
+    surface(a, B_SIZE, 0);
+    clear(2, 0, 0);
+    REQUIRE(bruteforce_d3d11_test_readback(a) &&
+            ((uint32_t *)guest(a))[8 * B_SIZE + 8] == 0xFF0000FFu,
+            "recreated color surface is seeded from the new allocation");
+
+    REQUIRE(VirtualQuery(guest(tiled), &info, sizeof info) == sizeof info &&
+            info.State == MEM_COMMIT, "tiled aperture is mapped in this fixture");
+    if (strict)
+        REQUIRE(xbox_GuestBoundsRegister(tiled, B_SIZE * B_SIZE * 4),
+                "register tiled color surface bounds");
+    surface(c, B_SIZE, 0);
+    method(0x0210, tiled);
+    clear(0xF0, 0xFFFF0000u, 0);
+    t.offset = tiled;
+    view = bruteforce_d3d11_test_texture(&t, 0, 0, &levels);
+    REQUIRE(view && bruteforce_test_srv_pixel(view, 8, 8, &color) &&
+            color == 0xFFFF0000u, "tiled surface receives the GPU clear");
+    clear(0x10, 0xFFFF0000u, 0);
+    REQUIRE(bruteforce_d3d11_test_snapshot(tiled, 0, &state) &&
+            state.bound_color == state.color, "tiled surface is tracked and bound");
+    REQUIRE(bruteforce_d3d11_test_pipeline(tiled, 0, &stats) && stats.gpu_dirty,
+            "partial tiled clear remains GPU-owned");
+    view = bruteforce_d3d11_test_texture(&t, 0, 0, &levels);
+    REQUIRE(view && bruteforce_test_srv_pixel(view, 8, 8, &color),
+            "tiled render target exposes a readable GPU snapshot");
+    if (color != 0xFFFF0000u)
+        fprintf(stderr, "FAIL: tiled snapshot pixel is %08X, expected FFFF0000\n", color);
+    REQUIRE(color == 0xFFFF0000u,
+            "tiled render target can be sampled through its ordered GPU snapshot");
+    surface(b, B_SIZE, 0);
+    clear(0xF0, 0xFF000000u, 0);
+    REQUIRE(xbox_ContiguousFree(c), "free the tiled surface's tracked parent");
+    REQUIRE(!bruteforce_d3d11_test_texture(&t, 0, 0, &levels),
+            "a freed tiled surface cannot fall back to stale guest bytes");
+    if (strict) {
+        uint32_t remaining;
+        REQUIRE(!xbox_GuestBoundsIdentity(tiled, &remaining) &&
+                xbox_GuestBoundsUnregister(tiled), "tiled bounds expire with the parent");
+    }
+    reused = xbox_ContiguousAlloc(B_SIZE * B_SIZE * 4, 4096);
+    REQUIRE(reused == c, "reuse the tiled surface's parent address");
+    if (strict)
+        REQUIRE(xbox_GuestBoundsRegister(tiled, B_SIZE * B_SIZE * 4),
+                "register the reused tiled range");
+    for (i = 0; i < B_SIZE * B_SIZE; ++i)
+        ((uint32_t *)guest(c))[i] = 0xFF0000FFu;
+    view = bruteforce_d3d11_test_texture(&t, 0, 0, &levels);
+    REQUIRE(view && bruteforce_test_srv_pixel(view, 8, 8, &color) && color == 0xFF0000FFu,
+            "reused tiled backing cannot expose the previous GPU surface");
+    REQUIRE(vb == b + B_SIZE * B_SIZE * 4 &&
+            VirtualProtect(guest(vb), 4096, PAGE_READWRITE | PAGE_GUARD, &old),
+            "guard the page after the short-pitch surface");
+    surface(b + 256, B_SIZE, 0);
+    method(0x020C, B_SIZE * 4 - 4);
+    clear(0xF0, 0xFFFF0000u, 0);
+    t.offset = b + 256;
+    t.pitch = B_SIZE * 4 - 4;
+    REQUIRE(!bruteforce_d3d11_test_texture(&t, 0, 0, &levels),
+            "a GPU-owned short-pitch surface cannot be treated as an exact alias");
+    REQUIRE(VirtualQuery(guest(vb), &info, sizeof info) == sizeof info &&
+            (info.Protect & PAGE_GUARD), "short-pitch clear preserves the following guard page");
+    REQUIRE(VirtualProtect(guest(vb), 4096, old, &ignored),
+            "restore the page after the short-pitch surface");
+
+    if (strict)
+        REQUIRE(xbox_GuestBoundsRegister(dirty_resize, B_SIZE * B_SIZE * 4) &&
+                xbox_GuestBoundsRegister(clean_resize, B_SIZE * B_SIZE * 4) &&
+                xbox_GuestBoundsRegister(race_resize, B_SIZE * B_SIZE * 4) &&
+                xbox_GuestBoundsRegister(migrated_resize, B_SIZE * B_SIZE * 4) &&
+                xbox_GuestBoundsRegister(protected_surface, B_SIZE * (B_SIZE * 4 + 16)),
+                "register resized surface bounds");
+    surface(dirty_resize, B_SIZE / 2, 0);
+    clear(0xF0, 0xFFFF0000u, 0);
+    clear(0x10, 0xFFFF0000u, 0);
+    *(uint32_t *)guest(dirty_resize) = 0xFF0000FFu;
+    surface(dirty_resize, B_SIZE, 0);
+    clear(2, 0, 0);
+    t.offset = dirty_resize;
+    t.pitch = B_SIZE * 4;
+    REQUIRE(!bruteforce_d3d11_test_texture(&t, 0, 0, &levels),
+            "a guest write conflicting with a dirty layout change rejects the alias");
+    *(uint32_t *)guest(dirty_resize) = 0xFFFF0000u;
+    REQUIRE(!bruteforce_d3d11_test_texture(&t, 0, 0, &levels),
+            "an ambiguous replacement stays rejected after restoring guest bytes");
+    clear(0xF0, 0xFF00FF00u, 0);
+    view = bruteforce_d3d11_test_texture(&t, 0, 0, &levels);
+    REQUIRE(view && bruteforce_test_srv_pixel(view, 0, 0, &color) &&
+            color == 0xFF00FF00u, "a full clear resolves an ambiguous replacement");
+
+    surface(race_resize, B_SIZE / 2, 0);
+    clear(0xF0, 0xFFFF0000u, 0);
+    clear(0x10, 0xFFFF0000u, 0);
+    surface(race_resize, B_SIZE, 0);
+    bruteforce_d3d11_test_fail("guest-change-seed", 1);
+    clear(2, 0, 0);
+    t.offset = race_resize;
+    REQUIRE(!bruteforce_d3d11_test_texture(&t, 0, 0, &levels),
+            "a raced migration cannot publish the replacement alias");
+    *(uint32_t *)guest(race_resize) = 0xFFFF0000u;
+    REQUIRE(!bruteforce_d3d11_test_texture(&t, 0, 0, &levels) &&
+            bruteforce_d3d11_test_readback(race_resize) &&
+            bruteforce_d3d11_test_texture(&t, 0, 0, &levels),
+            "a raced migration remains ambiguous until readback");
+
+    surface(migrated_resize, B_SIZE / 2, 0);
+    clear(0xF0, 0xFFFF0000u, 0);
+    clear(0x10, 0xFFFF0000u, 0);
+    surface(migrated_resize, B_SIZE, 0);
+    clear(2, 0, 0);
+    t.offset = migrated_resize;
+    REQUIRE(bruteforce_d3d11_test_pipeline(migrated_resize, 0, &stats),
+            "inspect the replacement layout");
+    if (gpu_scale_requested()) {
+        REQUIRE(stats.gpu_dirty, "GPU-migrated layouts retain their ownership");
+        *(uint32_t *)guest(migrated_resize) = 0xFF0000FFu;
+        REQUIRE(!bruteforce_d3d11_test_texture(&t, 0, 0, &levels),
+                "a write after GPU migration rejects the alias");
+    } else {
+        REQUIRE(!bruteforce_d3d11_test_texture(&t, 0, 0, &levels) &&
+                bruteforce_d3d11_test_readback(migrated_resize) &&
+                bruteforce_d3d11_test_texture(&t, 0, 0, &levels),
+                "an unscaled GPU-owned replacement resolves through readback");
+    }
+
+    surface(clean_resize, B_SIZE / 2, 0);
+    clear(0xF0, 0xFFFF0000u, 0);
+    *(uint32_t *)guest(clean_resize) = 0xFF0000FFu;
+    surface(clean_resize, B_SIZE, 0);
+    clear(2, 0, 0);
+    t.offset = clean_resize;
+    view = bruteforce_d3d11_test_texture(&t, 0, 0, &levels);
+    REQUIRE(view && bruteforce_test_srv_pixel(view, 0, 0, &color) &&
+            color == 0xFF0000FFu, "a clean layout change seeds from current guest bytes");
+
+    surface(protected_surface, B_SIZE, 0);
+    clear(0xF0, 0xFFFF0000u, 0);
+    t.offset = protected_surface;
+    REQUIRE(VirtualProtect(guest(protected_surface), 4096, PAGE_READONLY, &old),
+            "reprotect color output as read-only");
+    clear(0xF0, 0xFF00FF00u, 0);
+    REQUIRE(*(uint32_t *)guest(protected_surface) == 0xFFFF0000u &&
+            !bruteforce_d3d11_test_texture(&t, 0, 0, &levels),
+            "a read-only clear mirror fails without overwriting guest bytes");
+    REQUIRE(VirtualProtect(guest(protected_surface), 4096, old, &ignored) &&
+            bruteforce_d3d11_test_readback(protected_surface) &&
+            *(uint32_t *)guest(protected_surface) == 0xFF00FF00u,
+            "a restored clear mirror resolves through readback");
+
+    executable_page = (uint32_t *)VirtualAlloc(NULL, 4096, MEM_RESERVE | MEM_COMMIT,
+                                               PAGE_EXECUTE_READWRITE);
+    REQUIRE(executable_page, "allocate synthetic executable page");
+    *executable_page = 0x11223344u;
+    color = 0x55667788u;
+    REQUIRE(VirtualProtect(executable_page, 4096, PAGE_EXECUTE_READ, &old) &&
+            !bruteforce_d3d11_test_guarded_write(executable_page, &color, sizeof color) &&
+            *executable_page == 0x11223344u &&
+            VirtualQuery(executable_page, &info, sizeof info) == sizeof info &&
+            info.Protect == PAGE_EXECUTE_READ,
+            "checked writes do not bypass executable read-only protection");
+    REQUIRE(VirtualProtect(executable_page, 4096, old, &ignored) &&
+            bruteforce_d3d11_test_guarded_write(executable_page, &color, sizeof color) &&
+            *executable_page == color && VirtualFree(executable_page, 0, MEM_RELEASE),
+            "checked writes succeed after executable page protection is restored");
+
+    REQUIRE(VirtualProtect(guest(protected_surface), 4096, PAGE_READWRITE | PAGE_GUARD, &old),
+            "guard color output before a full clear");
+    clear(0xF0, 0xFF0000FFu, 0);
+    REQUIRE(VirtualQuery(guest(protected_surface), &info, sizeof info) == sizeof info &&
+            (info.Protect & PAGE_GUARD), "clear mirror preserves the guard flag");
+    REQUIRE(VirtualProtect(guest(protected_surface), 4096, old, &ignored) &&
+            bruteforce_d3d11_test_readback(protected_surface) &&
+            *(uint32_t *)guest(protected_surface) == 0xFF0000FFu,
+            "a guarded clear resolves after protection is restored");
+
+    clear(0x10, 0xFF0000FFu, 0);
+    REQUIRE(VirtualProtect(guest(protected_surface), 4096, PAGE_READONLY, &old),
+            "reprotect color output before readback");
+    REQUIRE(!bruteforce_d3d11_test_readback(protected_surface) &&
+            *(uint32_t *)guest(protected_surface) == 0xFF0000FFu,
+            "read-only readback fails without a guest write or crash");
+    REQUIRE(VirtualProtect(guest(protected_surface), 4096, old, &ignored) &&
+            bruteforce_d3d11_test_readback(protected_surface),
+            "readback succeeds after write access is restored");
+
+    REQUIRE(VirtualProtect(guest(protected_surface), 4096, PAGE_READWRITE | PAGE_GUARD, &old),
+            "guard color output before readback");
+    REQUIRE(!bruteforce_d3d11_test_readback(protected_surface) &&
+            VirtualQuery(guest(protected_surface), &info, sizeof info) == sizeof info &&
+            (info.Protect & PAGE_GUARD), "readback preserves the guard flag");
+    REQUIRE(VirtualProtect(guest(protected_surface), 4096, old, &ignored) &&
+            bruteforce_d3d11_test_readback(protected_surface),
+            "guarded readback succeeds after protection is restored");
+
+    bruteforce_d3d11_test_fail("guest-guard-readback", 1);
+    REQUIRE(!bruteforce_d3d11_test_readback(protected_surface) &&
+            VirtualQuery(guest(protected_surface), &info, sizeof info) == sizeof info &&
+            (info.Protect & PAGE_GUARD),
+            "readback reports and preserves a guard installed after the write");
+    REQUIRE(VirtualProtect(guest(protected_surface), 4096, PAGE_READWRITE, &ignored) &&
+            !bruteforce_d3d11_test_texture(&t, 0, 0, &levels) &&
+            bruteforce_d3d11_test_readback(protected_surface) &&
+            bruteforce_d3d11_test_texture(&t, 0, 0, &levels),
+            "a failed post-write check rejects aliases until a successful retry");
+
+    for (i = 0; i < B_SIZE; ++i)
+        protected_bytes[i * (B_SIZE * 2 + 1) + B_SIZE * 2] = 0xD5;
+    surface(protected_surface, B_SIZE, 0);
+    method(0x0208, 0x123);
+    method(0x020C, B_SIZE * 2 + 1);
+    clear(0xF0, 0xFFFF0000u, 0);
+    for (i = 0; i < B_SIZE; ++i)
+        REQUIRE(protected_bytes[i * (B_SIZE * 2 + 1) + B_SIZE * 2] == 0xD5,
+                "a padded clear leaves row padding intact");
+    REQUIRE(VirtualProtect(protected_bytes + 4096, 4096, PAGE_READONLY, &old),
+            "reprotect a middle page of a padded color surface");
+    clear(0xF0, 0xFF00FF00u, 0);
+    t.pitch = B_SIZE * 2 + 1;
+    t.color = 0x11;
+    REQUIRE(protected_bytes[0] == 0xE0 && protected_bytes[1] == 0x07 &&
+            protected_bytes[(B_SIZE - 1) * (B_SIZE * 2 + 1)] == 0x00 &&
+            protected_bytes[(B_SIZE - 1) * (B_SIZE * 2 + 1) + 1] == 0xF8 &&
+            !bruteforce_d3d11_test_texture(&t, 0, 0, &levels),
+            "a partial padded clear rejects the uncertain GPU alias");
+    REQUIRE(VirtualProtect(protected_bytes + 4096, 4096, old, &ignored) &&
+            bruteforce_d3d11_test_readback(protected_surface),
+            "readback resolves a partial padded clear");
+    for (i = 0; i < B_SIZE; ++i)
+        REQUIRE(protected_bytes[i * (B_SIZE * 2 + 1)] == 0xE0 &&
+                protected_bytes[i * (B_SIZE * 2 + 1) + 1] == 0x07 &&
+                protected_bytes[i * (B_SIZE * 2 + 1) + B_SIZE * 2] == 0xD5,
+                "padded readback restores each row without changing its padding");
+    puts("color surface alias validity verified");
     return 1;
 }
 
@@ -2754,6 +3124,7 @@ static int test_pipeline_readback_failure(const char *mode, const char *path)
 {
     uint32_t color = xbox_ContiguousAlloc(B_SIZE * B_SIZE * 4, 4096);
     FILE *marker = fopen(path, "wb");
+    DWORD old;
 
     REQUIRE(color && marker, "initialize failed readback fixture");
     REQUIRE(fwrite("pending", 1, 7, marker) == 7 && fflush(marker) == 0,
@@ -2761,7 +3132,16 @@ static int test_pipeline_readback_failure(const char *mode, const char *path)
     surface(color, B_SIZE, 0);
     clear(0xF0, 0xFF112233u, 0);
     screen_quad(0xFF40A020u);
-    bruteforce_d3d11_test_fail(strstr(mode, "loss") ? "readback-loss" : "staging-texture", 1);
+    if (strstr(mode, "failure-guard"))
+        REQUIRE(VirtualProtect(guest(color), 4096, PAGE_READWRITE | PAGE_GUARD, &old),
+                "guard the tracked flip output");
+    else if (strstr(mode, "failure-readonly"))
+        REQUIRE(VirtualProtect(guest(color), 4096, PAGE_READONLY, &old),
+                "reprotect the tracked flip output");
+    else if (strstr(mode, "failure-race"))
+        bruteforce_d3d11_test_fail("guest-change-readback", 1);
+    else
+        bruteforce_d3d11_test_fail(strstr(mode, "loss") ? "readback-loss" : "staging-texture", 1);
     flip();
     REQUIRE(fwrite(" completed", 1, 10, marker) == 10 && fclose(marker) == 0,
             "write completed readback marker");
@@ -3020,6 +3400,9 @@ int main(int argc, char **argv)
     SetErrorMode(SEM_NOGPFAULTERRORBOX | SEM_FAILCRITICALERRORS);
     if (argc != 4)
         return 2;
+    if ((strstr(argv[2], "texture-lifetime") || strstr(argv[2], "color-alias")) &&
+        _putenv_s("RECOMP_HEAP_RECLAIM", "1") != 0)
+        return 1;
     perf_mode = strcmp(argv[2], "gpu-perf-counters") == 0;
     if (perf_mode &&
         (_putenv_s("BRUTEFORCE_PERF_COUNTERS", "1") != 0 ||
@@ -3100,6 +3483,16 @@ int main(int argc, char **argv)
         return test_scale_query() ? 0 : 1;
     if (strstr(argv[2], "pipeline-clean"))
         return test_pipeline_clean(argv[3]) ? 0 : 1;
+    if (strstr(argv[2], "shader-diag-event"))
+        bruteforce_d3d11_test_fail("vsh-event", 1);
+    if (strstr(argv[2], "color-alias"))
+        return test_color_texture_aliases() ? 0 : 1;
+    if (strstr(argv[2], "texture-lifetime")) {
+        int strict = getenv("RECOMP_GPU_TEXTURE_BOUNDS") &&
+                     strcmp(getenv("RECOMP_GPU_TEXTURE_BOUNDS"), "1") == 0;
+        return bruteforce_d3d11_test_initialize_device() &&
+               bruteforce_test_texture_lifetime(strict) ? 0 : 1;
+    }
     if (strstr(argv[2], "pipeline-coherence"))
         return test_pipeline_guest_coherence(argv[2]) ? 0 : 1;
     if (strstr(argv[2], "pipeline-16bit"))

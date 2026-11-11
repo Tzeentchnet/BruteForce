@@ -327,6 +327,183 @@ done:
     return ok;
 }
 
+int bruteforce_test_srv_pixel(ID3D11ShaderResourceView *srv, unsigned x, unsigned y,
+                             uint32_t *argb)
+{
+    ID3D11Resource *resource = NULL;
+    ID3D11Texture2D *staging = NULL;
+    D3D11_TEXTURE2D_DESC desc;
+    D3D11_MAPPED_SUBRESOURCE mapped;
+    const uint8_t *p;
+    HRESULT hr;
+    int ok = 0;
+    ID3D11Device *device = bruteforce_d3d11_test_device();
+    ID3D11DeviceContext *context = bruteforce_d3d11_test_context();
+
+    if (!srv || !argb)
+        return 0;
+    ID3D11ShaderResourceView_GetResource(srv, &resource);
+    ID3D11Texture2D_GetDesc((ID3D11Texture2D *)resource, &desc);
+    if (x >= desc.Width || y >= desc.Height ||
+        (desc.Format != DXGI_FORMAT_B8G8R8A8_UNORM &&
+         desc.Format != DXGI_FORMAT_R8G8B8A8_UNORM))
+        goto done;
+    desc.Usage = D3D11_USAGE_STAGING;
+    desc.BindFlags = 0;
+    desc.CPUAccessFlags = D3D11_CPU_ACCESS_READ;
+    desc.MiscFlags = 0;
+    hr = ID3D11Device_CreateTexture2D(device, &desc, NULL, &staging);
+    if (FAILED(hr)) goto done;
+    ID3D11DeviceContext_CopyResource(context, (ID3D11Resource *)staging, resource);
+    hr = ID3D11DeviceContext_Map(context, (ID3D11Resource *)staging, 0,
+                                D3D11_MAP_READ, 0, &mapped);
+    if (FAILED(hr)) goto done;
+    p = (const uint8_t *)mapped.pData + (size_t)y * mapped.RowPitch + x * 4;
+    *argb = ((uint32_t)p[3] << 24) | ((uint32_t)p[1] << 8);
+    if (desc.Format == DXGI_FORMAT_B8G8R8A8_UNORM)
+        *argb |= ((uint32_t)p[2] << 16) | p[0];
+    else
+        *argb |= ((uint32_t)p[0] << 16) | p[2];
+    ID3D11DeviceContext_Unmap(context, (ID3D11Resource *)staging, 0);
+    ok = 1;
+done:
+    if (staging) ID3D11Texture2D_Release(staging);
+    if (resource) ID3D11Resource_Release(resource);
+    return ok;
+}
+
+int bruteforce_test_texture_lifetime(int strict)
+{
+    Nv2aTexture t = {0};
+    ID3D11ShaderResourceView *first, *next;
+    uint32_t parent = xbox_ContiguousAlloc(8192, 4096), reused, remaining;
+    unsigned levels;
+    DWORD old, ignored;
+    MEMORY_BASIC_INFORMATION info;
+
+    REQUIRE(parent, "allocate texture lifetime fixture");
+    t.offset = parent + 128;
+    t.width = t.height = 4;
+    t.pitch = 16;
+    t.color = 0x3F;
+    memset(guest(t.offset), 0x35, 64);
+    if (strict) {
+        REQUIRE(!bruteforce_d3d11_test_texture(&t, 0, 0, &levels),
+                "strict mode rejects unregistered tracked suballocations");
+        REQUIRE(xbox_GuestBoundsRegister(t.offset, 32),
+                "register a deliberately short logical suballocation");
+        REQUIRE(!bruteforce_d3d11_test_texture(&t, 0, 0, &levels),
+                "strict mode detects a short logical suballocation");
+        REQUIRE(xbox_GuestBoundsUnregister(t.offset) &&
+                xbox_GuestBoundsRegister(t.offset, 64),
+                "replace the logical suballocation with sufficient bounds");
+    }
+    first = bruteforce_d3d11_test_texture(&t, 0, 0, &levels);
+    REQUIRE(first && verify_texture(&t, 0, 0, 0), "upload a tracked texture");
+    ID3D11ShaderResourceView_AddRef(first);
+    REQUIRE(bruteforce_d3d11_test_texture(&t, 0, 0, &levels) == first,
+            "unchanged live allocation reuses its snapshot");
+    ((uint8_t *)guest(t.offset))[63] ^= 0x7Fu;
+    next = bruteforce_d3d11_test_texture(&t, 0, 0, &levels);
+    REQUIRE(next && next != first && verify_texture(&t, 0, 0, 0),
+            "tracked guest writes invalidate and upload their exact bytes");
+    ID3D11ShaderResourceView_Release(first);
+    first = next;
+    ID3D11ShaderResourceView_AddRef(first);
+    if (strict) {
+        REQUIRE(xbox_GuestBoundsUnregister(t.offset), "unregister logical suballocation");
+        REQUIRE(!bruteforce_d3d11_test_texture(&t, 0, 0, &levels),
+                "unregistered cached data is rejected");
+        REQUIRE(xbox_GuestBoundsRegister(t.offset, 64),
+                "register the same bytes as a new logical allocation");
+        next = bruteforce_d3d11_test_texture(&t, 0, 0, &levels);
+        REQUIRE(next && next != first, "suballocation reuse invalidates identical bytes");
+        REQUIRE(xbox_GuestBoundsUnregister(t.offset), "unregister tracked child");
+    } else {
+        REQUIRE(xbox_ContiguousFree(parent), "free tracked parent allocation");
+        REQUIRE(!bruteforce_d3d11_test_texture(&t, 0, 0, &levels),
+                "a previously tracked freed allocation is rejected");
+        reused = xbox_ContiguousAlloc(8192, 4096);
+        REQUIRE(reused == parent, "reuse the tracked parent address");
+        memset(guest(t.offset), 0x35, 64);
+        ((uint8_t *)guest(t.offset))[63] ^= 0x7Fu;
+        next = bruteforce_d3d11_test_texture(&t, 0, 0, &levels);
+        REQUIRE(next && next != first && verify_texture(&t, 0, 0, 0),
+                "reused parent invalidates identical cached bytes");
+    }
+    ID3D11ShaderResourceView_Release(first);
+
+    t.offset = XBOX_CONTIG_BASE + 128;
+    REQUIRE(!xbox_ContiguousBlockIdentity(t.offset, &remaining) && !remaining,
+            "reserved contiguous page is untracked");
+    memset(guest(t.offset), 0x63, 64);
+    if (strict)
+        REQUIRE(xbox_GuestBoundsRegister(t.offset, 64),
+                "register an explicitly owned untracked range");
+    first = bruteforce_d3d11_test_texture(&t, 0, 0, &levels);
+    REQUIRE(first && verify_texture(&t, 0, 0, 0), "upload an untracked texture");
+    ID3D11ShaderResourceView_AddRef(first);
+    ((uint8_t *)guest(t.offset))[7] ^= 1;
+    next = bruteforce_d3d11_test_texture(&t, 0, 0, &levels);
+    REQUIRE(next && next != first && verify_texture(&t, 0, 0, 0),
+            "writes to untracked readable bytes invalidate the exact snapshot");
+    ID3D11ShaderResourceView_Release(first);
+    if (strict)
+        REQUIRE(xbox_GuestBoundsUnregister(t.offset), "unregister untracked range");
+
+    {
+        uint32_t heap = xbox_HeapAlloc(64, 16);
+        uint32_t mirror = heap + (uint32_t)xbox_GetMappedSize();
+        REQUIRE(heap && mirror < XBOX_CONTIG_BASE, "allocate mirrored heap texture");
+        memset(guest(heap), 0x41, 64);
+        t.offset = mirror;
+        if (strict)
+            REQUIRE(xbox_GuestBoundsRegister(mirror, 64), "register mirrored texture bounds");
+        first = bruteforce_d3d11_test_texture(&t, 0, 0, &levels);
+        REQUIRE(first, "upload from a RAM mirror");
+        ID3D11ShaderResourceView_AddRef(first);
+        ((uint8_t *)guest(heap))[0] ^= 0x7Fu;
+        next = bruteforce_d3d11_test_texture(&t, 0, 0, &levels);
+        REQUIRE(next && next != first, "parent writes invalidate a mirrored texture");
+        ID3D11ShaderResourceView_Release(first);
+        xbox_HeapFree(heap);
+        REQUIRE(!bruteforce_d3d11_test_texture(&t, 0, 0, &levels),
+                "freeing the heap parent invalidates a mirrored texture");
+        if (strict)
+            REQUIRE(xbox_GuestBoundsUnregister(mirror), "unregister mirrored texture bounds");
+    }
+
+    if (!strict) {
+        t.offset = parent + 4096 - 32;
+        memset(guest(t.offset), 0x52, 64);
+        first = bruteforce_d3d11_test_texture(&t, 0, 0, &levels);
+        REQUIRE(first, "upload a texture crossing a page boundary");
+        ID3D11ShaderResourceView_AddRef(first);
+        REQUIRE(VirtualProtect(guest(parent + 4096), 4096,
+                               PAGE_READWRITE | PAGE_GUARD, &old),
+                "guard the second texture page");
+        REQUIRE(!bruteforce_d3d11_test_texture(&t, 0, 0, &levels),
+                "guarded cached texture is rejected without a fault");
+        REQUIRE(VirtualQuery(guest(parent + 4096), &info, sizeof info) == sizeof info &&
+                (info.Protect & PAGE_GUARD), "checked read leaves the guard installed");
+        REQUIRE(VirtualProtect(guest(parent + 4096), 4096, old, &ignored),
+                "restore guarded texture page");
+        REQUIRE(bruteforce_d3d11_test_texture(&t, 0, 0, &levels) == first,
+                "unchanged texture remains reusable after protection restoration");
+        REQUIRE(VirtualProtect(guest(parent + 4096), 4096, PAGE_NOACCESS, &old),
+                "reprotect the second texture page");
+        REQUIRE(!bruteforce_d3d11_test_texture(&t, 0, 0, &levels),
+                "reprotected cached texture is rejected");
+        REQUIRE(VirtualProtect(guest(parent + 4096), 4096, old, &ignored),
+                "restore inaccessible texture page");
+        REQUIRE(bruteforce_d3d11_test_texture(&t, 0, 0, &levels) == first,
+                "restored texture may be reused");
+        ID3D11ShaderResourceView_Release(first);
+    }
+    puts("texture lifetime, bounds and checked reads verified");
+    return 1;
+}
+
 static int test_uploads_and_cache(int enabled)
 {
     static const uint32_t formats[] = {0x06, 0x0B, 0x0C, 0x0E, 0x0F, 0x12};
@@ -556,6 +733,7 @@ static int test_guarded_p8_cube(int enabled, int tracked_short)
     REQUIRE(allocation && palette, "allocate guarded P8 cube");
     t.offset = allocation + 0x1000 - (uint32_t)base.span;
     t.palette = palette;
+    t.palette_entries = 32;
     memset(guest(t.offset), 31, base.span);
     memset(guest(palette), 0xFF, 128);
     nv2a_pb_exec_method(0, 0x1B20, (palette - XBOX_CONTIG_BASE) | (3u << 2));
@@ -640,6 +818,7 @@ int bruteforce_test_mip_p8_invalid(void)
     ((uint8_t *)guest(tex))[layout.subresource[5][4].offset] = 32;
     t.offset = tex;
     t.palette = pal;
+    t.palette_entries = 32;
     nv2a_pb_exec_method(0, 0x1B20, (pal - XBOX_CONTIG_BASE) | (3u << 2));
     REQUIRE(bruteforce_d3d11_test_texture(&t, 1, 0, &levels) != NULL && levels == 1,
             "disabled mip path ignores invalid unused lower level");

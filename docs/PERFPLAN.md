@@ -45,7 +45,7 @@ does not close G4 for movement or other scenes.
 | 2 | Implemented (0017, on by default with the D3D11 back end). Stationary hold 3.20 → 30.41 rendered fps (3 runs each, alternating). An unreviewed retail diagnostic sampled 23,400 GPU-program batches without reported vertex differences through its last report. WARP and hardware fixtures cover additional packed formats, relative constants and culling against the CPU interpreter; matched-scene and complete format/hardware verification remain open. |
 | 3 | Partial. Async visibility reports (0018) and shared GPU presentation (0024) are opt-in. Three reviewed alternating runs per visibility mode measured 27.401 versus 30.606 world changes/s, but async still failed the 1%-low and G3 gates and remains opt-in. Submitted renderer work now has a two-event bound, and default-off elision skips copies only for demonstrably coherent, unscaled 32-bit guest surfaces. Tracked-surface flips still wait; dirty surfaces, diagnostics and scaled/16-bit frames still read back. General on-demand guest-reader interception is not implemented. CPU-written Bink frames synchronize before scaled submission. No new retail performance comparison was run. |
 | 4 | Selected after remaining existing-option isolation. G3 remains 65.467% with async visibility and is still dominated by the real PFB flush poll. Preserve flush, semaphore, and flip ordering. |
-| 5 | In progress. GPU compute decodes common textures; exact D24 and packed D24S8/stencil surface aliases and GPU window clipping are experimental opt-ins. A native xemu Basic Controls match now establishes that packed-stencil reconstruction, rather than a global gamma change, removes the large brightness error in that state: 43.4320% of pixels exceed 8/255 without it and 3.7119% with it. Unsupported ownership cases and other scenes keep the option experimental and G4 unmet. D3D11 honors partial clear rectangles, and patch 0022 removes redundant software depth clears when a backend owns drawing and clearing. Patch 0019 cached hot `getenv` calls. |
+| 5 | In progress. GPU compute decodes common textures; exact D24 and packed D24S8/stencil surface aliases and GPU window clipping are experimental opt-ins. A native xemu Basic Controls match now establishes that packed-stencil reconstruction, rather than a global gamma change, removes the large brightness error in that state: 43.4320% of pixels exceed 8/255 without it and 3.7119% with it. Unsupported ownership cases and other scenes keep the option experimental and G4 unmet. D3D11 honors partial clear rectangles, and patch 0022 removes redundant software depth clears when a backend owns drawing and clearing. Patch 0019 cached hot `getenv` calls. Checked texture/colour snapshots and tracked lifetimes replace repeated page queries on those paths, but their performance and title correctness have not been measured. |
 
 ### Audio performance status
 
@@ -104,10 +104,18 @@ each ordinary use; the old approximate checks are a diagnostic opt-in.
 Failed uploads no longer accumulate unkeyed cache slots, and deterministic
 unsupported decodes are negatively cached after alias checks. A P8 page-query
 reuse experiment recorded no hits in three candidate runs and was removed.
-Synthetic rewrite, failure, alias and P8 boundary/reprotection fixtures pass,
-but the final binary has not been rebenchmarked, and the user-reported 6 fps
-case, controlled snapshot cost, guest-write races and matched gameplay
-correctness remain unresolved. Renderer device loss fails explicitly;
+The current texture and colour-shadow paths instead use checked copies,
+rechecking mapping and allocation identities, with optional explicit
+suballocation bounds. Guard, reprotection, lifecycle, colour-alias and
+layout-replacement cases are synthetic-tested, but snapshots do not serialize
+concurrent writers. Checked colour-surface writes reject read-only and
+already-guarded pages; failed or raced readback stops the tracked flip.
+Concurrent reprotection remains non-atomic. A layout replacement with
+uncertain GPU ownership cannot be sampled until a successful full clear or
+readback; its title frequency and the cost of the new checks remain unknown.
+No new retail binary or same-generation alternating comparison was run.
+The user-reported 6 fps case, controlled snapshot cost, guest-write races and
+matched gameplay correctness remain unresolved. Renderer device loss fails explicitly;
 recovery and the separate presenter device remain open. See
 [FINDINGS](./FINDINGS.md#default-d3d11-movement-regression-2026-10-30).
 Detailed validation and cache-work counters are now available behind
@@ -118,7 +126,9 @@ camera-pan manifests, `guest_word` and `readable_guest_range` validation took
 9.336 and 9.639 ms/flip respectively, almost entirely in `VirtualQuery`.
 Exact texture comparison took 0.832 ms/flip, with 75.699 linear probes per
 lookup. These are instrumented workload ratios on different threads, not
-additive frame-time components.
+additive frame-time components. The historical `readable_guest_range`
+counter now also includes checked texture/colour copies with no page-query
+calls, so it is not directly comparable across these toolkit trees.
 
 An opt-in persistent combiner pixel-shader cache now avoids recompiling
 matching bytecode in synthetic warm runs and an alternating stationary-tutorial

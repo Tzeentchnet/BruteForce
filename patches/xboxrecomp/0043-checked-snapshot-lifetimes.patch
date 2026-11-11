@@ -1,0 +1,252 @@
+diff --git a/src/kernel/nv2a_backend.h b/src/kernel/nv2a_backend.h
+index e5a6605..adbdda7 100644
+--- a/src/kernel/nv2a_backend.h
++++ b/src/kernel/nv2a_backend.h
+@@ -137,8 +137,9 @@ int nv2a_backend_decode_texture(const Nv2aTexture *tex, uint32_t *argb_out);
+ 
+ /* Decode a single swizzled P8 level from caller-owned, stable snapshots.
+  * Both input sizes and the output capacity are in bytes/texels respectively.
+- * Rejects malformed dimensions, short ranges and any out-of-range index
+- * before writing output; no NV2A hardware behaviour is assumed. */
++ * Rejects malformed dimensions, short or output-overlapping input ranges,
++ * and any out-of-range index before writing output; no NV2A hardware
++ * behaviour is assumed. */
+ int nv2a_backend_decode_p8_data(const Nv2aTexture *tex,
+                                 const void *indices, size_t index_bytes,
+                                 const void *palette, size_t palette_bytes,
+@@ -146,7 +147,8 @@ int nv2a_backend_decode_p8_data(const Nv2aTexture *tex,
+ 
+ /* Decode a validated, immutable level-zero snapshot. Supports the CPU
+  * sampler's non-P8 formats. No guest memory is read; malformed dimensions,
+- * pitch, format, source length or output capacity fail before writing. */
++ * pitch, format, source length, output capacity or overlapping input/output
++ * ranges fail before writing. */
+ int nv2a_backend_decode_texture_data(const Nv2aTexture *tex,
+                                      const void *data, size_t data_bytes,
+                                      uint32_t *argb_out, size_t output_texels);
+diff --git a/src/kernel/nv2a_pb_exec.c b/src/kernel/nv2a_pb_exec.c
+index 0efc62c..e1d2d80 100644
+--- a/src/kernel/nv2a_pb_exec.c
++++ b/src/kernel/nv2a_pb_exec.c
+@@ -1060,6 +1060,13 @@ static void current_render_state(Nv2aRenderState *r)
+ 
+ static int sample_texture(uint32_t u, uint32_t v, uint32_t *argb);
+ 
++static int snapshot_spans_overlap(const void *a, size_t a_bytes,
++                                  const void *b, size_t b_bytes)
++{
++    uintptr_t x = (uintptr_t)a, y = (uintptr_t)b;
++    return x <= y ? y - x < a_bytes : x - y < b_bytes;
++}
++
+ int nv2a_backend_decode_p8_data(const Nv2aTexture *tex,
+                                 const void *indices, size_t index_bytes,
+                                 const void *palette, size_t palette_bytes,
+@@ -1077,7 +1084,10 @@ int nv2a_backend_decode_p8_data(const Nv2aTexture *tex,
+     entries = nv2a_p8_palette_entries(tex->palette_entries);
+     count = (size_t)tex->width * tex->height;
+     if (!entries || index_bytes < count || palette_bytes < (size_t)entries * 4 ||
+-        output_texels < count)
++        output_texels < count ||
++        snapshot_spans_overlap(src, count, argb_out, count * sizeof *argb_out) ||
++        snapshot_spans_overlap(pal, (size_t)entries * 4, argb_out,
++                               count * sizeof *argb_out))
+         return 0;
+     for (i = 0; i < count; ++i)
+         if (src[i] >= entries)
+@@ -1692,8 +1702,10 @@ int nv2a_backend_decode_texture_data(const Nv2aTexture *tex,
+         }
+     }
+ sized:
+-    if (data_bytes < required)
+-        return 0;
++   if (data_bytes < required ||
++       snapshot_spans_overlap(data, (size_t)required, argb_out,
++                              count * sizeof *argb_out))
++       return 0;
+     memset(&t, 0, sizeof t);
+     t.width = tex->width;
+     t.height = tex->height;
+diff --git a/src/kernel/xbox_memory_layout.c b/src/kernel/xbox_memory_layout.c
+index 557ca8b..246148c 100644
+--- a/src/kernel/xbox_memory_layout.c
++++ b/src/kernel/xbox_memory_layout.c
+@@ -4800,16 +4800,25 @@ static SRWLOCK g_guest_bounds_lock = SRWLOCK_INIT;
+ 
+ static uint64_t guest_bounds_parent(uint32_t va, uint32_t *remaining)
+ {
++    uint64_t mapped = xbox_GetMappedSize();
+     if (va >= XBOX_CONTIG_BASE &&
+         (uint64_t)va < (uint64_t)XBOX_CONTIG_BASE + XBOX_CONTIG_SIZE)
+         return xbox_ContiguousBlockIdentity(va, remaining);
++    if (va >= XBOX_TILED_BASE &&
++        (uint64_t)va < (uint64_t)XBOX_TILED_BASE + XBOX_CONTIG_SIZE &&
++        (uint64_t)va - XBOX_TILED_BASE < mapped)
++        return xbox_ContiguousBlockIdentity(XBOX_CONTIG_BASE + (va - XBOX_TILED_BASE),
++                                            remaining);
++    if (mapped && va < XBOX_CONTIG_BASE &&
++        (uint64_t)va < mapped * (1ull + XBOX_NUM_MIRRORS))
++        return xbox_HeapBlockIdentity((uint32_t)((uint64_t)va % mapped), remaining);
+     return xbox_HeapBlockIdentity(va, remaining);
+ }
+ 
+ int xbox_GuestBoundsRegister(uint32_t va, uint32_t bytes)
+ {
+     uint64_t layout = xbox_MemoryLayoutGeneration(), parent, identity;
+-    uint32_t remaining;
++    uint32_t remaining, checked_remaining;
+     int i, slot = -1;
+ 
+     if (!va || !bytes || (uint64_t)va + bytes > (uint64_t)UINT32_MAX + 1 || !layout)
+@@ -4821,6 +4830,12 @@ int xbox_GuestBoundsRegister(uint32_t va, uint32_t bytes)
+     if (!identity)
+         return 0;
+     AcquireSRWLockExclusive(&g_guest_bounds_lock);
++    if (xbox_MemoryLayoutGeneration() != layout ||
++        guest_bounds_parent(va, &checked_remaining) != parent ||
++        (parent && bytes > checked_remaining)) {
++        ReleaseSRWLockExclusive(&g_guest_bounds_lock);
++        return 0;
++    }
+     for (i = 0; i < XBOX_GUEST_BOUNDS_MAX; ++i) {
+         struct GuestBounds *b = &g_guest_bounds[i];
+         if (b->identity && b->layout != layout)
+diff --git a/tests/memory_regressions/test_main.c b/tests/memory_regressions/test_main.c
+index ae85940..2776492 100644
+--- a/tests/memory_regressions/test_main.c
++++ b/tests/memory_regressions/test_main.c
+@@ -220,6 +220,24 @@ int main(int argc, char **argv)
+     check(live_layout && live_layout != before_layout,
+           "mapping initialization changes its identity", NULL);
+ 
++    {
++        uint32_t remaining;
++        uint64_t first;
++        check(!xbox_HeapBlockIdentity(0x1000, &remaining) &&
++              !xbox_ContiguousBlockIdentity(0x1000, &remaining),
++              "logical range has no tracked parent", NULL);
++        check(xbox_GuestBoundsRegister(0x1000, 64),
++              "register an untracked logical suballocation", NULL);
++        first = xbox_GuestBoundsIdentity(0x1010, &remaining);
++        check(first && remaining == 48, "untracked range has independent bounds", NULL);
++        check(xbox_GuestBoundsUnregister(0x1000) &&
++              !xbox_GuestBoundsIdentity(0x1010, &remaining),
++              "unregister invalidates the logical identity", NULL);
++        check(xbox_GuestBoundsRegister(0x1000, 64) &&
++              xbox_GuestBoundsIdentity(0x1010, &remaining) != first,
++              "logical range reuse receives a new identity", NULL);
++    }
++
+     scratch = xbox_HeapAlloc(0x10000, 4096);
+     for (i = 0; i < N_SLOTS; i++)
+         *G(THUNK_VA + 4 * i) = 0x80000000u | ORD[i];
+@@ -256,6 +274,7 @@ int main(int argc, char **argv)
+         uint32_t guard = xbox_HeapAlloc(4096, 16);
+         uint32_t s1, s2;
+         uint32_t remaining;
++        uint32_t mirror = a + (uint32_t)xbox_GetMappedSize();
+         uint64_t old_id = xbox_HeapBlockIdentity(a + 16, &remaining);
+         uint64_t sub_id;
+ 
+@@ -267,12 +286,18 @@ int main(int argc, char **argv)
+         check(sub_id && remaining == 24, "suballocation has independent bounds", NULL);
+         check(!xbox_GuestBoundsRegister(a + 80, 32),
+               "overlapping suballocation registrations are rejected", NULL);
++        check(xbox_GuestBoundsRegister(mirror + 64, 32) &&
++              xbox_GuestBoundsIdentity(mirror + 72, &remaining),
++              "mirror logical bounds identify the heap parent", NULL);
+         xbox_HeapFree(a);
+         check(!xbox_HeapBlockIdentity(a, &remaining) && !remaining,
+               "freed heap blocks have no live identity", NULL);
+         check(!xbox_GuestBoundsIdentity(a + 72, &remaining) && !remaining,
+               "freeing the parent invalidates the logical suballocation", NULL);
++        check(!xbox_GuestBoundsIdentity(mirror + 72, &remaining),
++              "freeing the heap parent invalidates mirrored bounds", NULL);
+         check(xbox_GuestBoundsUnregister(a + 64), "unregister the old suballocation", NULL);
++        check(xbox_GuestBoundsUnregister(mirror + 64), "unregister mirrored bounds", NULL);
+         s1 = xbox_HeapAlloc(16, 16);
+         s2 = xbox_HeapAlloc(16, 16);
+         check(s1 == a && xbox_HeapBlockIdentity(s1, &remaining) != old_id,
+@@ -349,14 +374,22 @@ int main(int argc, char **argv)
+         uint32_t c1 = xbox_ContiguousAlloc(0x20000, 4096);
+         uint32_t c2;
+         uint32_t remaining;
++        uint32_t tiled = XBOX_TILED_BASE + (c1 - XBOX_CONTIG_BASE);
+         uint64_t old_id = xbox_ContiguousBlockIdentity(c1 + 16, &remaining);
+ 
+         check(old_id && remaining == 0x20000 - 16,
+               "contiguous identity includes interior bounds", NULL);
++        check(xbox_GuestBoundsRegister(tiled, 64) &&
++              xbox_GuestBoundsIdentity(tiled + 16, &remaining),
++              "tiled logical bounds identify the contiguous parent", NULL);
+         snprintf(d, sizeof d, "free said %d", xbox_ContiguousFree(c1));
+-        if (reclaim)
++        if (reclaim) {
+             check(!xbox_ContiguousBlockIdentity(c1, &remaining) && !remaining,
+                   "freed contiguous blocks have no live identity", NULL);
++            check(!xbox_GuestBoundsIdentity(tiled + 16, &remaining),
++                  "freeing the contiguous parent invalidates tiled bounds", NULL);
++        }
++        check(xbox_GuestBoundsUnregister(tiled), "unregister tiled bounds", NULL);
+         c2 = xbox_ContiguousAlloc(0x20000, 4096);
+         if (reclaim) {
+             char d2[160];
+@@ -501,6 +534,11 @@ int main(int argc, char **argv)
+     xbox_MemoryLayoutShutdown();
+     check(xbox_MemoryLayoutGeneration() != live_layout,
+           "mapping shutdown changes its identity", NULL);
++    {
++        uint32_t remaining;
++        check(!xbox_GuestBoundsIdentity(0x1010, &remaining) && !remaining,
++              "mapping shutdown invalidates untracked logical bounds", NULL);
++    }
+     free(xbe);
+     printf("\n%d failure(s)\n", failures);
+     return failures ? 1 : 0;
+diff --git a/tests/nv2a_ffp_backend/nv2a_ffp_backend_test.c b/tests/nv2a_ffp_backend/nv2a_ffp_backend_test.c
+index 4b05ad1..5668d77 100644
+--- a/tests/nv2a_ffp_backend/nv2a_ffp_backend_test.c
++++ b/tests/nv2a_ffp_backend/nv2a_ffp_backend_test.c
+@@ -147,6 +147,26 @@ static void p8_decoder_tests(void)
+     CHECK(!nv2a_backend_decode_p8_data(&tex, indices, sizeof indices,
+                                        palette, sizeof palette, output, 16));
+ 
++    {
++        uint32_t overlap[32] = {0}, original[32], saved_palette[32];
++        struct { uint8_t input[16]; uint32_t output[16]; } adjacent = {{0}, {0}};
++        tex.width = tex.height = 4;
++        memset(indices, 0, sizeof indices);
++        memcpy(original, overlap, sizeof overlap);
++        memcpy(saved_palette, palette, sizeof saved_palette);
++        CHECK(!nv2a_backend_decode_p8_data(&tex, overlap, 16, palette, 128,
++                                           overlap, 16));
++        CHECK(!nv2a_backend_decode_p8_data(&tex, (uint8_t *)overlap + 4, 16,
++                                           palette, 128, overlap, 16));
++        CHECK(memcmp(original, overlap, sizeof overlap) == 0);
++        CHECK(!nv2a_backend_decode_p8_data(&tex, indices, sizeof indices,
++                                           palette, 128, palette + 1, 16));
++        CHECK(memcmp(saved_palette, palette, sizeof saved_palette) == 0);
++        CHECK(nv2a_backend_decode_p8_data(&tex, adjacent.input, sizeof adjacent.input,
++                                          palette, 128, adjacent.output, 16));
++        CHECK(adjacent.output[0] == palette[0]);
++    }
++
+ #if defined(_WIN32)
+     {
+         DWORD old, ignored;
+@@ -220,6 +240,15 @@ static void snapshot_decoder_tests(void)
+     tex.color = 0x12;
+     tex.pitch = UINT32_MAX;
+     CHECK(!nv2a_backend_decode_texture_data(&tex, bytes + 1, 128, output, 16));
++    {
++        uint32_t overlap[32], original[32];
++        memcpy(overlap, bytes + 1, sizeof overlap);
++        memcpy(original, overlap, sizeof overlap);
++        tex.pitch = 16;
++        CHECK(!nv2a_backend_decode_texture_data(&tex, (uint8_t *)overlap + 4, 64,
++                                                overlap, 16));
++        CHECK(memcmp(original, overlap, sizeof overlap) == 0);
++    }
+ }
+ 
+ int main(void)

@@ -1,0 +1,659 @@
+diff --git a/src/kernel/nv2a_backend.h b/src/kernel/nv2a_backend.h
+index 493fa59..e5a6605 100644
+--- a/src/kernel/nv2a_backend.h
++++ b/src/kernel/nv2a_backend.h
+@@ -144,6 +144,13 @@ int nv2a_backend_decode_p8_data(const Nv2aTexture *tex,
+                                 const void *palette, size_t palette_bytes,
+                                 uint32_t *argb_out, size_t output_texels);
+ 
++/* Decode a validated, immutable level-zero snapshot. Supports the CPU
++ * sampler's non-P8 formats. No guest memory is read; malformed dimensions,
++ * pitch, format, source length or output capacity fail before writing. */
++int nv2a_backend_decode_texture_data(const Nv2aTexture *tex,
++                                     const void *data, size_t data_bytes,
++                                     uint32_t *argb_out, size_t output_texels);
++
+ /* Where BACK_END_WRITE_SEMAPHORE_RELEASE (0x1D70) values land: the guest VA
+  * of the semaphore the title reads GPU progress from (for XDK D3D, the
+  * pointer at device+0x30). The executor writes each release there once it
+diff --git a/src/kernel/nv2a_pb_exec.c b/src/kernel/nv2a_pb_exec.c
+index 2876940..cae84b0 100644
+--- a/src/kernel/nv2a_pb_exec.c
++++ b/src/kernel/nv2a_pb_exec.c
+@@ -1432,10 +1432,24 @@ static uint32_t linear_twin(uint32_t fmt)
+ }
+ 
+ /* Sample texel (u, v) of stage texture `t`; `face` offsets a cube map. */
+-static int sample_tex(const Texture *t, uint32_t face_offset,
+-                      uint32_t u, uint32_t v, uint32_t *argb)
++static uint32_t texture_load16(const uint8_t *p)
++{
++    uint16_t value;
++    memcpy(&value, p, sizeof value);
++    return value;
++}
++
++static uint32_t texture_load32(const uint8_t *p)
++{
++    uint32_t value;
++    memcpy(&value, p, sizeof value);
++    return value;
++}
++
++static int sample_tex_mem(const Texture *t, const uint8_t *mem,
++                          uint32_t face_offset, uint32_t u, uint32_t v,
++                          uint32_t *argb)
+ {
+-    const uint8_t *mem = (const uint8_t *)xbox_GetMemoryOffset();
+     const uint8_t *p;
+     uint32_t fmt, base = t->offset + face_offset;
+ 
+@@ -1503,10 +1517,10 @@ static int sample_tex(const Texture *t, uint32_t face_offset,
+ 
+     /* 32-bit, alpha-red-green-blue in the dword. */
+     case 0x12:                                      /* LIN_A8R8G8B8 */
+-        *argb = ((const uint32_t *)p)[u];
++        *argb = texture_load32(p + (size_t)u * 4);
+         return 1;
+     case 0x1E:                                      /* LIN_X8R8G8B8 */
+-        *argb = ((const uint32_t *)p)[u] | 0xFF000000u;
++        *argb = texture_load32(p + (size_t)u * 4) | 0xFF000000u;
+         return 1;
+ 
+     /* 8-bit palette index, swizzled. Burnout 3 draws its logo and frontend
+@@ -1525,12 +1539,12 @@ static int sample_tex(const Texture *t, uint32_t face_offset,
+     /* 32-bit, other channel orders. The name gives the byte order from the
+      * top of the dword down, so each is a permutation of the same four. */
+     case 0x3F: {                                    /* LIN_A8B8G8R8 */
+-        uint32_t t = ((const uint32_t *)p)[u];
++        uint32_t t = texture_load32(p + (size_t)u * 4);
+         *argb = (t & 0xFF00FF00u) | ((t & 0xFF) << 16) | ((t >> 16) & 0xFF);
+         return 1;
+     }
+     case 0x40: {                                    /* LIN_B8G8R8A8 */
+-        uint32_t t = ((const uint32_t *)p)[u];
++        uint32_t t = texture_load32(p + (size_t)u * 4);
+         *argb = ((t & 0xFFu) << 24)                 /* A, from the bottom */
+               | (((t >>  8) & 0xFFu) << 16)         /* R */
+               | (((t >> 16) & 0xFFu) <<  8)         /* G */
+@@ -1538,14 +1552,14 @@ static int sample_tex(const Texture *t, uint32_t face_offset,
+         return 1;
+     }
+     case 0x41: {                                    /* LIN_R8G8B8A8 */
+-        uint32_t t = ((const uint32_t *)p)[u];
++        uint32_t t = texture_load32(p + (size_t)u * 4);
+         *argb = ((t & 0xFFu) << 24) | (t >> 8);
+         return 1;
+     }
+ 
+     /* 16-bit. */
+     case 0x10: {                                    /* LIN_A1R5G5B5 */
+-        uint32_t t = ((const uint16_t *)p)[u];
++        uint32_t t = texture_load16(p + (size_t)u * 2);
+         *argb = ((t & 0x8000u) ? 0xFF000000u : 0u)
+               | (expand((t >> 10) & 0x1F, 5) << 16)
+               | (expand((t >>  5) & 0x1F, 5) <<  8)
+@@ -1553,7 +1567,7 @@ static int sample_tex(const Texture *t, uint32_t face_offset,
+         return 1;
+     }
+     case 0x1C: {                                    /* LIN_X1R5G5B5 */
+-        uint32_t t = ((const uint16_t *)p)[u];
++        uint32_t t = texture_load16(p + (size_t)u * 2);
+         *argb = 0xFF000000u
+               | (expand((t >> 10) & 0x1F, 5) << 16)
+               | (expand((t >>  5) & 0x1F, 5) <<  8)
+@@ -1561,7 +1575,7 @@ static int sample_tex(const Texture *t, uint32_t face_offset,
+         return 1;
+     }
+     case 0x11: {                                    /* LIN_R5G6B5 */
+-        uint32_t t = ((const uint16_t *)p)[u];
++        uint32_t t = texture_load16(p + (size_t)u * 2);
+         *argb = 0xFF000000u
+               | (expand((t >> 11) & 0x1F, 5) << 16)
+               | (expand((t >>  5) & 0x3F, 6) <<  8)
+@@ -1569,7 +1583,7 @@ static int sample_tex(const Texture *t, uint32_t face_offset,
+         return 1;
+     }
+     case 0x1D: {                                    /* LIN_A4R4G4B4 */
+-        uint32_t t = ((const uint16_t *)p)[u];
++        uint32_t t = texture_load16(p + (size_t)u * 2);
+         *argb = (expand((t >> 12) & 0x0F, 4) << 24)
+               | (expand((t >>  8) & 0x0F, 4) << 16)
+               | (expand((t >>  4) & 0x0F, 4) <<  8)
+@@ -1623,6 +1637,78 @@ static int sample_tex(const Texture *t, uint32_t face_offset,
+     }
+ }
+ 
++static int sample_tex(const Texture *t, uint32_t face_offset,
++                      uint32_t u, uint32_t v, uint32_t *argb)
++{
++    return sample_tex_mem(t, (const uint8_t *)xbox_GetMemoryOffset(),
++                          face_offset, u, v, argb);
++}
++
++int nv2a_backend_decode_texture_data(const Nv2aTexture *tex,
++                                     const void *data, size_t data_bytes,
++                                     uint32_t *argb_out, size_t output_texels)
++{
++    Texture t;
++    uint32_t fmt, bpp = 0, block, x, y;
++    size_t count;
++    uint64_t required, row;
++    int swizzled;
++
++    if (!tex || !data || !argb_out || !tex->width || !tex->height ||
++        tex->width > 4096 || tex->height > 4096)
++        return 0;
++    count = (size_t)tex->width * tex->height;
++    if (output_texels < count)
++        return 0;
++    fmt = tex->color;
++    block = d3d8_format_dxt_block_bytes(fmt);
++    swizzled = !block && d3d8_format_is_swizzled(fmt);
++    if (swizzled &&
++        swizzle_offset(tex->width - 1, tex->height - 1,
++                       tex->width, tex->height) >= count)
++        return 0;
++    if (block) {
++        required = (uint64_t)((tex->width + 3) / 4) *
++                   ((tex->height + 3) / 4) * block;
++    } else {
++        switch (linear_twin(fmt)) {
++        case 0x12: case 0x1E: case 0x3F: case 0x40: case 0x41: bpp = 4; break;
++        case 0x10: case 0x1C: case 0x11: case 0x1D: bpp = 2; break;
++        case 0x13: case 0x1F: bpp = 1; break;
++        case 0x24: case 0x25:
++            if (swizzled) return 0;
++            if (!tex->pitch) return 0;
++            row = (uint64_t)((tex->width + 1) & ~1u) * 2;
++            required = (uint64_t)(tex->height - 1) * tex->pitch + row;
++            goto sized;
++        default: return 0;
++        }
++        row = (uint64_t)tex->width * bpp;
++        if (swizzled)
++            required = count * bpp;
++        else {
++            if (!tex->pitch) return 0;
++            required = (uint64_t)(tex->height - 1) * tex->pitch + row;
++        }
++    }
++sized:
++    if (data_bytes < required)
++        return 0;
++    memset(&t, 0, sizeof t);
++    t.width = tex->width;
++    t.height = tex->height;
++    t.pitch = tex->pitch;
++    t.color = fmt;
++    t.addr_u = t.addr_v = 3;
++    t.valid = 1;
++    for (y = 0; y < t.height; y++)
++        for (x = 0; x < t.width; x++)
++            if (!sample_tex_mem(&t, (const uint8_t *)data, 0, x, y,
++                                &argb_out[(size_t)y * t.width + x]))
++                return 0;
++    return 1;
++}
++
+ static int sample_texture(uint32_t u, uint32_t v, uint32_t *argb)
+ {
+     return sample_tex(&s_gpu.texs[0], 0, u, v, argb);
+diff --git a/src/kernel/xbox_memory_layout.c b/src/kernel/xbox_memory_layout.c
+index e7a72f6..557ca8b 100644
+--- a/src/kernel/xbox_memory_layout.c
++++ b/src/kernel/xbox_memory_layout.c
+@@ -54,6 +54,38 @@ static void *g_memory_base = NULL;
+ static size_t g_memory_size = 0;
+ static ptrdiff_t g_memory_offset = 0;  /* actual_base - XBOX_BASE_ADDRESS */
+ 
++/* Allocation and mapping identities are observational only; they do not
++ * change placement or allocator policy. A saturated counter fails closed. */
++static volatile LONGLONG g_identity_counter;
++static volatile LONGLONG g_layout_generation;
++
++static uint64_t next_memory_identity(void)
++{
++    LONGLONG old = InterlockedCompareExchange64(&g_identity_counter, 0, 0);
++    for (;;) {
++        LONGLONG observed;
++        if (old == INT64_MAX)
++            return 0;
++        observed = InterlockedCompareExchange64(&g_identity_counter, old + 1, old);
++        if (observed == old)
++            return (uint64_t)(old + 1);
++        old = observed;
++    }
++}
++
++uint64_t xbox_MemoryLayoutGeneration(void)
++{
++    return (uint64_t)InterlockedCompareExchange64(&g_layout_generation, 0, 0);
++}
++
++static void advance_layout_generation(void)
++{
++    LONGLONG old = InterlockedCompareExchange64(&g_layout_generation, 0, 0);
++    LONGLONG next = (LONGLONG)next_memory_identity();
++    while (InterlockedCompareExchange64(&g_layout_generation, next, old) != old)
++        old = InterlockedCompareExchange64(&g_layout_generation, 0, 0);
++}
++
+ /* Actual mapped RAM for this run; see the header. Default retail 64 MB. */
+ size_t g_xbox_total_ram = XBOX_TOTAL_RAM;
+ size_t g_xbox_map_size = 0;   /* 0 = same as RAM */
+@@ -3688,6 +3720,7 @@ BOOL xbox_MemoryLayoutInit(const void *xbe_data, size_t xbe_size)
+         win_settle_placeholders();
+ #endif
+     xbox_WatchInit();
++    advance_layout_generation();
+     fprintf(stderr, "xbox_MemoryLayoutInit: complete\n");
+     return TRUE;
+ }
+@@ -3723,6 +3756,7 @@ void xbox_ProtectMirrorsForDebug(void)
+ 
+ void xbox_MemoryLayoutShutdown(void)
+ {
++    advance_layout_generation();
+     if (g_kernel_memory) {
+         VirtualFree(g_kernel_memory, 0, MEM_RELEASE);
+         g_kernel_memory = NULL;
+@@ -3890,7 +3924,11 @@ static int g_heap_alloc_count = 0;
+ #define XBOX_HEAP_MAX_BLOCKS 65536
+ /* `named`: MmGetPhysicalAddress was given an address inside this live block
+  * (xbox_PhysNoteRamName); cleared whenever the block is handed out or freed. */
+-static struct { uint32_t addr; uint32_t size; uint8_t free; uint8_t named; }
++static struct {
++    uint32_t addr, size;
++    uint8_t free, named;
++    uint64_t identity;
++}
+     g_heap_blocks[XBOX_HEAP_MAX_BLOCKS];
+ static int g_heap_block_count = 0;
+ 
+@@ -3928,6 +3966,7 @@ static int heap_insert_free(int at, uint32_t addr, uint32_t size)
+     g_heap_blocks[at].addr = addr;
+     g_heap_blocks[at].size = size;
+     g_heap_blocks[at].free = 1; g_heap_blocks[at].named = 0;
++    g_heap_blocks[at].identity = 0;
+     return 1;
+ }
+ 
+@@ -3954,6 +3993,7 @@ static uint32_t heap_carve_free(uint32_t size, uint32_t alignment)
+         g_heap_blocks[i].addr = start;
+         g_heap_blocks[i].size = size;
+         g_heap_blocks[i].free = 0; g_heap_blocks[i].named = 0;
++        g_heap_blocks[i].identity = next_memory_identity();
+         if (back && !heap_insert_free(i + 1, start + size, back))
+             g_heap_blocks[i].size += back;   /* table full: keep it attached */
+         memset((void *)((uintptr_t)start + g_memory_offset), 0, size);
+@@ -4147,6 +4187,7 @@ void xbox_FreeThreadStack(uint32_t stack_top)
+ static uint8_t  g_contig_used[CONTIG_PAGES] = { CONTIG_RESERVED };
+                                                /* 1 = page belongs to a block */
+ static uint32_t g_contig_len[CONTIG_PAGES];    /* pages, at a block's first page */
++static uint64_t g_contig_identity[CONTIG_PAGES];
+ static uint32_t g_contig_pages_in_use;
+ static uint32_t g_contig_high = CONTIG_PAGE;   /* high-water mark, bytes */
+ static uint32_t g_contig_first_free = 1;       /* no free page below this */
+@@ -4196,6 +4237,7 @@ static void contig_take(uint32_t first, uint32_t n)
+ 
+     memset(&g_contig_used[first], 1, n);
+     g_contig_len[first] = n;
++    g_contig_identity[first] = next_memory_identity();
+     g_contig_pages_in_use += n;
+     if (g_contig_pages_in_use > g_contig_peak_pages)
+         g_contig_peak_pages = g_contig_pages_in_use;
+@@ -4385,10 +4427,13 @@ int xbox_ContiguousFree(uint32_t va)
+ /* Bytes from va to the end of the block containing it, or 0 if va is not in
+  * an allocated block -- the same convention as xbox_HeapBlockSize, and for
+  * the same caller, MmQueryAllocationSize. */
+-uint32_t xbox_ContiguousBlockSize(uint32_t va)
++uint64_t xbox_ContiguousBlockIdentity(uint32_t va, uint32_t *remaining)
+ {
+     uint32_t page, first, result = 0;
++    uint64_t identity = 0;
+ 
++    if (remaining)
++        *remaining = 0;
+     if (va < XBOX_CONTIG_BASE
+             || (uint64_t)va >= (uint64_t)XBOX_CONTIG_BASE + XBOX_CONTIG_SIZE)
+         return 0;
+@@ -4400,9 +4445,19 @@ uint32_t xbox_ContiguousBlockSize(uint32_t va)
+             first--;
+         result = XBOX_CONTIG_BASE + (first + g_contig_len[first]) * CONTIG_PAGE
+                - va;
++        identity = g_contig_identity[first];
+     }
+     contig_unlock();
+-    return result;
++    if (remaining)
++        *remaining = result;
++    return identity;
++}
++
++uint32_t xbox_ContiguousBlockSize(uint32_t va)
++{
++    uint32_t remaining;
++    xbox_ContiguousBlockIdentity(va, &remaining);
++    return remaining;
+ }
+ 
+ /* High-water mark of the window: everything below it was, at some point,
+@@ -4616,6 +4671,7 @@ static uint32_t heap_alloc_locked(uint32_t size, uint32_t alignment)
+                 continue;   /* wrong alignment for this request */
+             }
+             g_heap_blocks[i].free = 0; g_heap_blocks[i].named = 0;
++            g_heap_blocks[i].identity = next_memory_identity();
+             result = g_heap_blocks[i].addr;
+             memset((void *)((uintptr_t)result + g_memory_offset), 0, size);
+             return result;
+@@ -4670,6 +4726,7 @@ static uint32_t heap_alloc_locked(uint32_t size, uint32_t alignment)
+         g_heap_blocks[g_heap_block_count].addr = result;
+         g_heap_blocks[g_heap_block_count].size = size;
+         g_heap_blocks[g_heap_block_count].free = 0; g_heap_blocks[g_heap_block_count].named = 0;
++        g_heap_blocks[g_heap_block_count].identity = next_memory_identity();
+         g_heap_block_count++;
+     }
+ 
+@@ -4700,11 +4757,14 @@ static uint32_t heap_alloc_locked(uint32_t size, uint32_t alignment)
+  * forward is asking about the block that contains it. Returns 0 for an address
+  * this heap never handed out, which is what "not one of mine" has to look like.
+  */
+-uint32_t xbox_HeapBlockSize(uint32_t xbox_va)
++uint64_t xbox_HeapBlockIdentity(uint32_t xbox_va, uint32_t *remaining)
+ {
+     int i;
+     uint32_t r = 0;
++    uint64_t identity = 0;
+ 
++    if (remaining)
++        *remaining = 0;
+     if (!xbox_va)
+         return 0;
+     AcquireSRWLockShared(&g_heap_lock);
+@@ -4714,11 +4774,117 @@ uint32_t xbox_HeapBlockSize(uint32_t xbox_va)
+         if (xbox_va >= g_heap_blocks[i].addr &&
+             xbox_va <  g_heap_blocks[i].addr + g_heap_blocks[i].size) {
+             r = g_heap_blocks[i].size - (xbox_va - g_heap_blocks[i].addr);
++            identity = g_heap_blocks[i].identity;
+             break;
+         }
+     }
+     ReleaseSRWLockShared(&g_heap_lock);
+-    return r;
++    if (remaining)
++        *remaining = r;
++    return identity;
++}
++
++uint32_t xbox_HeapBlockSize(uint32_t xbox_va)
++{
++    uint32_t remaining;
++    xbox_HeapBlockIdentity(xbox_va, &remaining);
++    return remaining;
++}
++
++#define XBOX_GUEST_BOUNDS_MAX 1024
++static struct GuestBounds {
++    uint32_t va, size;
++    uint64_t identity, parent, layout;
++} g_guest_bounds[XBOX_GUEST_BOUNDS_MAX];
++static SRWLOCK g_guest_bounds_lock = SRWLOCK_INIT;
++
++static uint64_t guest_bounds_parent(uint32_t va, uint32_t *remaining)
++{
++    if (va >= XBOX_CONTIG_BASE &&
++        (uint64_t)va < (uint64_t)XBOX_CONTIG_BASE + XBOX_CONTIG_SIZE)
++        return xbox_ContiguousBlockIdentity(va, remaining);
++    return xbox_HeapBlockIdentity(va, remaining);
++}
++
++int xbox_GuestBoundsRegister(uint32_t va, uint32_t bytes)
++{
++    uint64_t layout = xbox_MemoryLayoutGeneration(), parent, identity;
++    uint32_t remaining;
++    int i, slot = -1;
++
++    if (!va || !bytes || (uint64_t)va + bytes > (uint64_t)UINT32_MAX + 1 || !layout)
++        return 0;
++    parent = guest_bounds_parent(va, &remaining);
++    if (parent && bytes > remaining)
++        return 0;
++    identity = next_memory_identity();
++    if (!identity)
++        return 0;
++    AcquireSRWLockExclusive(&g_guest_bounds_lock);
++    for (i = 0; i < XBOX_GUEST_BOUNDS_MAX; ++i) {
++        struct GuestBounds *b = &g_guest_bounds[i];
++        if (b->identity && b->layout != layout)
++            memset(b, 0, sizeof *b);
++        if (!b->identity) {
++            if (slot < 0) slot = i;
++        } else if ((uint64_t)va < (uint64_t)b->va + b->size &&
++                   (uint64_t)b->va < (uint64_t)va + bytes) {
++            ReleaseSRWLockExclusive(&g_guest_bounds_lock);
++            return 0;
++        }
++    }
++    if (slot >= 0) {
++        struct GuestBounds *b = &g_guest_bounds[slot];
++        b->va = va; b->size = bytes; b->identity = identity;
++        b->parent = parent; b->layout = layout;
++    }
++    ReleaseSRWLockExclusive(&g_guest_bounds_lock);
++    return slot >= 0;
++}
++
++int xbox_GuestBoundsUnregister(uint32_t va)
++{
++    int i, found = 0;
++    AcquireSRWLockExclusive(&g_guest_bounds_lock);
++    for (i = 0; i < XBOX_GUEST_BOUNDS_MAX; ++i)
++        if (g_guest_bounds[i].identity && g_guest_bounds[i].va == va) {
++            memset(&g_guest_bounds[i], 0, sizeof g_guest_bounds[i]);
++            found = 1;
++            break;
++        }
++    ReleaseSRWLockExclusive(&g_guest_bounds_lock);
++    return found;
++}
++
++uint64_t xbox_GuestBoundsIdentity(uint32_t va, uint32_t *remaining)
++{
++    struct GuestBounds found = {0};
++    uint64_t layout = xbox_MemoryLayoutGeneration(), parent;
++    uint32_t parent_remaining;
++    int i;
++
++    if (remaining) *remaining = 0;
++    if (!layout) return 0;
++    AcquireSRWLockShared(&g_guest_bounds_lock);
++    for (i = 0; i < XBOX_GUEST_BOUNDS_MAX; ++i) {
++        const struct GuestBounds *b = &g_guest_bounds[i];
++        if (b->identity && b->layout == layout && va >= b->va &&
++            (uint64_t)va < (uint64_t)b->va + b->size) {
++            found = *b;
++            break;
++        }
++    }
++    ReleaseSRWLockShared(&g_guest_bounds_lock);
++    if (!found.identity)
++        return 0;
++    parent = guest_bounds_parent(va, &parent_remaining);
++    if (parent != found.parent ||
++        (parent && parent_remaining < found.size - (va - found.va)) ||
++        xbox_MemoryLayoutGeneration() != layout)
++        return 0;
++    if (remaining)
++        *remaining = found.size - (va - found.va);
++    return found.identity;
+ }
+ 
+ void xbox_HeapFree(uint32_t xbox_va)
+diff --git a/src/kernel/xbox_memory_layout.h b/src/kernel/xbox_memory_layout.h
+index 0aec8bd..83622b9 100644
+--- a/src/kernel/xbox_memory_layout.h
++++ b/src/kernel/xbox_memory_layout.h
+@@ -210,6 +210,18 @@ void xbox_ContiguousClaim(uint32_t va, uint32_t size);
+ int xbox_ContiguousFree(uint32_t va);
+ /* Bytes from va to the end of its block, 0 if va is not allocated. */
+ uint32_t xbox_ContiguousBlockSize(uint32_t va);
++/* Identity and remaining bytes of a live tracked allocation. Zero identity
++ * means unknown, not necessarily invalid. Identities change on address reuse. */
++uint64_t xbox_ContiguousBlockIdentity(uint32_t va, uint32_t *remaining);
++uint64_t xbox_HeapBlockIdentity(uint32_t va, uint32_t *remaining);
++/* Changes when the guest mapping is initialized or shut down. */
++uint64_t xbox_MemoryLayoutGeneration(void);
++/* Optional explicit logical suballocation bounds. The owner must unregister
++ * before freeing or reusing an untracked range. Overlapping registrations are
++ * rejected. A tracked parent or mapping reset invalidates its registrations. */
++int xbox_GuestBoundsRegister(uint32_t va, uint32_t bytes);
++int xbox_GuestBoundsUnregister(uint32_t va);
++uint64_t xbox_GuestBoundsIdentity(uint32_t va, uint32_t *remaining);
+ /* High-water mark (never decreases) and current usage, in bytes. */
+ uint32_t xbox_ContiguousAllocatedBytes(void);
+ /* One byte per 4 KB page of the window, nonzero while the page is allocated
+diff --git a/tests/memory_regressions/test_main.c b/tests/memory_regressions/test_main.c
+index 9e2f95c..ae85940 100644
+--- a/tests/memory_regressions/test_main.c
++++ b/tests/memory_regressions/test_main.c
+@@ -191,6 +191,7 @@ int main(int argc, char **argv)
+     unsigned char *xbe;
+     char d[160];
+     int i;
++    uint64_t before_layout = xbox_MemoryLayoutGeneration(), live_layout;
+ 
+     setvbuf(stdout, NULL, _IONBF, 0);
+     if (!reclaim && !ext && !avoid && strcmp(mode, "default")) {
+@@ -215,6 +216,9 @@ int main(int argc, char **argv)
+         puts("xbox_MemoryLayoutInit failed");
+         return 2;
+     }
++    live_layout = xbox_MemoryLayoutGeneration();
++    check(live_layout && live_layout != before_layout,
++          "mapping initialization changes its identity", NULL);
+ 
+     scratch = xbox_HeapAlloc(0x10000, 4096);
+     for (i = 0; i < N_SLOTS; i++)
+@@ -251,11 +255,28 @@ int main(int argc, char **argv)
+         uint32_t a = xbox_HeapAlloc(big, 4096);
+         uint32_t guard = xbox_HeapAlloc(4096, 16);
+         uint32_t s1, s2;
++        uint32_t remaining;
++        uint64_t old_id = xbox_HeapBlockIdentity(a + 16, &remaining);
++        uint64_t sub_id;
+ 
+         (void)guard;
++        check(old_id && remaining == big - 16, "heap identity includes interior bounds", NULL);
++        check(xbox_GuestBoundsRegister(a + 64, 32),
++              "explicitly register a logical suballocation", NULL);
++        sub_id = xbox_GuestBoundsIdentity(a + 72, &remaining);
++        check(sub_id && remaining == 24, "suballocation has independent bounds", NULL);
++        check(!xbox_GuestBoundsRegister(a + 80, 32),
++              "overlapping suballocation registrations are rejected", NULL);
+         xbox_HeapFree(a);
++        check(!xbox_HeapBlockIdentity(a, &remaining) && !remaining,
++              "freed heap blocks have no live identity", NULL);
++        check(!xbox_GuestBoundsIdentity(a + 72, &remaining) && !remaining,
++              "freeing the parent invalidates the logical suballocation", NULL);
++        check(xbox_GuestBoundsUnregister(a + 64), "unregister the old suballocation", NULL);
+         s1 = xbox_HeapAlloc(16, 16);
+         s2 = xbox_HeapAlloc(16, 16);
++        check(s1 == a && xbox_HeapBlockIdentity(s1, &remaining) != old_id,
++              "heap address reuse receives a new identity", NULL);
+ 
+         if (reclaim) {
+             snprintf(d, sizeof d, "block is %u bytes, expected 16", xbox_HeapBlockSize(s1));
+@@ -327,13 +348,22 @@ int main(int argc, char **argv)
+     if (!ext) {
+         uint32_t c1 = xbox_ContiguousAlloc(0x20000, 4096);
+         uint32_t c2;
++        uint32_t remaining;
++        uint64_t old_id = xbox_ContiguousBlockIdentity(c1 + 16, &remaining);
+ 
++        check(old_id && remaining == 0x20000 - 16,
++              "contiguous identity includes interior bounds", NULL);
+         snprintf(d, sizeof d, "free said %d", xbox_ContiguousFree(c1));
++        if (reclaim)
++            check(!xbox_ContiguousBlockIdentity(c1, &remaining) && !remaining,
++                  "freed contiguous blocks have no live identity", NULL);
+         c2 = xbox_ContiguousAlloc(0x20000, 4096);
+         if (reclaim) {
+             char d2[160];
+             snprintf(d2, sizeof d2, "%s, got 0x%08X, expected 0x%08X", d, c2, c1);
+             check(c1 && c2 == c1, "a freed contiguous block is reused", d2);
++            check(xbox_ContiguousBlockIdentity(c2, &remaining) != old_id,
++                  "contiguous address reuse receives a new identity", NULL);
+         } else {
+             check(c1 && c2 != c1, "default: contiguous memory is never reused", d);
+         }
+@@ -469,6 +499,8 @@ int main(int argc, char **argv)
+     }
+ 
+     xbox_MemoryLayoutShutdown();
++    check(xbox_MemoryLayoutGeneration() != live_layout,
++          "mapping shutdown changes its identity", NULL);
+     free(xbe);
+     printf("\n%d failure(s)\n", failures);
+     return failures ? 1 : 0;
+diff --git a/tests/nv2a_ffp_backend/nv2a_ffp_backend_test.c b/tests/nv2a_ffp_backend/nv2a_ffp_backend_test.c
+index f4b9e29..df98630 100644
+--- a/tests/nv2a_ffp_backend/nv2a_ffp_backend_test.c
++++ b/tests/nv2a_ffp_backend/nv2a_ffp_backend_test.c
+@@ -169,6 +169,48 @@ static void p8_decoder_tests(void)
+ #endif
+ }
+ 
++static void snapshot_decoder_tests(void)
++{
++    static const struct { uint32_t format, pitch, bytes; } cases[] = {
++        {0x06, 0, 64}, {0x05, 0, 32}, {0x00, 0, 16},
++        {0x12, 19, 73}, {0x11, 19, 65}, {0x13, 19, 61},
++        {0x3F, 19, 73}, {0x40, 19, 73}, {0x41, 19, 73},
++        {0x24, 9, 35}, {0x25, 9, 35},
++        {0x0C, 0, 8}, {0x0E, 0, 16}, {0x0F, 0, 16},
++        {0x12, 2, 22}
++    };
++    uint8_t bytes[129];
++    uint32_t expected[16], output[16], i, j;
++    Nv2aTexture tex = {0};
++
++    tex.width = tex.height = 4;
++    tex.offset = 0x7000;
++    for (i = 0; i < sizeof bytes - 1; ++i)
++        bytes[i + 1] = (uint8_t)(i * 37 + 3);
++    memcpy(s_mem + tex.offset, bytes + 1, sizeof bytes - 1);
++    for (i = 0; i < sizeof cases / sizeof cases[0]; ++i) {
++        tex.color = cases[i].format;
++        tex.pitch = cases[i].pitch;
++        tex.offset = 0x7000;
++        CHECK(nv2a_backend_decode_texture(&tex, expected));
++        tex.offset = UINT32_MAX;
++        CHECK(nv2a_backend_decode_texture_data(&tex, bytes + 1, cases[i].bytes,
++                                               output, 16));
++        CHECK(memcmp(expected, output, sizeof output) == 0);
++        for (j = 0; j < 16; ++j) output[j] = 0x12345678u;
++        CHECK(!nv2a_backend_decode_texture_data(&tex, bytes + 1, cases[i].bytes - 1,
++                                                output, 16));
++        CHECK(!nv2a_backend_decode_texture_data(&tex, bytes + 1, cases[i].bytes,
++                                                output, 15));
++        for (j = 0; j < 16; ++j) CHECK(output[j] == 0x12345678u);
++    }
++    tex.color = 0x1B;
++    CHECK(!nv2a_backend_decode_texture_data(&tex, bytes + 1, 128, output, 16));
++    tex.color = 0x12;
++    tex.pitch = UINT32_MAX;
++    CHECK(!nv2a_backend_decode_texture_data(&tex, bytes + 1, 128, output, 16));
++}
++
+ int main(void)
+ {
+     uint32_t i;
+@@ -370,6 +412,7 @@ int main(void)
+     CHECK(s_be.thread_mismatches == 0 && s_be.dropped_events == 0);
+ 
+     p8_decoder_tests();
++    snapshot_decoder_tests();
+     /* Each stage's register length must survive both backend interfaces. */
+     for (i = 0; i < 3; ++i) {
+         putf(0x4800 + i * 8, 0);

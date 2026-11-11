@@ -47,6 +47,7 @@
 #include <d3d11.h>
 #include <d3dcompiler.h>
 #include <stdint.h>
+#include <stdarg.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -672,6 +673,10 @@ uint32_t bruteforce_d3d11_test_device_thread(void)
 
 #define MAX_SURF 32
 typedef struct {
+    uint64_t layout, allocation, bounds;
+} GuestSpanIdentity;
+
+typedef struct {
     uint32_t va, pitch, bpp, w, h, pw, ph, aa_sx, aa_sy;
     unsigned scale_epoch;
     ID3D11Texture2D *tex;
@@ -679,11 +684,15 @@ typedef struct {
     ID3D11ShaderResourceView *srv;
     ID3D11Texture2D *guest_tex;
     ID3D11ShaderResourceView *guest_srv;
+    ID3D11Texture2D *sample_copy;
+    ID3D11ShaderResourceView *sample_copy_srv;
     uint8_t *guest_shadow;
     size_t guest_shadow_bytes;
+    GuestSpanIdentity identity;
     unsigned guest_check_gen;
     int gpu_dirty;
     int guest_exact;
+    int alias_uncertain;
 } Surf;
 
 typedef struct {
@@ -708,6 +717,150 @@ static Surf *s_cur;
 static Surf *s_last_presented; /* Last readback surface for flip-only resize preflight. */
 static Depth *s_cur_depth;
 static uint32_t s_gen = 1;          /* frame number */
+static int s_tex_strict_bounds;
+
+typedef enum {
+    GUEST_COPY_OK,
+    GUEST_COPY_INVALID,
+    GUEST_COPY_SHORT,
+    GUEST_COPY_UNREGISTERED,
+    GUEST_COPY_CHANGED,
+    GUEST_COPY_UNREADABLE
+} GuestCopyResult;
+
+enum GuestBoundsPolicy {
+    GUEST_BOUNDS_IGNORE,
+    GUEST_BOUNDS_REQUIRED,
+    GUEST_BOUNDS_TRACK_IF_REGISTERED
+};
+
+/* The RAM views and the separate contiguous/tiled views have distinct host
+ * backing. Keep allocation identity in the appropriate backing domain. */
+static int guest_data_span(uint32_t va, size_t bytes, uint64_t *physical)
+{
+    uint64_t mapped = xbox_GetMappedSize(), end, relative;
+    uint64_t tiled_size = mapped < XBOX_CONTIG_SIZE ? mapped : XBOX_CONTIG_SIZE;
+    if (!mapped || !va || !bytes || bytes > XBOX_CONTIG_SIZE)
+        return 0;
+    end = (uint64_t)va + bytes;
+    if (va < XBOX_CONTIG_BASE && (uint64_t)va < mapped * (1ull + XBOX_NUM_MIRRORS)) {
+        relative = va % mapped;
+        if (end > XBOX_CONTIG_BASE || bytes > mapped - relative)
+            return 0;
+        *physical = relative;
+        return 1;
+    }
+    if (va >= XBOX_CONTIG_BASE &&
+        (uint64_t)va < (uint64_t)XBOX_CONTIG_BASE + XBOX_CONTIG_SIZE) {
+        relative = (uint64_t)va - XBOX_CONTIG_BASE;
+        if (bytes > XBOX_CONTIG_SIZE - relative)
+            return 0;
+        *physical = relative;
+        return 2;
+    }
+    if (va >= XBOX_TILED_BASE &&
+        (uint64_t)va < (uint64_t)XBOX_TILED_BASE + tiled_size) {
+        relative = (uint64_t)va - XBOX_TILED_BASE;
+        if (bytes > tiled_size - relative)
+            return 0;
+        *physical = relative;
+        return 2;
+    }
+    return 0;
+}
+
+static uint64_t guest_allocation_identity(uint32_t va, uint32_t *remaining)
+{
+    uint64_t physical;
+    int domain = guest_data_span(va, 1, &physical);
+    if (domain == 1)
+        return xbox_HeapBlockIdentity((uint32_t)physical, remaining);
+    if (domain == 2)
+        return xbox_ContiguousBlockIdentity(XBOX_CONTIG_BASE + (uint32_t)physical, remaining);
+    if (remaining)
+        *remaining = 0;
+    return 0;
+}
+
+static GuestCopyResult checked_guest_copy(uint32_t va, size_t bytes, void *dest,
+                                          int bounds_policy, GuestSpanIdentity *identity)
+{
+    GuestSpanIdentity before = {0}, after = {0};
+    uint32_t remaining, after_remaining;
+    uintptr_t offset = (uintptr_t)xbox_GetMemoryOffset(), host;
+    uint64_t physical, start = 0;
+    SIZE_T copied = 0;
+    GuestCopyResult result = GUEST_COPY_INVALID;
+    int perf = g_bruteforce_perf_counters_enabled;
+
+    if (perf) start = bruteforce_perf_clock();
+    if (!guest_data_span(va, bytes, &physical) || offset > UINTPTR_MAX - va)
+        goto done;
+    host = offset + va;
+    if (bytes > UINTPTR_MAX - host)
+        goto done;
+    before.layout = xbox_MemoryLayoutGeneration();
+    if (!before.layout)
+        goto done;
+    before.allocation = guest_allocation_identity(va, &remaining);
+    if (remaining && (!before.allocation || bytes > remaining)) {
+        result = GUEST_COPY_SHORT;
+        goto done;
+    }
+    if (bounds_policy != GUEST_BOUNDS_IGNORE) {
+        before.bounds = xbox_GuestBoundsIdentity(va, &remaining);
+        if (!before.bounds && bounds_policy == GUEST_BOUNDS_REQUIRED) {
+            result = GUEST_COPY_UNREGISTERED;
+            goto done;
+        }
+        if (before.bounds && bytes > remaining) {
+            result = GUEST_COPY_SHORT;
+            goto done;
+        }
+    }
+    if (!ReadProcessMemory(GetCurrentProcess(), (const void *)host, dest, bytes, &copied) ||
+        copied != bytes) {
+        result = GUEST_COPY_UNREADABLE;
+        goto done;
+    }
+    after.layout = xbox_MemoryLayoutGeneration();
+    after.allocation = guest_allocation_identity(va, &after_remaining);
+    if (bounds_policy != GUEST_BOUNDS_IGNORE)
+        after.bounds = xbox_GuestBoundsIdentity(va, &remaining);
+    if (before.layout != after.layout || before.allocation != after.allocation ||
+        before.bounds != after.bounds || (after_remaining && bytes > after_remaining) ||
+        (after.bounds && bytes > remaining)) {
+        result = GUEST_COPY_CHANGED;
+        goto done;
+    }
+    if (identity) *identity = before;
+    result = GUEST_COPY_OK;
+done:
+    if (perf)
+        bruteforce_perf_record_guest_range(result == GUEST_COPY_OK, 0, 0, 0,
+                                           bruteforce_perf_clock() - start, 0);
+    return result;
+}
+
+static int guest_identity_still_valid(uint32_t va, size_t bytes, int bounds_policy,
+                                      const GuestSpanIdentity *expected)
+{
+    uint32_t remaining;
+    uint64_t allocation, bounds = 0;
+    if (!expected->layout || xbox_MemoryLayoutGeneration() != expected->layout)
+        return 0;
+    allocation = guest_allocation_identity(va, &remaining);
+    if (allocation != expected->allocation || (remaining && bytes > remaining))
+        return 0;
+    if (bounds_policy != GUEST_BOUNDS_IGNORE) {
+        bounds = xbox_GuestBoundsIdentity(va, &remaining);
+        if ((!bounds && bounds_policy == GUEST_BOUNDS_REQUIRED) ||
+            (bounds && bytes > remaining))
+            return 0;
+    }
+    return bounds == expected->bounds &&
+           xbox_MemoryLayoutGeneration() == expected->layout;
+}
 
 static int query_suspend_clear(void);
 static void query_resume_clear(int counting);
@@ -750,9 +903,12 @@ static DXGI_FORMAT surf_format(uint32_t bpp)
 
 static void release_surf(Surf *s)
 {
+    if (s->sample_copy_srv) ID3D11ShaderResourceView_Release(s->sample_copy_srv);
+    if (s->sample_copy) ID3D11Texture2D_Release(s->sample_copy);
     if (s->srv) ID3D11ShaderResourceView_Release(s->srv);
     if (s->rtv) ID3D11RenderTargetView_Release(s->rtv);
     if (s->tex) ID3D11Texture2D_Release(s->tex);
+    s->sample_copy_srv = NULL; s->sample_copy = NULL;
     s->srv = NULL; s->rtv = NULL; s->tex = NULL;
 }
 
@@ -798,33 +954,155 @@ static int ensure_guest_shadow(Surf *s)
     return 1;
 }
 
-static int snapshot_guest_surface(Surf *s)
+static uint8_t *s_surface_probe;
+static size_t s_surface_probe_cap;
+
+static int surface_guest_span(const Surf *s, size_t *span)
 {
-    const uint8_t *guest = GUEST(s->va);
+    size_t row = surf_guest_row(s);
+    if (!row || !s->h ||
+        (s->pitch && (size_t)(s->h - 1) > (SIZE_MAX - row) / s->pitch))
+        return 0;
+    *span = (size_t)(s->h - 1) * s->pitch + row;
+    return 1;
+}
+
+static int copy_guest_surface(const Surf *s, GuestSpanIdentity *identity)
+{
+    size_t span;
+    uint8_t *probe;
+    if (!surface_guest_span(s, &span))
+        return 0;
+    if (span > s_surface_probe_cap) {
+        probe = (uint8_t *)realloc(s_surface_probe, span);
+        if (!probe) return 0;
+        s_surface_probe = probe;
+        s_surface_probe_cap = span;
+    }
+    return checked_guest_copy(s->va, span, s_surface_probe,
+                              s_tex_strict_bounds ? GUEST_BOUNDS_TRACK_IF_REGISTERED
+                                                  : GUEST_BOUNDS_IGNORE,
+                              identity) == GUEST_COPY_OK;
+}
+
+static int same_guest_identity(const GuestSpanIdentity *a, const GuestSpanIdentity *b)
+{
+    return a->layout && a->layout == b->layout && a->allocation == b->allocation &&
+           a->bounds == b->bounds;
+}
+
+static int surf_identity_current(const Surf *s)
+{
+    size_t span;
+    return surface_guest_span(s, &span) &&
+           guest_identity_still_valid(s->va, span,
+               s_tex_strict_bounds ? GUEST_BOUNDS_TRACK_IF_REGISTERED : GUEST_BOUNDS_IGNORE,
+               &s->identity);
+}
+
+static void shadow_from_probe(Surf *s)
+{
     size_t row = surf_guest_row(s);
     uint32_t y;
-
-    if (!ensure_guest_shadow(s))
-        return 0;
     for (y = 0; y < s->h; ++y)
         memcpy(s->guest_shadow + (size_t)y * row,
-               guest + (size_t)y * s->pitch, row);
+               s_surface_probe + (size_t)y * s->pitch, row);
+}
+
+static int snapshot_guest_surface(Surf *s)
+{
+    GuestSpanIdentity identity;
+
+    if (!ensure_guest_shadow(s) || !copy_guest_surface(s, &identity) ||
+        (s->identity.layout && !same_guest_identity(&s->identity, &identity)))
+        return 0;
+    s->identity = identity;
+    shadow_from_probe(s);
     return 1;
 }
 
 static int guest_surface_changed(const Surf *s)
 {
-    const uint8_t *guest = GUEST(s->va);
     size_t row = surf_guest_row(s);
     uint32_t y;
+    GuestSpanIdentity identity;
 
+    if (!copy_guest_surface(s, &identity) || !same_guest_identity(&s->identity, &identity))
+        return -1;
     if (!s->guest_shadow || s->guest_shadow_bytes != row * s->h)
         return 1;
     for (y = 0; y < s->h; ++y)
         if (memcmp(s->guest_shadow + (size_t)y * row,
-                   guest + (size_t)y * s->pitch, row))
+                   s_surface_probe + (size_t)y * s->pitch, row))
             return 1;
     return 0;
+}
+
+/* The preceding checked read rejects existing guards. SEH writes respect
+ * read-only protection, unlike debugger-oriented WriteProcessMemory on some
+ * executable pages. */
+static int guarded_guest_write(void *destination, const void *source, size_t bytes)
+{
+    __try {
+        memcpy(destination, source, bytes);
+        return 1;
+    } __except (GetExceptionCode() == EXCEPTION_ACCESS_VIOLATION ||
+                GetExceptionCode() == EXCEPTION_IN_PAGE_ERROR ||
+                GetExceptionCode() == EXCEPTION_GUARD_PAGE
+                    ? EXCEPTION_EXECUTE_HANDLER : EXCEPTION_CONTINUE_SEARCH) {
+        return 0;
+    }
+}
+
+#ifdef BRUTEFORCE_D3D11_TESTING
+int bruteforce_d3d11_test_guarded_write(void *destination, const void *source, size_t bytes)
+{
+    return guarded_guest_write(destination, source, bytes);
+}
+#endif
+
+static int checked_write_guest_surface(Surf *s, const void *source, size_t source_pitch)
+{
+    GuestSpanIdentity identity;
+    size_t row = surf_guest_row(s), span, bytes;
+    uint32_t y, rows;
+    static unsigned rejected;
+
+    if (!source || !surface_guest_span(s, &span) || source_pitch < row ||
+        (s->h - 1) > (SIZE_MAX - row) / source_pitch ||
+        !copy_guest_surface(s, &identity) || !same_guest_identity(&s->identity, &identity))
+        goto failed;
+    rows = s->pitch == row && source_pitch == row ? s->h : 1;
+    bytes = row * rows;
+    for (y = 0; y < s->h; y += rows) {
+        if (!guarded_guest_write(GUEST(s->va) + (size_t)y * s->pitch,
+                                 (const uint8_t *)source + (size_t)y * source_pitch, bytes))
+            goto failed;
+    }
+    if (!guest_identity_still_valid(s->va, span,
+            s_tex_strict_bounds ? GUEST_BOUNDS_TRACK_IF_REGISTERED : GUEST_BOUNDS_IGNORE,
+            &identity))
+        goto failed;
+    return 1;
+failed:
+    if (rejected < 32) {
+        ++rejected;
+        fprintf(stderr, "[GPU-D3D11] checked guest color write for %08X failed or changed%s\n",
+                s->va, rejected == 32 ? " (further reports suppressed)" : "");
+    }
+    return 0;
+}
+
+static int validate_seed_shadow(Surf *s)
+{
+    int changed = guest_surface_changed(s);
+    if (changed < 0)
+        return 0;
+    if (changed) {
+        s->gpu_dirty = 1;
+        s->guest_check_gen = 0;
+    }
+    return 1;
 }
 
 /* Seeded from guest memory: whatever the title (or the boot) left there.
@@ -838,6 +1116,8 @@ static int create_surf(Surf *s, ID3D11ShaderResourceView *gpu_seed,
     ID3D11ShaderResourceView *seed_srv = NULL;
     HRESULT hr;
 
+    s->sample_copy = NULL;
+    s->sample_copy_srv = NULL;
     memset(&td, 0, sizeof td);
     td.Width = s->pw;
     td.Height = s->ph;
@@ -848,8 +1128,8 @@ static int create_surf(Surf *s, ID3D11ShaderResourceView *gpu_seed,
     td.Usage = D3D11_USAGE_DEFAULT;
     td.BindFlags = D3D11_BIND_RENDER_TARGET | D3D11_BIND_SHADER_RESOURCE;
     if (s->pw == s->w && s->ph == s->h && s->pitch >= s->w * s->bpp) {
-        init.pSysMem = GUEST(s->va);
-        init.SysMemPitch = s->pitch;
+        init.pSysMem = s->guest_shadow;
+        init.SysMemPitch = (UINT)surf_guest_row(s);
         init.SysMemSlicePitch = 0;
         pinit = &init;
     }
@@ -858,7 +1138,7 @@ static int create_surf(Surf *s, ID3D11ShaderResourceView *gpu_seed,
     if (gpu_call_failed(hr, "creating color surface"))
         return 0;
 #ifdef BRUTEFORCE_D3D11_TESTING
-    if (!gpu_seed && scale_test_failure("guest-change-seed"))
+    if (scale_test_failure("guest-change-seed"))
         *(uint32_t *)GUEST(s->va) ^= 1u;
 #endif
     hr = scale_test_failure("color-rtv") ? E_OUTOFMEMORY :
@@ -894,8 +1174,8 @@ static int create_surf(Surf *s, ID3D11ShaderResourceView *gpu_seed,
         td.Width = s->w;
         td.Height = s->h;
         td.BindFlags = D3D11_BIND_SHADER_RESOURCE;
-        init.pSysMem = GUEST(s->va);
-        init.SysMemPitch = s->pitch;
+        init.pSysMem = s->guest_shadow;
+        init.SysMemPitch = (UINT)surf_guest_row(s);
         init.SysMemSlicePitch = 0;
         hr = ID3D11Device_CreateTexture2D(s_dev, &td, &init, &seed);
         if (SUCCEEDED(hr))
@@ -930,7 +1210,7 @@ static Surf *find_surf(uint32_t va)
 {
     int i;
     for (i = 0; i < s_nsurf; i++)
-        if (s_surf[i].va == va && s_surf[i].tex)
+        if (s_surf[i].va == va && s_surf[i].tex && surf_identity_current(&s_surf[i]))
             return &s_surf[i];
     return NULL;
 }
@@ -947,7 +1227,7 @@ static Surf *get_surf(const Nv2aSurface *in)
     uint32_t aa_sy = in->aa_sy > 1 ? in->aa_sy : 1;
     uint32_t pw, ph;
     Surf *s = NULL;
-    int i;
+    int i, stale;
 
     if (aa_sx > 2 || aa_sy > 2) {
         fprintf(stderr, "[GPU-SCALE] unsupported guest anti-aliasing factors %ux%u\n",
@@ -956,17 +1236,30 @@ static Surf *get_surf(const Nv2aSurface *in)
     }
     for (i = 0; i < s_nsurf; i++)
         if (s_surf[i].va == in->color_va) { s = &s_surf[i]; break; }
-    if (s) {
+    stale = s && !surf_identity_current(s);
+    if (s && !stale) {
         w = w > s->w ? w : s->w;
         h = h > s->h ? h : s->h;
     }
     if (!gpu_scale_surface_size(w, h, aa_sx, aa_sy, &pw, &ph))
         return NULL;
-    if (s && (s->bpp != bpp || s->w != w || s->h != h || s->pw != pw || s->ph != ph ||
+    if (s && (stale || s->bpp != bpp || s->w != w || s->h != h || s->pw != pw || s->ph != ph ||
               s->pitch != in->pitch || !s->tex)) {
         Surf replacement = *s;
         int guest_layout_changed =
-            s->bpp != bpp || s->w != w || s->h != h || s->pitch != in->pitch;
+            stale || s->bpp != bpp || s->w != w || s->h != h || s->pitch != in->pitch;
+        int migrate = !stale && gpu_scale_requested() && s->srv;
+        int uncertain = 0;
+        if (guest_layout_changed && !stale && s->tex) {
+            int changed = guest_surface_changed(s);
+            if (changed < 0 || (changed && s->gpu_dirty) || (s->gpu_dirty && !migrate))
+                uncertain = 1;
+            if (changed > 0 && !s->gpu_dirty)
+                migrate = 0;
+        }
+        if (stale)
+            memset(&replacement, 0, sizeof replacement);
+        replacement.va = in->color_va;
         replacement.bpp = bpp;
         replacement.w = w;
         replacement.h = h;
@@ -979,26 +1272,34 @@ static Surf *get_surf(const Nv2aSurface *in)
         replacement.tex = NULL;
         replacement.rtv = NULL;
         replacement.srv = NULL;
+        replacement.sample_copy = NULL;
+        replacement.sample_copy_srv = NULL;
         if (guest_layout_changed) {
             replacement.guest_tex = NULL;
             replacement.guest_srv = NULL;
             replacement.guest_shadow = NULL;
             replacement.guest_shadow_bytes = 0;
             replacement.guest_check_gen = 0;
-            replacement.gpu_dirty = 0;
+            replacement.gpu_dirty = migrate != 0;
             replacement.guest_exact = 0;
+            replacement.alias_uncertain = !stale && (s->alias_uncertain || uncertain);
         }
-        if (!create_surf(&replacement, gpu_scale_requested() ? s->srv : NULL,
+        if ((guest_layout_changed && !snapshot_guest_surface(&replacement)) ||
+            !create_surf(&replacement, migrate ? s->srv : NULL,
                          s->pw, s->ph) ||
-            (guest_layout_changed && !snapshot_guest_surface(&replacement))) {
+            (guest_layout_changed && !validate_seed_shadow(&replacement))) {
             release_surf(&replacement);
             if (guest_layout_changed)
                 release_surf_guest(&replacement);
             fprintf(stderr, "[GPU-D3D11] retaining prior color resources for %08X\n", s->va);
             return NULL;
         }
+        if (guest_layout_changed && migrate && guest_surface_changed(s) != 0)
+            replacement.alias_uncertain = 1;
         if (s_cur == s)
             s_cur = NULL;
+        if (stale && s_last_presented == s)
+            s_last_presented = NULL;
         release_surf(s);
         if (guest_layout_changed)
             release_surf_guest(s);
@@ -1026,7 +1327,8 @@ static Surf *get_surf(const Nv2aSurface *in)
         s->aa_sx = aa_sx;
         s->aa_sy = aa_sy;
         s->scale_epoch = gpu_scale_epoch();
-        if (!create_surf(s, NULL, 0, 0) || !snapshot_guest_surface(s)) {
+        if (!snapshot_guest_surface(s) || !create_surf(s, NULL, 0, 0) ||
+            !validate_seed_shadow(s)) {
             release_surf(s);
             release_surf_guest(s);
             s_nsurf--;
@@ -1687,15 +1989,17 @@ static int upload_guest_surface(Surf *s)
     Depth *restore_depth = s_cur_depth;
     int counting, ok;
 
+    if ((uint64_t)s->w * s->bpp > s->pitch)
+        return 0;
     if (s->pw == s->w && s->ph == s->h) {
         ID3D11DeviceContext_UpdateSubresource(s_ctx, (ID3D11Resource *)s->tex, 0, NULL,
-                                             GUEST(s->va), s->pitch, 0);
+                                             s_surface_probe, s->pitch, 0);
         return 1;
     }
     if (!ensure_guest_texture(s))
         return 0;
     ID3D11DeviceContext_UpdateSubresource(s_ctx, (ID3D11Resource *)s->guest_tex, 0, NULL,
-                                         GUEST(s->va), s->pitch, 0);
+                                         s_surface_probe, s->pitch, 0);
     counting = query_suspend_clear();
     ok = gpu_scale_blit(s->guest_srv, s->w, s->h, s->rtv, s->pw, s->ph,
                         GPU_SCALE_BLIT_BILINEAR);
@@ -1719,80 +2023,78 @@ static int upload_guest_surface(Surf *s)
 static int sync_guest_surface(Surf *s, int force)
 {
     static int warned_conflict;
+    int changed;
 
     if (!force && s->guest_check_gen == s_gen)
         return 1;
+    changed = guest_surface_changed(s);
+    if (changed < 0)
+        return 0;
     s->guest_check_gen = s_gen;
-    if (!guest_surface_changed(s))
+    if (!changed)
         return 1;
     if (s->gpu_dirty) {
         s_st.guest_conflicts++;
         if (!warned_conflict++)
             fprintf(stderr, "[GPU-D3D11] guest writes raced GPU color work on surface %08X;"
                             " preserving the GPU frame\n", s->va);
-        return 1;
+        return 2;
     }
     if (!upload_guest_surface(s))
         return 0;
+    shadow_from_probe(s);
 #ifdef BRUTEFORCE_D3D11_TESTING
     if (scale_test_failure("guest-change-upload"))
         *(uint32_t *)GUEST(s->va) ^= 1u;
 #endif
-    if (!snapshot_guest_surface(s))
-        return 0;
-    /* Guest bytes can change between the upload and its shadow snapshot. */
     s->guest_exact = 0;
     s_st.guest_uploads++;
+    changed = guest_surface_changed(s);
+    if (changed) {
+        s->gpu_dirty = 1;
+        s->guest_check_gen = 0;
+        return changed < 0 ? 0 : 2;
+    }
     return 1;
 }
 
-static int guest_shadow_is_clear(const Surf *s, uint32_t argb)
+static uint32_t guest_clear_value(const Surf *s, uint32_t argb)
 {
-    const uint32_t *pixels = (const uint32_t *)s->guest_shadow;
-    size_t i, count = (size_t)s->w * s->h;
+    if (s->bpp == 2)
+        return ((argb >> 8) & 0xF800u) | ((argb >> 5) & 0x07E0u) |
+               ((argb >> 3) & 0x001Fu);
+    return argb;
+}
 
-    if (!pixels || s->guest_shadow_bytes != count * sizeof *pixels)
-        return 0;
+static void shadow_from_clear(Surf *s, uint32_t argb)
+{
+    uint32_t value = guest_clear_value(s, argb);
+    size_t i, count = (size_t)s->w * s->h;
     for (i = 0; i < count; ++i)
-        if (pixels[i] != argb)
-            return 0;
-    return 1;
+        memcpy(s->guest_shadow + i * s->bpp, &value, s->bpp);
 }
 
 static int mirror_full_color_clear(Surf *s, uint32_t argb)
 {
-    uint8_t *guest = GUEST(s->va);
-    uint32_t x, y;
+    int changed;
 
-    if (s->bpp == 4) {
-        for (y = 0; y < s->h; ++y) {
-            uint32_t *row = (uint32_t *)(guest + (size_t)y * s->pitch);
-            for (x = 0; x < s->w; ++x)
-                row[x] = argb;
-        }
-    } else if (s->bpp == 2) {
-        uint16_t value = (uint16_t)(((argb >> 8) & 0xF800u) |
-                                    ((argb >> 5) & 0x07E0u) |
-                                    ((argb >> 3) & 0x001Fu));
-        for (y = 0; y < s->h; ++y) {
-            uint16_t *row = (uint16_t *)(guest + (size_t)y * s->pitch);
-            for (x = 0; x < s->w; ++x)
-                row[x] = value;
-        }
-    } else {
+    if ((s->bpp != 2 && s->bpp != 4) ||
+        (uint64_t)s->w * s->bpp > s->pitch || !ensure_guest_shadow(s))
         return 0;
-    }
+    shadow_from_clear(s, argb);
+    if (!checked_write_guest_surface(s, s->guest_shadow, surf_guest_row(s)))
+        return 0;
 #ifdef BRUTEFORCE_D3D11_TESTING
     if (scale_test_failure("guest-change-mirror"))
-        *(uint32_t *)guest ^= 1u;
+        *(uint32_t *)GUEST(s->va) ^= 1u;
 #endif
-    if (!snapshot_guest_surface(s))
+    changed = guest_surface_changed(s);
+    if (changed < 0)
         return 0;
     s->guest_check_gen = 0;
-    s->gpu_dirty = 0;
-    s->guest_exact = s_skip_clean_readback && s->bpp == 4 && s->pitch >= s->w * 4 &&
-                     s->pw == s->w && s->ph == s->h &&
-                     guest_shadow_is_clear(s, argb);
+    s->gpu_dirty = changed != 0;
+    s->guest_exact = !changed && s_skip_clean_readback && s->bpp == 4 && s->pitch >= s->w * 4 &&
+                     s->pw == s->w && s->ph == s->h;
     return 1;
 }
 
@@ -1803,6 +2105,7 @@ static int mirror_full_color_clear(Surf *s, uint32_t argb)
 typedef struct {
     uint32_t offset, w, h, pitch, color, levels, uploaded_levels, palette, palette_entries;
     uint64_t hash, sparse, palette_hash;
+    GuestSpanIdentity source_identity, palette_identity;
     uint32_t gen, stable, last_use;
     uint8_t cube, unsupported;
     uint8_t *snapshot;
@@ -1815,6 +2118,8 @@ static Tex *s_tex;
 static int s_ntex;
 static uint32_t *s_decode;
 static size_t s_decode_cap;
+static uint8_t *s_tex_probe;
+static size_t s_tex_probe_cap;
 static size_t s_tex_snapshot_bytes;
 static GpuTextureDecoder s_texture_decoder;
 static int s_tex_gpu = 1, s_tex_log, s_tex_approx, s_tex_aniso;
@@ -1834,19 +2139,18 @@ static uint64_t hash_bytes(const uint8_t *p, size_t n)
     return h;
 }
 
-static uint64_t tex_hash(const Nv2aTexture *t, size_t n)
+static uint64_t tex_hash(const uint8_t *p, uint32_t color, size_t n)
 {
     if (!n)
         return 0;
     s_st.tex_approx_hash_bytes += n;
-    return hash_bytes(GUEST(t->offset), n) ^ ((uint64_t)t->color << 56);
+    return hash_bytes(p, n) ^ ((uint64_t)color << 56);
 }
 
 /* 128 eight-byte samples spread over the texture. */
-static uint64_t tex_sparse(const Nv2aTexture *t, size_t n)
+static uint64_t tex_sparse(const uint8_t *p, size_t n)
 {
     size_t i;
-    const uint8_t *p = GUEST(t->offset);
     uint64_t h = 1469598103934665603ull;
     if (n < 8)
         return 0;
@@ -1959,32 +2263,46 @@ static int ensure_decode(size_t texels)
     return s_decode != NULL;
 }
 
-static void check_p8_span(uint32_t va, size_t bytes, int palette)
+static int ensure_tex_probe(size_t bytes)
 {
-    uint32_t remaining = va >= XBOX_CONTIG_BASE
-                       && (uint64_t)va < (uint64_t)XBOX_CONTIG_BASE + XBOX_CONTIG_SIZE
-                       ? xbox_ContiguousBlockSize(va) : xbox_HeapBlockSize(va);
-    if (remaining && bytes > remaining) {
-        fprintf(stderr, "[GPU-D3D11] P8 %s allocation is too short:"
-                        " %zu bytes requested, %u tracked bytes remain at 0x%08X\n",
-                palette ? "palette" : "texture", bytes, remaining, va);
-        fflush(stderr);
-        abort();
-    }
-    if (!readable_guest_range(va, bytes)) {
-        fprintf(stderr, "[GPU-D3D11] P8 %s span at 0x%08X (%zu bytes) is not readable\n",
-                palette ? "palette" : "texture", va, bytes);
-        fflush(stderr);
-        abort();
-    }
+    uint8_t *probe;
+    if (bytes <= s_tex_probe_cap)
+        return 1;
+    probe = (uint8_t *)realloc(s_tex_probe, bytes);
+    if (!probe)
+        return 0;
+    s_tex_probe = probe;
+    s_tex_probe_cap = bytes;
+    return 1;
 }
 
-static int texture_span_readable(uint32_t va, size_t bytes)
+static void report_texture_copy_failure(GuestCopyResult result, uint32_t va,
+                                        size_t bytes, int palette, int p8)
 {
-    uint32_t remaining = va >= XBOX_CONTIG_BASE
-                       && (uint64_t)va < (uint64_t)XBOX_CONTIG_BASE + XBOX_CONTIG_SIZE
-                       ? xbox_ContiguousBlockSize(va) : xbox_HeapBlockSize(va);
-    return (!remaining || bytes <= remaining) && readable_guest_range(va, bytes);
+    static unsigned reports;
+    const char *part = palette ? "palette" : "texture";
+    if (!p8) {
+        if (reports >= 32)
+            return;
+        ++reports;
+    }
+    if (result == GUEST_COPY_SHORT)
+        fprintf(stderr, "[GPU-D3D11] %s%s allocation is too short for %zu bytes at 0x%08X\n",
+                p8 ? "P8 " : "", part, bytes, va);
+    else if (result == GUEST_COPY_UNREGISTERED)
+        fprintf(stderr, "[GPU-D3D11] %s%s span at 0x%08X (%zu bytes) lacks registered bounds\n",
+                p8 ? "P8 " : "", part, va, bytes);
+    else if (result == GUEST_COPY_CHANGED)
+        fprintf(stderr, "[GPU-D3D11] %s%s span at 0x%08X (%zu bytes) changed allocation"
+                        " or mapping during the checked read\n",
+                p8 ? "P8 " : "", part, va, bytes);
+    else
+        fprintf(stderr, "[GPU-D3D11] %s%s span at 0x%08X (%zu bytes) is not readable\n",
+                p8 ? "P8 " : "", part, va, bytes);
+    if (p8) {
+        fflush(stderr);
+        abort();
+    }
 }
 
 static void mip_fallback(const char *reason, const Nv2aTexture *t, unsigned stage)
@@ -2097,15 +2415,14 @@ static TextureUploadResult upload(Tex *e, const Nv2aTexture *t, int cube,
                                                        s_decode + used_texels, texels))
                             return TEX_UPLOAD_FAILED;
                     } else {
-                        if (sub->offset > UINT32_MAX - t->offset)
-                            return TEX_UPLOAD_FAILED;
-                        image.offset = t->offset + (uint32_t)sub->offset;
                         image.width = sub->width;
                         image.height = sub->height;
                         image.pitch = layout->storage == GPU_TEXTURE_LINEAR
                                     ? (uint32_t)sub->row_pitch : 0;
                         image.levels = 1;
-                        if (!nv2a_backend_decode_texture(&image, s_decode + used_texels)) {
+                        if (!nv2a_backend_decode_texture_data(&image, source + sub->offset,
+                                                               sub->size, s_decode + used_texels,
+                                                               texels)) {
                             static unsigned failures;
                             if (failures++ < 10)
                                 fprintf(stderr, "[GPU-D3D11] cannot decode texture format 0x%02X"
@@ -2119,12 +2436,6 @@ static TextureUploadResult upload(Tex *e, const Nv2aTexture *t, int cube,
                     init[index].SysMemPitch = sub->width * 4;
                     used_texels += texels;
                 }
-            if (t->color != 0x0B && memcmp(source, GUEST(t->offset), layout->span)) {
-                fprintf(stderr, "[GPU-D3D11] texture changed during CPU decoding;"
-                                " cannot safely cache the result\n");
-                fflush(stderr);
-                abort();
-            }
             *path = "CPU";
             s_st.tex_cpu++;
         }
@@ -2157,27 +2468,149 @@ static TextureUploadResult upload(Tex *e, const Nv2aTexture *t, int cube,
     return TEX_UPLOAD_OK;
 }
 
+static int s_texture_hard_reject;
+
+static ID3D11ShaderResourceView *snapshot_bound_surface(Surf *s)
+{
+    D3D11_TEXTURE2D_DESC desc;
+    HRESULT hr;
+    if (!s->sample_copy) {
+        ID3D11Texture2D_GetDesc(s->tex, &desc);
+        desc.BindFlags = D3D11_BIND_SHADER_RESOURCE;
+        desc.CPUAccessFlags = 0;
+        desc.MiscFlags = 0;
+        desc.Usage = D3D11_USAGE_DEFAULT;
+        hr = ID3D11Device_CreateTexture2D(s_dev, &desc, NULL, &s->sample_copy);
+        if (SUCCEEDED(hr))
+            hr = ID3D11Device_CreateShaderResourceView(s_dev,
+                    (ID3D11Resource *)s->sample_copy, NULL, &s->sample_copy_srv);
+        if (FAILED(hr)) {
+            gpu_d3d11_check_device(s_dev, hr, "creating color alias snapshot");
+            fprintf(stderr, "[GPU-D3D11] color alias snapshot creation failed 0x%08lX\n",
+                    (unsigned long)hr);
+            if (s->sample_copy) ID3D11Texture2D_Release(s->sample_copy);
+            s->sample_copy = NULL;
+            return NULL;
+        }
+    }
+    ID3D11DeviceContext_OMSetRenderTargets(s_ctx, 0, NULL, NULL);
+    ID3D11DeviceContext_CopyResource(s_ctx, (ID3D11Resource *)s->sample_copy,
+                                    (ID3D11Resource *)s->tex);
+    ID3D11DeviceContext_OMSetRenderTargets(s_ctx, 1, &s->rtv,
+                                          s_cur_depth ? s_cur_depth->dsv : NULL);
+    return s->sample_copy_srv;
+}
+
+/* A GPU-owned overlap may not be read from stale guest bytes. An exact,
+ * layout-compatible surface can be sampled after reconciling its guest
+ * shadow; the currently bound target needs a separate ordered GPU copy. */
+static int color_texture_alias(const Nv2aTexture *t, int cube,
+                               const GpuTextureLayout *layout,
+                               ID3D11ShaderResourceView **view)
+{
+    uint64_t start = t->offset, end = start + layout->span, phys = 0;
+    int physical = physical_range(start, layout->span, &phys);
+    int i, overlaps = 0, dirty_overlap = 0;
+    Surf *exact = NULL;
+    static unsigned rejected;
+
+    *view = NULL;
+    for (i = 0; i < s_nsurf; ++i) {
+        Surf *s = &s_surf[i];
+        uint64_t span, surface_end, surface_phys = 0;
+        int sp, overlap, sync;
+        if (!s->tex)
+            continue;
+        span = (uint64_t)(s->h - 1) * s->pitch + surf_guest_row(s);
+        surface_end = (uint64_t)s->va + span;
+        sp = physical_range(s->va, span, &surface_phys);
+        overlap = physical < 0 || sp < 0 ||
+                  (start < surface_end && s->va < end) ||
+                  (physical > 0 && sp > 0 && phys < surface_phys + span &&
+                   surface_phys < phys + layout->span);
+        if (!overlap)
+            continue;
+        if (!surf_identity_current(s)) {
+            uint32_t remaining;
+            if (s->identity.layout == xbox_MemoryLayoutGeneration() &&
+                s->identity.allocation &&
+                !guest_allocation_identity(t->offset, &remaining))
+                goto reject;
+            continue;
+        }
+        if (s->alias_uncertain)
+            goto reject;
+        ++overlaps;
+        sync = sync_guest_surface(s, 1);
+        if (sync != 1)
+            goto reject;
+        if (s->gpu_dirty)
+            ++dirty_overlap;
+        if (!cube && (uint64_t)s->w * s->bpp <= s->pitch &&
+            t->offset == s->va && t->width == s->w && t->height == s->h &&
+            (t->pitch == s->pitch ||
+             (t->color == 0x06 && !t->pitch && s->pitch == s->w * 4)) &&
+            ((s->bpp == 4 && (t->color == 0x12 || t->color == 0x06 ||
+                              (t->color == 0x2E && !s_depth_texture))) ||
+             (s->bpp == 2 && t->color == 0x11)))
+            exact = s;
+        else {
+            s_st.overlap_rtt++;
+            if (s->gpu_dirty)
+                goto reject;
+        }
+    }
+    if (exact && (overlaps == 1 || !dirty_overlap)) {
+        if (s_tex_strict_bounds) {
+            GpuTextureLayout base;
+            uint32_t remaining;
+            uint64_t id = xbox_GuestBoundsIdentity(t->offset, &remaining);
+            if (!gpu_texture_layout(t, 1, 0, &base) || !id || base.span > remaining)
+                goto reject;
+        }
+        *view = exact == s_cur ? snapshot_bound_surface(exact) : exact->srv;
+        if (!*view)
+            goto reject;
+        s_st.rtt++;
+        return 1;
+    }
+    if (dirty_overlap)
+        goto reject;
+    return 0;
+reject:
+    if (rejected < 32) {
+        ++rejected;
+        fprintf(stderr, "[GPU-D3D11] color texture alias at %08X is conflicting,"
+                        " ambiguous or unsafe; draw rejected%s\n", t->offset,
+                rejected == 32 ? " (further reports suppressed)" : "");
+    }
+    return -1;
+}
+
 /* The view a stage samples, and the size its texel-space coordinates are
  * divided by (*tw, *th). */
 static ID3D11ShaderResourceView *get_texture(const Nv2aTexture *t, int cube, unsigned stage,
                                              float *tw, float *th, unsigned *mip_levels)
 {
     Tex *e = NULL;
-    Surf *rt;
+    ID3D11ShaderResourceView *alias = NULL;
     Nv2aTexture normalized;
     GpuTextureLayout layout, base;
     uint64_t h, palette_hash = 0;
     size_t source_bytes, palette_bytes, snapshot_bytes;
     uint8_t *snapshot;
+    GuestSpanIdentity source_identity = {0}, palette_identity = {0};
+    GuestCopyResult copy_result;
     unsigned palette_entries = 0, invalid_index;
     unsigned perf_probes = 0;
     const char *path = NULL;
     TextureUploadResult upload_result;
     uint64_t perf_start = 0;
     int perf = g_bruteforce_perf_counters_enabled;
-    int rewritten, approximate;
-    int i, faces = cube ? 6 : 1;
+    int rewritten, approximate, same_lifetime;
+    int i, alias_result, faces = cube ? 6 : 1;
 
+    s_texture_hard_reject = 0;
     *mip_levels = 1;
     if (!t || !t->width || !t->height || t->width > 4096 || t->height > 4096)
         return NULL;
@@ -2220,30 +2653,47 @@ static ID3D11ShaderResourceView *get_texture(const Nv2aTexture *t, int cube, uns
             return NULL;
         }
     }
-    if (!cube) {
-        /* Render to texture: a surface this back end drew. */
-        rt = find_surf(t->offset);
-        if (rt && rt != s_cur) {
-            if (s_tex_mips && (t->levels > 1 || mip_filter_requested(t->filter)))
-                mip_fallback("render-target alias is level 0 only", t, stage);
-            s_st.rtt++;
-            *tw = (float)rt->w;
-            *th = (float)rt->h;
-            return rt->srv;
-        }
-        if (!rt) {
-            for (i = 0; i < s_nsurf; i++)
-                if (t->offset > s_surf[i].va
-                    && t->offset - s_surf[i].va < s_surf[i].pitch * s_surf[i].h) {
-                    s_st.overlap_rtt++;
-                    break;
-                }
-        }
-    }
     if (!gpu_texture_layout(t, faces, s_tex_mips, &layout)) {
         fprintf(stderr, "[GPU-D3D11] invalid texture span or layout for format 0x%02X, %ux%u"
                         " faces=%d levels=%u\n", t->color, t->width, t->height, faces, t->levels);
         return NULL;
+    }
+    alias_result = color_texture_alias(t, cube, &layout, &alias);
+    if (alias_result < 0) {
+        s_texture_hard_reject = 1;
+        return NULL;
+    }
+    if (alias_result > 0) {
+        if (s_tex_mips && (t->levels > 1 || mip_filter_requested(t->filter)))
+            mip_fallback("render-target alias is level 0 only", t, stage);
+        return alias;
+    }
+    /* Unsupported-format entries depend on metadata and allocation identity,
+     * not the inaccessible bytes. Preserve the existing no-read fallback. */
+    if (t->color != 0x0B) {
+        uint32_t remaining;
+        GuestSpanIdentity current = {0};
+        current.layout = xbox_MemoryLayoutGeneration();
+        current.allocation = guest_allocation_identity(t->offset, &remaining);
+        if (s_tex_strict_bounds)
+            current.bounds = xbox_GuestBoundsIdentity(t->offset, &remaining);
+        for (i = 0; i < s_ntex; ++i) {
+            Tex *negative = &s_tex[i];
+            if (negative->unsupported && negative->offset == t->offset &&
+                negative->w == t->width && negative->h == t->height &&
+                negative->color == t->color && negative->pitch == t->pitch &&
+                negative->cube == (uint8_t)cube && negative->palette == t->palette &&
+                (!(cube || s_tex_mips) || negative->levels == t->levels) &&
+                (!s_tex_mips || negative->uploaded_levels == layout.levels) &&
+                (!s_tex_strict_bounds || (current.bounds && layout.span <= remaining)) &&
+                same_guest_identity(&negative->source_identity, &current)) {
+                negative->last_use = s_gen;
+                s_st.tex_unsupported_hits++;
+                if (perf)
+                    bruteforce_perf_record_texture_unsupported_hit();
+                return NULL;
+            }
+        }
     }
     if (s_tex_mips) {
         if (layout.storage != GPU_TEXTURE_LINEAR && t->levels > layout.levels)
@@ -2252,30 +2702,59 @@ static ID3D11ShaderResourceView *get_texture(const Nv2aTexture *t, int cube, uns
             mip_fallback("linear texture has no mip chain; sampling level 0", t, stage);
         else if (layout.levels == 1 && mip_filter_requested(t->filter))
             mip_fallback("no additional mip levels declared; sampling level 0", t, stage);
-        if (!texture_span_readable(t->offset, layout.span)) {
-            if (layout.levels > 1 && gpu_texture_layout(t, faces, 0, &base)
-                && (!cube || base.face_stride == layout.face_stride)
-                && texture_span_readable(t->offset, base.span)) {
-                mip_fallback("mip chain is unreadable or shorter than its tracked allocation;"
-                             " falling back to level 0", t, stage);
-                layout = base;
-            } else {
-                mip_fallback("texture span is unreadable or shorter than its tracked allocation;"
-                             " texture rejected", t, stage);
-                if (t->color == 0x0B)
-                    check_p8_span(t->offset, layout.span, 0);
-                return NULL;
-            }
+    }
+    if (t->color == 0x0B) {
+        palette_entries = nv2a_p8_palette_entries(t->palette_entries);
+        if (!palette_entries) {
+            fprintf(stderr, "[GPU-D3D11] invalid P8 palette length %u at stage %u\n",
+                    t->palette_entries, stage);
+            return NULL;
         }
     }
-    source_bytes = layout.span;
-    if (t->color == 0x0B) {
-        palette_entries = 256u >> ((nv2a_backend_reg(0x1B20 + stage * 0x40) >> 2) & 3u);
-        if (!s_tex_mips)
-            check_p8_span(t->offset, source_bytes, 0);
-        check_p8_span(t->palette, (size_t)palette_entries * 4, 1);
-    }
     palette_bytes = (size_t)palette_entries * 4;
+    if (palette_bytes > SIZE_MAX - layout.span || !ensure_tex_probe(layout.span + palette_bytes)) {
+        fprintf(stderr, "[GPU-D3D11] cannot allocate checked texture snapshot\n");
+        return NULL;
+    }
+    copy_result = checked_guest_copy(t->offset, layout.span, s_tex_probe,
+                                     s_tex_strict_bounds, &source_identity);
+    if (copy_result != GUEST_COPY_OK && s_tex_mips && layout.levels > 1 &&
+        gpu_texture_layout(t, faces, 0, &base) &&
+        (!cube || base.face_stride == layout.face_stride) &&
+        checked_guest_copy(t->offset, base.span, s_tex_probe, s_tex_strict_bounds,
+                           &source_identity) == GUEST_COPY_OK) {
+        mip_fallback("mip chain is unreadable or shorter than its tracked allocation;"
+                     " falling back to level 0", t, stage);
+        layout = base;
+        copy_result = GUEST_COPY_OK;
+    }
+    if (copy_result != GUEST_COPY_OK) {
+        if (s_tex_mips)
+            mip_fallback("texture span is unreadable or shorter than its tracked allocation;"
+                         " texture rejected", t, stage);
+        report_texture_copy_failure(copy_result, t->offset, layout.span, 0, t->color == 0x0B);
+        s_texture_hard_reject = 1;
+        return NULL;
+    }
+    source_bytes = layout.span;
+    if (palette_bytes) {
+        copy_result = checked_guest_copy(t->palette, palette_bytes, s_tex_probe + source_bytes,
+                                         s_tex_strict_bounds, &palette_identity);
+        if (copy_result != GUEST_COPY_OK) {
+            report_texture_copy_failure(copy_result, t->palette, palette_bytes, 1, 1);
+            return NULL;
+        }
+    }
+    if (!guest_identity_still_valid(t->offset, source_bytes, s_tex_strict_bounds,
+                                    &source_identity) ||
+        (palette_bytes && !guest_identity_still_valid(t->palette, palette_bytes,
+                                                       s_tex_strict_bounds,
+                                                       &palette_identity))) {
+        report_texture_copy_failure(GUEST_COPY_CHANGED, t->offset, source_bytes, 0,
+                                    t->color == 0x0B);
+        s_texture_hard_reject = 1;
+        return NULL;
+    }
     if (palette_bytes > SIZE_MAX - source_bytes)
         return NULL;
     snapshot_bytes = source_bytes + palette_bytes;
@@ -2305,7 +2784,28 @@ static ID3D11ShaderResourceView *get_texture(const Nv2aTexture *t, int cube, uns
     if (perf)
         bruteforce_perf_record_texture_lookup(perf_probes, e != NULL,
                                               bruteforce_perf_clock() - perf_start);
-    if (e && e->unsupported) {
+    same_lifetime = e &&
+        e->source_identity.layout == source_identity.layout &&
+        e->source_identity.allocation == source_identity.allocation &&
+        e->source_identity.bounds == source_identity.bounds &&
+        e->palette_identity.layout == palette_identity.layout &&
+        e->palette_identity.allocation == palette_identity.allocation &&
+        e->palette_identity.bounds == palette_identity.bounds;
+    if (e && e->source_identity.layout == source_identity.layout &&
+        e->source_identity.allocation && !source_identity.allocation &&
+        !source_identity.bounds) {
+        report_texture_copy_failure(GUEST_COPY_CHANGED, t->offset, source_bytes, 0,
+                                    t->color == 0x0B);
+        s_texture_hard_reject = 1;
+        return NULL;
+    }
+    if (e && palette_bytes && e->palette_identity.layout == palette_identity.layout &&
+        e->palette_identity.allocation && !palette_identity.allocation &&
+        !palette_identity.bounds) {
+        report_texture_copy_failure(GUEST_COPY_CHANGED, t->palette, palette_bytes, 1, 1);
+        return NULL;
+    }
+    if (same_lifetime && e->unsupported) {
         e->last_use = s_gen;
         s_st.tex_unsupported_hits++;
         if (perf)
@@ -2314,20 +2814,20 @@ static ID3D11ShaderResourceView *get_texture(const Nv2aTexture *t, int cube, uns
     }
     if (approximate && palette_bytes) {
         s_st.tex_approx_hash_bytes += palette_bytes;
-        palette_hash = hash_bytes(GUEST(t->palette), palette_bytes);
+        palette_hash = hash_bytes(s_tex_probe + source_bytes, palette_bytes);
     }
     if (!approximate) {
-        if (e && e->snapshot && e->snapshot_bytes == snapshot_bytes) {
+        if (same_lifetime && e->snapshot && e->snapshot_bytes == snapshot_bytes) {
             size_t compared_palette_bytes = 0;
             int source_equal, palette_equal;
             if (perf)
                 perf_start = bruteforce_perf_clock();
-            source_equal = !memcmp(e->snapshot, GUEST(t->offset), source_bytes);
+            source_equal = !memcmp(e->snapshot, s_tex_probe, source_bytes);
             palette_equal = !palette_bytes;
             if (source_equal && palette_bytes) {
                 compared_palette_bytes = palette_bytes;
                 palette_equal = !memcmp(e->snapshot + source_bytes,
-                                        GUEST(t->palette), palette_bytes);
+                                        s_tex_probe + source_bytes, palette_bytes);
             }
             if (perf)
                 bruteforce_perf_record_texture_exact(
@@ -2340,25 +2840,25 @@ static ID3D11ShaderResourceView *get_texture(const Nv2aTexture *t, int cube, uns
             }
         }
     } else {
-        if (e && e->gen == s_gen && e->palette_hash == palette_hash) {
+        if (same_lifetime && e->gen == s_gen && e->palette_hash == palette_hash) {
             e->last_use = s_gen;
             *mip_levels = e->uploaded_levels;
             return e->srv;
         }
-        if (e && e->palette_hash == palette_hash && e->stable >= 30
+        if (same_lifetime && e->palette_hash == palette_hash && e->stable >= 30
                 && ((s_gen + (e->offset >> 12)) & 31) != 0
-                && tex_sparse(t, source_bytes) == e->sparse) {
+                && tex_sparse(s_tex_probe, source_bytes) == e->sparse) {
             e->gen = s_gen;
             e->last_use = s_gen;
             *mip_levels = e->uploaded_levels;
             return e->srv;
         }
-        h = tex_hash(t, source_bytes);
-        if (e && e->hash == h && h && e->palette_hash == palette_hash) {
+        h = tex_hash(s_tex_probe, t->color, source_bytes);
+        if (same_lifetime && e->hash == h && h && e->palette_hash == palette_hash) {
             if (e->stable < 0xFFFFFFFFu)
                 e->stable++;
             if (e->stable == 30)
-                e->sparse = tex_sparse(t, source_bytes);
+                e->sparse = tex_sparse(s_tex_probe, source_bytes);
             e->gen = s_gen;
             e->last_use = s_gen;
             *mip_levels = e->uploaded_levels;
@@ -2373,9 +2873,7 @@ static ID3D11ShaderResourceView *get_texture(const Nv2aTexture *t, int cube, uns
     }
     if (perf)
         perf_start = bruteforce_perf_clock();
-    memcpy(snapshot, GUEST(t->offset), source_bytes);
-    if (palette_bytes)
-        memcpy(snapshot + source_bytes, GUEST(t->palette), palette_bytes);
+    memcpy(snapshot, s_tex_probe, snapshot_bytes);
     if (perf)
         bruteforce_perf_record_texture_snapshot(snapshot_bytes,
                                                 bruteforce_perf_clock() - perf_start);
@@ -2408,6 +2906,8 @@ static ID3D11ShaderResourceView *get_texture(const Nv2aTexture *t, int cube, uns
     e = tex_slot(e);
     memset(e, 0, sizeof *e);
     set_tex_key(e, t, cube, palette_entries, layout.levels);
+    e->source_identity = source_identity;
+    e->palette_identity = palette_identity;
     upload_result = upload(e, t, cube, &layout, snapshot,
                            palette_bytes ? snapshot + source_bytes : NULL,
                            palette_entries, &path);
@@ -3020,9 +3520,11 @@ static void d3d_clear(const Nv2aSurface *s, const Nv2aRenderState *rs, uint32_t 
         depth_written(s_cur_depth);
     if (color_flags) {
         if (color_flags == 0xF0 && full_color) {
+            s_cur->alias_uncertain = 0;
             if (!mirror_full_color_clear(s_cur, argb)) {
                 s_cur->gpu_dirty = 1;
                 s_cur->guest_exact = 0;
+                s_cur->alias_uncertain = 1;
             }
         } else {
             s_cur->gpu_dirty = 1;
@@ -3107,7 +3609,7 @@ static void d3d_draw(const Nv2aSurface *s, const Nv2aBatch *b)
             }
         }
         srv = get_texture(b->texture, 0, 0, &tw, &th, &mip_levels);
-        if (!srv && required_depth_alias(b->texture, 0))
+        if (!srv && (s_texture_hard_reject || required_depth_alias(b->texture, 0)))
             return;
         if (srv)
             ss = get_required_sampler(b->texture->addr_u, b->texture->addr_v,
@@ -3247,7 +3749,7 @@ static int xdraw_prepare(const Nv2aSurface *s, const Nv2aXBatch *b)
             continue;
         srv[st] = get_texture(&b->tex[st], cube, st, &tw, &th, &mip_levels);
         if (!srv[st]) {
-            if (required_depth_alias(&b->tex[st], cube))
+            if (s_texture_hard_reject || required_depth_alias(&b->tex[st], cube))
                 return 0;
             continue;
         }
@@ -3348,6 +3850,8 @@ typedef struct {
     void *code;                         /* bytecode, for layouts and readback */
     SIZE_T code_size;
     ID3D11GeometryShader *so;           /* stream-output twin, for readback */
+    DWORD queued_tick;
+    volatile LONG slow_reported;
 } Vsh;
 
 static Vsh *s_vsh;
@@ -3365,6 +3869,46 @@ static int s_vlast_raw;
 static ID3D11InputLayout *s_vlast_il;
 static uint32_t s_vsh_flags;            /* GPU_VSH_* for every shader */
 static int s_vsh_sync;                  /* RECOMP_GPU_VSH_SYNC */
+static int s_shader_diag;
+static volatile LONG s_shader_diag_reports;
+
+static void shader_diagnostic(const char *format, ...)
+{
+    LONG count;
+    char message[384];
+    va_list args;
+
+    if (!s_shader_diag)
+        return;
+    count = InterlockedCompareExchange(&s_shader_diag_reports, 0, 0);
+    for (;;) {
+        LONG previous;
+        if (count >= 32)
+            return;
+        previous = InterlockedCompareExchange(&s_shader_diag_reports, count + 1, count);
+        if (previous == count)
+            break;
+        count = previous;
+    }
+    va_start(args, format);
+    vsnprintf(message, sizeof message, format, args);
+    va_end(args);
+    fprintf(stderr, "[GPU-SHADER] %s%s\n", message,
+            count == 31 ? " (further shader diagnostics suppressed)" : "");
+}
+
+static void vsh_note_pending(Vsh *v)
+{
+    DWORD now;
+    if (!s_shader_diag || v->state != 0)
+        return;
+    now = GetTickCount();
+    if ((DWORD)(now - v->queued_tick) >= 2000 &&
+        InterlockedCompareExchange(&v->slow_reported, 1, 0) == 0)
+        shader_diagnostic("vertex program %016llX still queued or compiling after %lu ms",
+                          (unsigned long long)v->hash,
+                          (unsigned long)(DWORD)(now - v->queued_tick));
+}
 
 static DWORD WINAPI vsh_worker(LPVOID arg)
 {
@@ -3375,11 +3919,21 @@ static DWORD WINAPI vsh_worker(LPVOID arg)
         for (i = 0; i < n; i++) {
             Vsh *v = &s_vsh[i];
             ID3DBlob *blob = NULL, *err = NULL;
+            DWORD started;
+            HRESULT result;
             if (v->state != 0)
                 continue;
-            if (FAILED(D3DCompile(v->src, v->len, "vsh", NULL, NULL, "vs_main", "vs_5_0",
-                                  D3DCOMPILE_OPTIMIZATION_LEVEL3 | D3DCOMPILE_IEEE_STRICTNESS,
-                                  0, &blob, &err))) {
+            started = s_shader_diag ? GetTickCount() : 0;
+            shader_diagnostic("compile-start key=%016llX instructions=%u",
+                              (unsigned long long)v->hash, v->n);
+            result = D3DCompile(v->src, v->len, "vsh", NULL, NULL, "vs_main", "vs_5_0",
+                                D3DCOMPILE_OPTIMIZATION_LEVEL3 | D3DCOMPILE_IEEE_STRICTNESS,
+                                0, &blob, &err);
+            if (FAILED(result)) {
+                if (s_shader_diag)
+                    shader_diagnostic("compile-failed key=%016llX result=0x%08lX elapsed=%lu ms",
+                                      (unsigned long long)v->hash, (unsigned long)result,
+                                      (unsigned long)(DWORD)(GetTickCount() - started));
                 if (InterlockedIncrement(&s_vsh_failures) <= 3)
                     fprintf(stderr, "[GPU-D3D11] vertex shader %ld failed: %s\n", (long)i,
                             err ? (const char *)ID3D10Blob_GetBufferPointer(err) : "?");
@@ -3387,6 +3941,10 @@ static DWORD WINAPI vsh_worker(LPVOID arg)
                     ID3D10Blob_Release(err);
                 InterlockedExchange(&v->state, -1);
             } else {
+                if (s_shader_diag)
+                    shader_diagnostic("compile-finished key=%016llX elapsed=%lu ms",
+                                      (unsigned long long)v->hash,
+                                      (unsigned long)(DWORD)(GetTickCount() - started));
                 if (err)
                     ID3D10Blob_Release(err);
                 v->blob = blob;
@@ -3445,6 +4003,9 @@ static void vsh_finish(Vsh *v)
     free(v->src);
     v->src = NULL;
     v->state = ok ? 2 : -1;
+    shader_diagnostic("prepare-%s key=%016llX bytecode=%s",
+                      ok ? "ready" : "failed", (unsigned long long)v->hash,
+                      v->code ? "retained" : "unavailable");
 }
 
 static void vsh_conv_key(const Nv2aXVsBatch *b, uint8_t conv[16])
@@ -3488,17 +4049,39 @@ static Vsh *get_vsh(const Nv2aXVsBatch *b)
         last = j;
         if (v->state == 1)
             vsh_finish(v);
+        if (v->state == 0)
+            vsh_note_pending(v);
         return v->state == 2 ? v : NULL;
     }
-    if (n == MAX_VSH || b->ninstr > VSH_MAX_INSTR)
+    if (n == MAX_VSH || b->ninstr > VSH_MAX_INSTR) {
+        shader_diagnostic("vertex program rejected: cache limit or instruction count");
         return NULL;
-    if (!s_vsh && !(s_vsh = (Vsh *)calloc(MAX_VSH, sizeof *s_vsh)))
+    }
+    if (!s_vsh && !(s_vsh = (Vsh *)calloc(MAX_VSH, sizeof *s_vsh))) {
+        shader_diagnostic("vertex program cache allocation failed");
         return NULL;
+    }
     if (!s_vsh_thread) {
-        s_vsh_wake = CreateEventA(NULL, FALSE, FALSE, NULL);
-        s_vsh_thread = CreateThread(NULL, 0, vsh_worker, NULL, 0, NULL);
-        if (!s_vsh_thread)
+        if (scale_test_failure("vsh-event")) {
+            SetLastError(ERROR_NOT_ENOUGH_MEMORY);
+            s_vsh_wake = NULL;
+        } else {
+            s_vsh_wake = CreateEventA(NULL, FALSE, FALSE, NULL);
+        }
+        if (!s_vsh_wake) {
+            shader_diagnostic("vertex worker event creation failed: Windows error %lu",
+                              (unsigned long)GetLastError());
             return NULL;
+        }
+        s_vsh_thread = CreateThread(NULL, 0, vsh_worker, NULL, 0, NULL);
+        if (!s_vsh_thread) {
+            DWORD error = GetLastError();
+            CloseHandle(s_vsh_wake);
+            s_vsh_wake = NULL;
+            shader_diagnostic("vertex worker thread creation failed: Windows error %lu",
+                              (unsigned long)error);
+            return NULL;
+        }
     }
     v = &s_vsh[n];
     memset(v, 0, sizeof *v);
@@ -3506,22 +4089,33 @@ static Vsh *get_vsh(const Nv2aXVsBatch *b)
     v->n = b->ninstr;
     v->mask = b->input_mask;
     v->nin = b->ninputs;
+    v->queued_tick = s_shader_diag ? GetTickCount() : 0;
     memcpy(v->conv, conv, sizeof conv);
     memcpy(v->words, b->program, b->ninstr * sizeof v->words[0]);
     v->len = gpu_vsh_hlsl(b->program, b->ninstr, b->input_mask, conv, s_vsh_flags,
                           src, sizeof src);
     if (!v->len || !(v->src = (char *)malloc(v->len + 1))) {
         v->state = -1;
+        shader_diagnostic("vertex program translation or source allocation failed key=%016llX",
+                          (unsigned long long)v->hash);
     } else {
         memcpy(v->src, src, v->len + 1);
+        shader_diagnostic("queued key=%016llX instructions=%u",
+                          (unsigned long long)v->hash, v->n);
     }
     InterlockedExchange(&s_nvsh, n + 1);
-    SetEvent(s_vsh_wake);
+    if (!SetEvent(s_vsh_wake)) {
+        shader_diagnostic("vertex worker wake failed: Windows error %lu",
+                          (unsigned long)GetLastError());
+        InterlockedCompareExchange(&v->state, -1, 0);
+    }
     if (s_vsh_sync) {
         /* RECOMP_GPU_VSH_SYNC=1 (tests): wait for the compile rather than
          * handing this batch to the CPU. */
-        while (v->state == 0)
+        while (v->state == 0) {
+            vsh_note_pending(v);
             Sleep(1);
+        }
         if (v->state == 1)
             vsh_finish(v);
         return v->state == 2 ? v : NULL;
@@ -4884,10 +5478,11 @@ static int d3d_readback(uint32_t color_va)
     Surf *sf = find_surf(color_va);
     ID3D11Texture2D *source;
     D3D11_MAPPED_SUBRESOURCE m;
+    GuestSpanIdentity identity;
     uint32_t y, row;
     double t0 = qpc_ms();
     HRESULT hr;
-    int ok = 0, counting, exact;
+    int ok = 0, counting, exact, matches = 1;
 
     if (s_dev)
         gpu_d3d11_check_device(s_dev, S_OK, "starting surface readback");
@@ -4939,30 +5534,55 @@ static int d3d_readback(uint32_t color_va)
     row = sf->w * sf->bpp;
     if (row > sf->pitch)
         row = sf->pitch;
-    for (y = 0; y < sf->h; y++)
-        memcpy(GUEST(sf->va) + (size_t)y * sf->pitch, (const uint8_t *)m.pData + (size_t)y * m.RowPitch,
-               row);
+    if (!checked_write_guest_surface(sf, m.pData, m.RowPitch)) {
+        ID3D11DeviceContext_Unmap(s_ctx, (ID3D11Resource *)s_staging, 0);
+        sf->guest_check_gen = 0;
+        sf->gpu_dirty = 1;
+        sf->guest_exact = 0;
+        sf->alias_uncertain = 1;
+        goto done;
+    }
 #ifdef BRUTEFORCE_D3D11_TESTING
     if (scale_test_failure("guest-change-readback"))
         *(uint32_t *)GUEST(sf->va) ^= 1u;
+    if (scale_test_failure("guest-guard-readback")) {
+        DWORD old_protection;
+        VirtualProtect(GUEST(sf->va), 1, PAGE_READWRITE | PAGE_GUARD, &old_protection);
+    }
 #endif
-    if (!snapshot_guest_surface(sf)) {
+    if (!copy_guest_surface(sf, &identity) || !same_guest_identity(&sf->identity, &identity)) {
         ID3D11DeviceContext_Unmap(s_ctx, (ID3D11Resource *)s_staging, 0);
+        sf->guest_check_gen = 0;
+        sf->gpu_dirty = 1;
+        sf->guest_exact = 0;
+        sf->alias_uncertain = 1;
         goto done;
     }
-    exact = s_skip_clean_readback && sf->bpp == 4 && sf->pitch >= sf->w * 4 &&
+    for (y = 0; y < sf->h; y++) {
+        const uint8_t *gpu_row = (const uint8_t *)m.pData + (size_t)y * m.RowPitch;
+        if (memcmp(s_surface_probe + (size_t)y * sf->pitch, gpu_row, row))
+            matches = 0;
+        memcpy(sf->guest_shadow + (size_t)y * row, gpu_row, row);
+    }
+    exact = matches && s_skip_clean_readback && sf->bpp == 4 && sf->pitch >= sf->w * 4 &&
             sf->pw == sf->w && sf->ph == sf->h;
-    for (y = 0; exact && y < sf->h; y++)
-        if (memcmp(sf->guest_shadow + (size_t)y * row,
-                   (const uint8_t *)m.pData + (size_t)y * m.RowPitch, row))
-            exact = 0;
     ID3D11DeviceContext_Unmap(s_ctx, (ID3D11Resource *)s_staging, 0);
-    sf->guest_check_gen = s_gen;
-    sf->gpu_dirty = 0;
+    sf->guest_check_gen = matches ? s_gen : 0;
+    sf->gpu_dirty = !matches;
     sf->guest_exact = exact;
+    sf->alias_uncertain = !matches;
     s_st.readbacks++;
     s_st.readback_ms += qpc_ms() - t0;
     gpu_d3d11_check_device(s_dev, S_OK, "completing surface readback");
+    if (!matches) {
+        static unsigned rejected;
+        if (rejected < 16) {
+            ++rejected;
+            fprintf(stderr, "[GPU-D3D11] guest color surface %08X changed during readback%s\n",
+                    sf->va, rejected == 16 ? " (further reports suppressed)" : "");
+        }
+        goto done;
+    }
     ok = 1;
 done:
     if (s_cur)
@@ -5133,8 +5753,10 @@ int bruteforce_d3d11_install(void)
     const char *tex_gpu = getenv("RECOMP_GPU_TEX_DECODE");
     const char *tex_log = getenv("RECOMP_GPU_TEXLOG");
     const char *tex_approx = getenv("RECOMP_GPU_TEX_CACHE_APPROX");
+    const char *tex_bounds = getenv("RECOMP_GPU_TEXTURE_BOUNDS");
     const char *tex_mips = getenv("RECOMP_GPU_MIPS");
     const char *tex_aniso = getenv("RECOMP_GPU_ANISO");
+    const char *shader_diag = getenv("RECOMP_GPU_SHADER_DIAG");
     const char *depth_texture = getenv("RECOMP_GPU_DEPTH_TEXTURE");
     const char *stencil_alias = getenv("RECOMP_GPU_STENCIL_ALIAS");
     const char *direct_present = getenv("RECOMP_GPU_DIRECT_PRESENT");
@@ -5170,6 +5792,11 @@ int bruteforce_d3d11_install(void)
         fprintf(stderr, "[GPU-D3D11] RECOMP_GPU_TEX_CACHE_APPROX must be 0 or 1\n");
         return 0;
     }
+    if (tex_bounds && *tex_bounds && strcmp(tex_bounds, "0") != 0 &&
+        strcmp(tex_bounds, "1") != 0) {
+        fprintf(stderr, "[GPU-D3D11] RECOMP_GPU_TEXTURE_BOUNDS must be 0 or 1\n");
+        return 0;
+    }
     if (tex_mips && *tex_mips && strcmp(tex_mips, "0") != 0 &&
         strcmp(tex_mips, "1") != 0) {
         fprintf(stderr, "[GPU-D3D11] RECOMP_GPU_MIPS must be 0 or 1\n");
@@ -5178,6 +5805,11 @@ int bruteforce_d3d11_install(void)
     if (tex_aniso && *tex_aniso && strcmp(tex_aniso, "0") != 0 &&
         strcmp(tex_aniso, "1") != 0) {
         fprintf(stderr, "[GPU-D3D11] RECOMP_GPU_ANISO must be 0 or 1\n");
+        return 0;
+    }
+    if (shader_diag && *shader_diag && strcmp(shader_diag, "0") != 0 &&
+        strcmp(shader_diag, "1") != 0) {
+        fprintf(stderr, "[GPU-D3D11] RECOMP_GPU_SHADER_DIAG must be 0 or 1\n");
         return 0;
     }
     if (!gpu_scale_prepare_config(&scale))
@@ -5221,11 +5853,15 @@ int bruteforce_d3d11_install(void)
     s_tex_gpu = !tex_gpu || strcmp(tex_gpu, "0") != 0;
     s_tex_log = tex_log && strcmp(tex_log, "1") == 0;
     s_tex_approx = tex_approx && strcmp(tex_approx, "1") == 0;
+    s_tex_strict_bounds = tex_bounds && strcmp(tex_bounds, "1") == 0;
     s_tex_mips = tex_mips && strcmp(tex_mips, "1") == 0;
     s_tex_aniso = tex_aniso && strcmp(tex_aniso, "1") == 0;
+    s_shader_diag = shader_diag && strcmp(shader_diag, "1") == 0;
     if (s_tex_approx)
         fprintf(stderr, "[GPU-D3D11] experimental approximate texture cache enabled;"
                         " texture rewrites can be missed\n");
+    if (s_tex_strict_bounds)
+        fprintf(stderr, "[GPU-D3D11] texture spans require registered logical bounds\n");
     if (s_tex_mips)
         fprintf(stderr, "[GPU-MIPS] experimental guest mip chains enabled;"
                         " CPU reference remains level 0\n");

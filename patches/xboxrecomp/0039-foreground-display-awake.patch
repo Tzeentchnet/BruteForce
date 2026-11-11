@@ -1,0 +1,363 @@
+diff --git a/docs/runtime/environment-variables.md b/docs/runtime/environment-variables.md
+index 07097e1..1a73e9c 100644
+--- a/docs/runtime/environment-variables.md
++++ b/docs/runtime/environment-variables.md
+@@ -120,6 +120,7 @@ The executor is itself opt-in: set `RECOMP_PB_EXEC=1` to execute the pushbuffer.
+ | Variable | Default | What it does | Where |
+ |---|---|---|---|
+ | `RECOMP_FB_WINDOW` | off | Opens a window showing the frame buffer. | `fb_present.c`, `fb_present_sdl.c` |
++| `RECOMP_DISPLAY_AWAKE=1` | off | Windows framebuffer-window thread requests display wakefulness only while its top-level host is visible, foreground and not minimized; releases it on background or close. API failures are reported and retried. | `display_awake.c`, `fb_present.c` |
+ | `RECOMP_FB_VA=<va>` | follows the draw surface | Pins the window to one guest address. | `fb_present.c` |
+ | `RECOMP_FB_WINDOW_DUMP_EVERY=N` | 0 | With `RECOMP_FB_DUMP`: dumps what the window shows every N frames. | `fb_present.c` |
+ | `RECOMP_WINDOW_SCALE=1..8` | 2 | Client-area scale. | `fb_present.c`, `fb_present_sdl.c` |
+diff --git a/src/video/CMakeLists.txt b/src/video/CMakeLists.txt
+index 3fafbe7..ad8c9b5 100644
+--- a/src/video/CMakeLists.txt
++++ b/src/video/CMakeLists.txt
+@@ -16,7 +16,7 @@ if(TARGET xbox_d3d8)
+ endif()
+ if(WIN32)
+     # gpu_present.c: the framebuffer window's D3D11 presenter.
+-    target_sources(xbox_video PRIVATE gpu_present.c)
++    target_sources(xbox_video PRIVATE gpu_present.c display_awake.c)
+     target_link_libraries(xbox_video PUBLIC mfplat mfreadwrite mfuuid mf ole32
+                           d3d11 dxgi dxguid d3dcompiler)
+ else()
+diff --git a/src/video/display_awake.c b/src/video/display_awake.c
+new file mode 100644
+index 0000000..4e6c90d
+--- /dev/null
++++ b/src/video/display_awake.c
+@@ -0,0 +1,78 @@
++#include "display_awake.h"
++
++#include <stdio.h>
++#include <string.h>
++
++static const RecompDisplayAwakeApi s_windows = {
++    IsWindow, GetAncestor, GetForegroundWindow, IsIconic, IsWindowVisible,
++    SetThreadExecutionState, GetLastError
++};
++
++static void display_awake_failure(RecompDisplayAwake *state, const char *operation)
++{
++    unsigned count = ++state->failures;
++    if (count <= 8 || (count % 256) == 0) {
++        fprintf(stderr, "  [DISPLAY-AWAKE] %s failed (Windows error %lu)%s\n",
++                operation, (unsigned long)state->api->last_error(),
++                count == 8 ? "; further failures are rate-limited" : "");
++        fflush(stderr);
++    }
++}
++
++static void display_awake_set(RecompDisplayAwake *state, int hold)
++{
++    EXECUTION_STATE flags;
++    if (!state->enabled || state->held == hold)
++        return;
++    flags = ES_CONTINUOUS | (hold ? ES_DISPLAY_REQUIRED : 0);
++    if (!state->api->set_execution_state(flags)) {
++        display_awake_failure(state, hold ? "acquire" : "release");
++        return;
++    }
++    state->held = hold;
++}
++
++int recomp_display_awake_init(RecompDisplayAwake *state, const char *option,
++                              const RecompDisplayAwakeApi *api)
++{
++    memset(state, 0, sizeof *state);
++    state->api = api ? api : &s_windows;
++    if (!option || !*option || !strcmp(option, "0"))
++        return 1;
++    if (strcmp(option, "1")) {
++        fprintf(stderr, "  [DISPLAY-AWAKE] RECOMP_DISPLAY_AWAKE must be 0 or 1; disabled\n");
++        return 0;
++    }
++    state->enabled = 1;
++    return 1;
++}
++
++void recomp_display_awake_update(RecompDisplayAwake *state, HWND window)
++{
++    HWND host = NULL, foreground = NULL, foreground_host = NULL;
++    int hold = 0;
++
++    if (!state->enabled)
++        return;
++    if (window && state->api->is_window(window)) {
++        host = state->api->root(window, GA_ROOT);
++        if (!host) {
++            display_awake_failure(state, "resolving window root");
++        } else if (state->api->is_window(host) && state->api->is_visible(host) &&
++                   !state->api->is_iconic(host)) {
++            foreground = state->api->foreground();
++            if (foreground && state->api->is_window(foreground)) {
++                foreground_host = state->api->root(foreground, GA_ROOT);
++                if (!foreground_host)
++                    display_awake_failure(state, "resolving foreground root");
++                hold = foreground_host == host;
++            }
++        }
++    }
++    display_awake_set(state, hold);
++}
++
++void recomp_display_awake_shutdown(RecompDisplayAwake *state)
++{
++    display_awake_set(state, 0);
++}
+diff --git a/src/video/display_awake.h b/src/video/display_awake.h
+new file mode 100644
+index 0000000..121763b
+--- /dev/null
++++ b/src/video/display_awake.h
+@@ -0,0 +1,30 @@
++#ifndef RECOMP_DISPLAY_AWAKE_H
++#define RECOMP_DISPLAY_AWAKE_H
++
++#include <windows.h>
++
++typedef struct RecompDisplayAwakeApi {
++    BOOL (WINAPI *is_window)(HWND);
++    HWND (WINAPI *root)(HWND, UINT);
++    HWND (WINAPI *foreground)(void);
++    BOOL (WINAPI *is_iconic)(HWND);
++    BOOL (WINAPI *is_visible)(HWND);
++    EXECUTION_STATE (WINAPI *set_execution_state)(EXECUTION_STATE);
++    DWORD (WINAPI *last_error)(void);
++} RecompDisplayAwakeApi;
++
++typedef struct RecompDisplayAwake {
++    const RecompDisplayAwakeApi *api;
++    unsigned failures;
++    int enabled;
++    int held;
++} RecompDisplayAwake;
++
++/* These calls must all run on the window thread: execution state is per-thread.
++ * The API parameter is NULL in production and may be substituted by tests. */
++int recomp_display_awake_init(RecompDisplayAwake *state, const char *option,
++                              const RecompDisplayAwakeApi *api);
++void recomp_display_awake_update(RecompDisplayAwake *state, HWND window);
++void recomp_display_awake_shutdown(RecompDisplayAwake *state);
++
++#endif
+diff --git a/src/video/fb_present.c b/src/video/fb_present.c
+index 73ab6e9..4d93080 100644
+--- a/src/video/fb_present.c
++++ b/src/video/fb_present.c
+@@ -40,6 +40,7 @@
+  * them. */
+ #include "keyboard.h"   /* src/input */
+ #include "gpu_present.h"
++#include "display_awake.h"
+ #include "present_capture.h"
+ #include "recomp_exit_hook.h"   /* src/platform */
+ #include <stdbool.h>
+@@ -50,6 +51,7 @@
+ extern ptrdiff_t xbox_GetMemoryOffset(void);
+ 
+ static volatile LONG s_fb_running;
++static __declspec(thread) RecompDisplayAwake s_display_awake;
+ static uint32_t      s_fb_va, s_fb_pitch, s_fb_width = 640, s_fb_height = 480;
+ static uint32_t     *s_rgb;           /* converted 32-bit copy for GDI */
+ 
+@@ -427,8 +429,15 @@ static LRESULT CALLBACK fb_wndproc(HWND h, UINT m, WPARAM w, LPARAM l)
+     if (m == WM_SYSKEYDOWN && w == VK_RETURN)
+         return 0;                       /* auto-repeat of Alt+Enter */
+     switch (m) {
++    case WM_ACTIVATE:
++    case WM_ACTIVATEAPP:
++    case WM_SIZE:
++    case WM_SHOWWINDOW:
++        recomp_display_awake_update(&s_display_awake, h);
++        break;
+     case WM_CLOSE:
+     case WM_DESTROY:
++        recomp_display_awake_shutdown(&s_display_awake);
+         /* Closing the window ends the run. Only stopping this thread left
+          * every other one running -- audio played on, and the process had
+          * to be ended from Task Manager. The guest has no exit path of its
+@@ -759,6 +768,7 @@ static DWORD WINAPI fb_thread(LPVOID unused)
+     const char *capture_path = getenv("RECOMP_PRESENTER_CAPTURE");
+ 
+     (void)unused;
++    recomp_display_awake_init(&s_display_awake, getenv("RECOMP_DISPLAY_AWAKE"), NULL);
+ 
+     {
+         WNDCLASSA wc;
+@@ -846,8 +856,9 @@ static DWORD WINAPI fb_thread(LPVOID unused)
+             TranslateMessage(&msg);
+             DispatchMessageA(&msg);
+         }
+-        if (s_capture.active && !InterlockedCompareExchange(&s_fb_running, 1, 1))
++        if (!InterlockedCompareExchange(&s_fb_running, 1, 1))
+             break;
++        recomp_display_awake_update(&s_display_awake, hwnd);
+         if (s_capture.active) {
+             AcquireSRWLockShared(&s_fb_config_lock);
+             capture_va = s_fb_va;
+@@ -935,6 +946,7 @@ static DWORD WINAPI fb_thread(LPVOID unused)
+             Sleep(16);                  /* D3D11's Present waited for vsync */
+     }
+ 
++    recomp_display_awake_shutdown(&s_display_awake);
+     if (s_capture.active && !recomp_capture_close(&s_capture, "thread_stopped"))
+         fb_capture_fail("cannot close capture");
+     gpu_present_shutdown();
+diff --git a/tests/display_awake/CMakeLists.txt b/tests/display_awake/CMakeLists.txt
+new file mode 100644
+index 0000000..c8c5088
+--- /dev/null
++++ b/tests/display_awake/CMakeLists.txt
+@@ -0,0 +1,12 @@
++cmake_minimum_required(VERSION 3.20)
++project(display_awake_test C)
++enable_testing()
++if(NOT WIN32)
++    message(FATAL_ERROR "display-awake uses Windows execution state")
++endif()
++add_executable(display-awake-test test_main.c ../../src/video/display_awake.c)
++target_include_directories(display-awake-test PRIVATE ../../src/video)
++if(MSVC)
++    target_compile_definitions(display-awake-test PRIVATE _CRT_SECURE_NO_WARNINGS)
++endif()
++add_test(NAME display-awake COMMAND display-awake-test)
+diff --git a/tests/display_awake/test_main.c b/tests/display_awake/test_main.c
+new file mode 100644
+index 0000000..ef6f7e1
+--- /dev/null
++++ b/tests/display_awake/test_main.c
+@@ -0,0 +1,131 @@
++#include "display_awake.h"
++
++#include <stdint.h>
++#include <stdio.h>
++#include <string.h>
++
++#define HOST ((HWND)(uintptr_t)1)
++#define CHILD ((HWND)(uintptr_t)2)
++#define OTHER ((HWND)(uintptr_t)3)
++#define CHECK(c) do { if (!(c)) { \
++    fprintf(stderr, "FAIL line %d: %s\n", __LINE__, #c); return 1; \
++} } while (0)
++
++static HWND s_foreground;
++static int s_iconic, s_visible = 1, s_valid = 1, s_fail_root;
++static int s_fail_set, s_held;
++static unsigned s_calls;
++static EXECUTION_STATE s_last;
++
++static BOOL WINAPI fake_is_window(HWND h)
++{
++    return h == OTHER || (s_valid && (h == HOST || h == CHILD));
++}
++
++static HWND WINAPI fake_root(HWND h, UINT kind)
++{
++    if (kind != GA_ROOT || s_fail_root)
++        return NULL;
++    return h == CHILD ? HOST : h;
++}
++
++static HWND WINAPI fake_foreground(void) { return s_foreground; }
++static BOOL WINAPI fake_iconic(HWND h) { return h == HOST && s_iconic; }
++static BOOL WINAPI fake_visible(HWND h) { return h != HOST || s_visible; }
++static DWORD WINAPI fake_error(void) { return 1234; }
++
++static EXECUTION_STATE WINAPI fake_set(EXECUTION_STATE flags)
++{
++    ++s_calls;
++    s_last = flags;
++    if (s_fail_set)
++        return 0;
++    s_held = (flags & ES_DISPLAY_REQUIRED) != 0;
++    return ES_CONTINUOUS;
++}
++
++static const RecompDisplayAwakeApi s_api = {
++    fake_is_window, fake_root, fake_foreground, fake_iconic, fake_visible,
++    fake_set, fake_error
++};
++
++int main(void)
++{
++    RecompDisplayAwake state;
++
++    CHECK(recomp_display_awake_init(&state, NULL, &s_api));
++    s_foreground = HOST;
++    recomp_display_awake_update(&state, CHILD);
++    CHECK(s_calls == 0 && !s_held);
++    CHECK(!recomp_display_awake_init(&state, "yes", &s_api));
++    recomp_display_awake_update(&state, HOST);
++    CHECK(s_calls == 0 && !s_held);
++
++    CHECK(recomp_display_awake_init(&state, "1", &s_api));
++    s_foreground = CHILD;
++    recomp_display_awake_update(&state, CHILD);
++    CHECK(s_calls == 1 && s_held && state.held &&
++          s_last == (ES_CONTINUOUS | ES_DISPLAY_REQUIRED));
++    recomp_display_awake_update(&state, HOST);
++    CHECK(s_calls == 1);
++    s_foreground = OTHER;
++    recomp_display_awake_update(&state, CHILD);
++    CHECK(s_calls == 2 && !s_held && !state.held && s_last == ES_CONTINUOUS);
++    s_foreground = HOST;
++    recomp_display_awake_update(&state, CHILD);
++    CHECK(s_calls == 3 && s_held);
++    s_iconic = 1;
++    recomp_display_awake_update(&state, CHILD);
++    CHECK(s_calls == 4 && !s_held);
++    s_iconic = 0;
++    recomp_display_awake_update(&state, CHILD);
++    CHECK(s_calls == 5 && s_held);
++    s_visible = 0;
++    recomp_display_awake_update(&state, CHILD);
++    CHECK(s_calls == 6 && !s_held);
++    s_visible = 1;
++
++    s_fail_set = 1;
++    recomp_display_awake_update(&state, CHILD);
++    CHECK(s_calls == 7 && !s_held && !state.held);
++    s_fail_set = 0;
++    recomp_display_awake_update(&state, CHILD);
++    CHECK(s_calls == 8 && s_held && state.held);
++    s_fail_set = 1;
++    s_foreground = OTHER;
++    recomp_display_awake_update(&state, CHILD);
++    CHECK(s_calls == 9 && s_held && state.held);
++    s_fail_set = 0;
++    recomp_display_awake_update(&state, CHILD);
++    CHECK(s_calls == 10 && !s_held && !state.held);
++
++    s_foreground = HOST;
++    recomp_display_awake_update(&state, CHILD);
++    CHECK(s_calls == 11 && s_held);
++    s_fail_root = 1;
++    recomp_display_awake_update(&state, CHILD);
++    CHECK(s_calls == 12 && !s_held && !state.held);
++    s_fail_root = 0;
++    recomp_display_awake_update(&state, CHILD);
++    CHECK(s_calls == 13 && s_held);
++    s_valid = 0;
++    recomp_display_awake_update(&state, CHILD);
++    CHECK(s_calls == 14 && !s_held);
++    s_valid = 1;
++    recomp_display_awake_update(&state, CHILD);
++    CHECK(s_calls == 15 && s_held);
++    recomp_display_awake_shutdown(&state);
++    CHECK(s_calls == 16 && !s_held && !state.held);
++    recomp_display_awake_shutdown(&state);
++    CHECK(s_calls == 16);
++    recomp_display_awake_update(&state, CHILD);
++    CHECK(s_calls == 17 && s_held);
++    s_fail_set = 1;
++    recomp_display_awake_shutdown(&state);
++    CHECK(s_calls == 18 && s_held && state.held);
++    s_fail_set = 0;
++    recomp_display_awake_shutdown(&state);
++    CHECK(s_calls == 19 && !s_held && !state.held);
++    puts("display-awake window transitions passed");
++    return 0;
++}

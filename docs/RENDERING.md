@@ -127,10 +127,17 @@ The backend unbinds texture views when binding a surface for drawing.
 
 Depth and stencil use D3D11 depth resources. With the optional depth-view
 paths enabled, an eligible new linear Z24S8 surface can be seeded from guest
-memory, converting the packed byte order. A recreated GPU depth resource is
-not reseeded from potentially stale guest bytes. A full GPU clear can
-initialize the relevant planes; a partial clear cannot establish that an
-entire uninitialized plane is safe to sample.
+memory, converting the packed byte order. Checked snapshots include row
+padding and allocation/layout identity. Changed guest bytes on a clean owner
+trigger transactional recreation and reseeding; changed bytes after a
+potential GPU write, unreadable/short spans, or conflicting dirty owners
+reject affected work rather than reusing stale data. A stable full-surface
+clear of both depth and stencil can rebaseline a live conflicted allocation;
+partial or single-plane clears cannot. A changed allocation lifetime can
+retire its stale owner, while a freed tracked allocation cannot be reseeded
+or cleared. A dirty owner cannot be silently recreated in another layout.
+This is conservative snapshot detection, not a guest-write interception or
+general synchronization contract.
 
 Full-surface clears use D3D11 clear operations where possible. Rectangular or
 channel-masked clears use a scissored draw to preserve other pixels and
@@ -422,10 +429,19 @@ default-D3D11 movement regression remains unresolved; see the
   tracked depth, skip the draw with a diagnostic rather than decode stale
   guest bytes. Ordinary non-alias `0x41` textures keep their normal path.
 
-Both options are off by default. Guest writes to GPU-owned depth, partial
-aliases, depth cubes and multi-level depth aliases are not supported. These
-implementations have synthetic coverage but have not established complete
-gameplay equivalence. One native 640x480 xemu Basic Controls match now gives
+Both options are off by default. Checked snapshots detect many writes, but
+same-value writes, concurrent writes after a check, unregistered
+suballocations and guest reads of GPU-owned contents remain unresolved.
+Conflicting color/depth owners and partial aliases are rejected; depth cubes
+and multi-level depth aliases are unsupported. The CPU reference cannot
+decode `0x2E`: it samples `0x41` from guest bytes, uses a separate float depth
+buffer and does not model stencil. Audit binding rows do not prove that a
+texture was sampled or affected visible pixels. With depth aliasing enabled
+but packed-stencil aliasing disabled, a `0x41` texture over tracked depth is
+rejected instead of reading possibly stale guest bytes; with both switches
+off the legacy CPU/GPU reference behavior is unchanged. These implementations
+have synthetic coverage but have not established complete gameplay equivalence.
+One native 640x480 xemu Basic Controls match now gives
 the packed-stencil option direct title evidence: with every other diagnostic
 control fixed, enabling it reduced pixels differing from xemu by more than
 8/255 from 43.4320% to 3.7119% and mean channel error from 10.5953 to 1.2485.
@@ -456,6 +472,15 @@ It does not handle the observed line-list gap. Any adaptation must extend the
 existing backend contract rather than replace Brute Force's ownership model,
 keep the CPU path working, and first establish fixed-function cost or visible
 point use.
+
+The default-off request audit reports CPU-emitted triangles after clipping
+separately from GPU pre-clip submitted triangles; neither count proves pixel
+visibility. Dropped requests retain primitive/input counts and at most eight
+recent unhandled or mirror-only method events, expired after 256 method events
+and cleared at flips. Those associations are temporal clues, not proven causes.
+GPU-program frame traces do not display old CPU-transformed vertices; any
+CPU-transformed vertices shown are pre-clip. No line/point behavior was added
+without independently verified NV2A semantics.
 
 [rc_hlsl.c](../src/gpu/rc_hlsl.c) generates a pixel shader from the texture
 stages and register-combiner configuration, including up to eight general
@@ -497,7 +522,11 @@ Legacy `c[59].z` and full screen-zero behavior remain selectable. HUD-safe
 and screen-zero modes cannot be combined with `RECOMP_CLIP_NEAR_Z=0`. The
 extended D3D11 path supports these modes; other registered draw backends must
 provide the relevant extended interface or capability. Gameplay and
-original-hardware validation remain incomplete.
+original-hardware validation remain incomplete. Synthetic CPU, WARP and
+hardware fixtures cover rectangle unions/exclusions, state changes, AA shifts,
+scale-two mapping, vertex paths, clears and depth/stencil discard side effects.
+The stencil case is checked on GPU separately because CPU stencil is
+unmodeled. The window-clip switch remains off by default.
 
 ### Visibility reports
 
@@ -606,6 +635,11 @@ settings and the scene controlled. Full setup and options are in the
   `RECOMP_GPU_CENSUS` records requested features; `BRUTEFORCE_PROFILE`
   collects samples. [bench.py](../tools/bench.py) can coordinate these with
   scripted tutorial input. Captures and instrumentation can change timing.
+- `RECOMP_GPU_AUDIT=1` records bounded route, primitive, post-clip and
+  recent-method diagnostics; format-binding counts are not visibility.
+  Movement collection and unexplained black/dark/solid/unchanged intervals
+  are inconclusive until separately reviewed; see the
+  [benchmark instructions](./USER_GUIDE.md#d3d11-renderer-and-benchmark-diagnostics).
 - Use numbered flip-time captures for image comparisons. Report-time dumps
   can be mid-frame, before HUD and composite. Flips can repeat, and
   whole-frame pixel changes can come from the HUD or fades; neither measure
@@ -643,7 +677,7 @@ replace matched gameplay or original-hardware validation.
   The final cache-fix binary was not rebenchmarked. Earlier whole-frame
   change rates are not validated world FPS.
 - One native xemu Basic Controls scene is matched: the packed-stencil option
-  removes the large whole-frame brightness difference, while its unsupported
+  reduces the large whole-frame brightness difference, while its unsupported
   ownership cases and title-wide behavior keep G4 open. Sun-facing, fade,
   movement and split-screen equivalence remain open. The CPU reference has
   its own known stencil gap.

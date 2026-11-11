@@ -33,6 +33,12 @@ Default-off clean-surface readback elision has synthetic coverage only; dirty
 frames still read back and tracked-surface flips still wait. Retail correctness and
 performance of this experiment are unverified.
 
+Packed depth/stencil aliases and window clipping remain default-off experiments;
+their expanded ownership and clipping coverage is synthetic, not a gameplay
+or original-hardware guarantee. Movement benchmark collection exits 2 as
+inconclusive; a separate reviewed-world analysis must establish content and
+presentation. Black hashes alone cannot identify intentional fades.
+
 Texture and colour-shadow inputs now use checked snapshots and tracked
 allocation identities; colour-surface writes, compatible render-target aliases
 and bounded P8 palettes have synthetic coverage. Unknown suballocations and

@@ -188,9 +188,11 @@ def test_mixed_audio_campaign_records_only_individual_unmatched_results(tmp_path
         "--readiness", "manual", "--ready-state", "tutorial stationary hold",
         "--no-auto-panels", "--capture", "--capture-movement", "--capture-audio",
         "--out", str(out),
-    ]) == 0
+    ]) == 2
     assert [name for name, _ in calls] == ["off", "on", "off", "on", "off", "on"]
     summary = json.loads((out / "summary.json").read_text(encoding="utf-8"))
+    assert summary["status"] == "inconclusive"
+    assert summary["collection_status"] == "complete"
     assert summary["audio_modes"] == {"off": "off", "on": "on"}
     assert summary["variant_options"] == {
         "off": {"RECOMP_AUDIO": "0"}, "on": {"RECOMP_AUDIO": "1"},
@@ -199,6 +201,28 @@ def test_mixed_audio_campaign_records_only_individual_unmatched_results(tmp_path
     assert summary["runs_per_variant"] == 3 and summary["generation"] == "generation-A"
     assert summary["audio_comparison"]["status"] == "not_performed"
     assert "content-matched" in summary["audio_comparison"]["reason"]
+    attempts = sorted(out.glob("run*/result.json"))
+    assert len(attempts) == 6
+    for path in attempts:
+        result = json.loads(path.read_text(encoding="utf-8"))
+        assert result["measurement_status"] == "inconclusive"
+        assert "independent" in result["measurement_reason"]
+
+
+def test_failed_movement_collection_persists_failed_status(tmp_path, monkeypatch):
+    def fake_run(out_dir, name, *_args):
+        out_dir.mkdir()
+        return {"label": name, "state": "failed", "error": "fixture collection failed"}
+
+    monkeypatch.setattr(bench, "run_once", fake_run)
+    out = tmp_path / "campaign"
+    assert bench.main(["--scene", "movement", "--runs", "1", "--retries", "0",
+                       "--out", str(out)]) == 1
+    summary = json.loads((out / "summary.json").read_text(encoding="utf-8"))
+    result = json.loads(next(out.glob("run*/result.json")).read_text(encoding="utf-8"))
+    assert summary["status"] == summary["collection_status"] == "failed"
+    assert result["measurement_status"] == "failed"
+    assert result["measurement_reason"] == "fixture collection failed"
 
 
 def test_inconclusive_world_analysis_cli_never_runs_game(tmp_path, monkeypatch, capsys):
@@ -208,7 +232,7 @@ def test_inconclusive_world_analysis_cli_never_runs_game(tmp_path, monkeypatch, 
         "frames": [{"flip": 1, "t": 0.0, "label": "unknown"}],
     }))
     monkeypatch.setattr(bench, "run_once", lambda *_args: pytest.fail("game was started"))
-    assert bench.main(["--analyze-world", str(manifest)]) == 0
+    assert bench.main(["--analyze-world", str(manifest)]) == 2
     assert json.loads(capsys.readouterr().out)["status"] == "inconclusive"
 
 

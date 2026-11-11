@@ -1,8 +1,9 @@
 # Brute Force bring-up findings
 
-These observations apply to the one locally supplied North American retail
-executable identified by [retail.json](../fingerprints/retail.json). Guest
-addresses and layouts must not be assumed valid for other revisions. Asset
+Except where marked synthetic, these observations apply to the one locally
+supplied North American retail executable identified by
+[retail.json](../fingerprints/retail.json). Guest addresses and layouts must
+not be assumed valid for other revisions. Asset
 organization and importer research are tracked in
 [ARCHITECTURE.md](./ARCHITECTURE.md), the current rendering architecture is
 in [RENDERING.md](./RENDERING.md), and general framework contributions are
@@ -55,6 +56,44 @@ guarded XPP pair described below. Unresolved indirect calls also abort;
 generated unresolved direct-call stubs retain the framework's
 logged-and-continue behavior, so a stub hit is a correctness problem, not a
 successful emulation.
+
+## Synthetic render-artifact validation (no retail run)
+
+The follow-up framework tree is
+`153571c77e95ccb7e337d40aa03a5633233ccb44`; it was verified both in the
+isolated working checkout and after independent patch replay. It is not the
+tree of retail generation `20261111-002138-a9dbc18a` above. No new game,
+xemu, original-hardware or performance run was made. The focused render
+matrix passed 118 cases on CPU, WARP and the available NVIDIA GeForce
+RTX 5070; the full D3D11 and toolkit-metadata suites passed 394 cases.
+The benchmark suite passed 103 cases with the native audit fixture enabled,
+and the standalone audit passed both on/off CTests. Driver version was
+unavailable in the fixture report.
+
+- Synthetic executor cases demonstrate CPU triangle counts after clipping
+  and GPU triangle submissions before clipping, with visibility unknown for
+  both. The audit's bounded recent-method correlations expire and reset as
+  specified; `0x2E`/`0x41` binding records identify request-time state, not
+  actual sampling or affected pixels. Audit on/off cases preserve tested guest
+  bytes and callback order.
+- WARP and the available hardware device exercise clean depth-owner reseeding,
+  dirty guest-write rejection, partial overlaps, guards, row padding,
+  allocation release/reuse, layout changes, clear rebaselining and injected
+  seed/baseline races. Both packed-alias switches reject scaled rendering.
+  These synthetic results do not prove all write races, guest reads, retail
+  ownership or synchronization.
+- Expanded clipping fixtures exercise CPU/WARP/hardware rectangle state,
+  inclusive and exclusive modes, AA shifts, scale two, clear behavior and
+  vertex routes. GPU depth and stencil discard side effects are checked
+  separately; CPU stencil is not modeled. No default was changed.
+- Synthetic benchmark tests separate explicitly reviewed intentional fades
+  and solid frames from unexplained black, dark, solid and unchanged
+  intervals. Darkness is only an all-RGB-at-most-16 heuristic. An unreviewed
+  collection or incomplete review is inconclusive, not world FPS.
+
+The matched Basic Controls evidence and historical A/B/A measurements below
+remain unchanged. Future matched sun-facing, opening-fade, movement and
+split-screen evidence still requires an operator, and G4 remains open.
 
 ## Private xemu reference attempt (2026-10-30)
 
@@ -1003,11 +1042,11 @@ not proof of original-hardware behavior or a reviewed retail result. The
 separate packed depth/stencil alias remains opt-in and unavailable with
 scaled rendering.
 
-For GPU-executed vertex programs, the current frame trace can print
-`s_xf` vertices left by an earlier CPU-transformed batch. Its GPU triangle
-count is submitted triangles, not post-clip output, and its pixel count
-does not measure GPU fragments. Do not use those fields as proof of the
-vertices or clipping in a GPU-program batch.
+For GPU-executed vertex programs, the frame trace used by these earlier
+investigations could print `s_xf` vertices left by an earlier CPU-transformed
+batch. Patch 0044 now suppresses those stale vertices and labels GPU triangle
+counts as pre-clip submissions. Its pixel count still does not measure GPU
+fragments, and the trace does not prove post-clip output or visibility.
 
 ## Programmable near-plane investigation
 
@@ -1452,10 +1491,12 @@ snapshot when sampling a currently bound depth target. It accepts only exact
 address, format, linear layout, dimensions and pitch matches. A newly tracked
 eligible surface is initialized from guest Z24S8 memory, rotating its depth
 and stencil fields to the D3D layout; a full GPU depth clear also initializes
-it. A recreated GPU depth surface is not reseeded from potentially stale
-guest memory and is rejected until cleared. PROJECT2D and PROJECT3D shadow
-comparisons are supported; guest writes, CPU decoding and partial aliases
-remain unsupported. PROJECT3D is limited to extended draws, and a draw with
+it. The initial implementation rejected recreated GPU depth surfaces until
+cleared. The synthetic-only follow-up above adds checked clean-owner reseeding
+and conservative conflict rejection; it does not establish a general
+guest-write/read contract. PROJECT2D and PROJECT3D shadow comparisons are
+supported; CPU `0x2E` decoding and partial aliases remain unsupported.
+PROJECT3D is limited to extended draws, and a draw with
 an unsupported depth alias or stage mode is skipped with a diagnostic. The
 resource and view approach is informed by Blood Wake; the comparison behavior
 follows xemu's published shader translation. These are emulator prior art,

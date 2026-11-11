@@ -24,7 +24,8 @@ typedef struct BruteforceD3D11PipelineStats {
     unsigned readbacks, coherent;
     unsigned work_submitted, work_waits, work_queued, work_peak, work_operations;
     unsigned injected_pending;
-    int gpu_dirty, guest_exact, packed_valid;
+    int gpu_dirty, guest_exact, packed_valid, depth_gpu_dirty, depth_conflict;
+    unsigned depth_initialized;
     uint64_t depth_revision, packed_revision;
     unsigned stencil_conversions;
 } BruteforceD3D11PipelineStats;

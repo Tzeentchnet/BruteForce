@@ -87,9 +87,11 @@ The previously recorded 35-patch tree was
 patch list instead produced `3978863d9bcbe6f26536315c65daa9313932c8b5`.
 The former tree object was unavailable locally, so the discrepancy has not
 been attributed to a specific change. The five additional patches 0039-0043
-produce the independently replayed and verified 40-patch tree
-`e9c4349117b38482bd8ec3a64556996f549682b1`. The isolated index and working
-files pass `python tools/toolkit.py --verify --checkout build\compat-work\replay`;
+produced the independently replayed and verified 40-patch tree
+`e9c4349117b38482bd8ec3a64556996f549682b1`. Patch 0044 now produces the
+independently replayed, verified 41-patch tree
+`153571c77e95ccb7e337d40aa03a5633233ccb44`. The isolated index and working
+files pass `python tools/toolkit.py --verify --checkout build\artifact-toolkit`;
 shared setup was not rerun. The earlier integrated framework reported
 992 Python tests passed, 2 skipped and 134 subtests passed; the Release
 backend-contract, PFB-flush, GPU-audit, raster-batch and EEPROM fixtures also
@@ -162,6 +164,12 @@ guidance and not a duplicate of the ownership or configuration contracts below.
 | 0035 | Retired | Merged as #298 and included in v0.17.0. Coordinate any equivalent xemu correction separately. |
 | 0036 | Stack-dependent | Event-driven waiting retains the real PFB acknowledgement and does not skip synchronization. Keep the synthetic five-case fixture and coordinate any generic wait primitive with the backend contract in #306. |
 | 0037 | Clean | v0.17.0's Windows serial raster path leaves stale parallel-worker telemetry. The existing raster fixture is a failing-before/passing-after reproducer; extract the one-line correction and run it cross-platform before filing with approval. |
+| 0038 | Stack-dependent | Presenter device-loss handling belongs with the lifecycle and failure contract in #306; see item 45. |
+| 0039 | Clean | Foreground-only display-awake policy is independent and default off; see item 42 before proposing it. |
+| 0040 | Stack-dependent | Bounded P8 palette metadata extends the renderer seam; coordinate with #184 and item 24. |
+| 0041, 0043 | Stack-dependent | Checked snapshots and allocation lifetime identities inform the shared surface-ownership contract; see item 46. |
+| 0042 | Stack-dependent | Bounded verification and stalled-work diagnostics cross executor and wait interfaces; see item 47. |
+| 0044 | Stack-dependent | Extends 0025's default-off audit and fixes stale frame-trace context; coordinate with #184 and extract the generic fixtures before proposing it. See item 28. |
 
 ### Already filed from this project's account
 
@@ -412,10 +420,10 @@ filed or accepted.
    glow-like quads can disappear together under the legacy plane and remain
    visible under the experiment, including positive- and negative-depth
    controls on GPU and CPU-transformed vertex paths. It does not establish
-   the cause of the user's live-window observation. GPU-program frame traces
-   may print stale CPU-transformed vertices and count submitted rather than
-   post-clip triangles; fix or bypass that diagnostic before relying on
-   those fields for a GPU trace.
+   the cause of the user's live-window observation. Patch 0044 prevents
+   stale CPU-transformed vertices in GPU-program traces and labels GPU
+   triangle counts as pre-clip submissions with visibility unknown; it does
+   not measure GPU post-clip output.
    [0029-hud-safe-near-plane.patch](../patches/xboxrecomp/0029-hud-safe-near-plane.patch)
    adds a project-specific third mode after the user confirmed that the
    HUD-visible 1440p state bloomed: non-additive and conventional
@@ -1009,7 +1017,8 @@ own GPU back end, an extended interface for it, and its own pacing fixes.
 25. **Support depth textures and depth-surface aliases.**
     *Problem:* the CPU reference decoder and this project's D3D11 backend
     did not sample `LIN_D24S8` (`0x2E`); GPU depth surfaces were not exposed
-    as shader resources.
+    as shader resources. The framework/backend contract also lacks ordered
+    guest-write notification and GPU-depth readback/ownership semantics.
     *Evidence:* both variants of the 2026-10-29 movement campaign repeatedly
     logged failed `0x2E` decodes. Whether those reads explain a visible
     rendering difference has not been determined. A bright pass also binds
@@ -1021,17 +1030,26 @@ own GPU back end, an extended interface for it, and its own pacing fixes.
     *Change:* the opt-in project renderer can sample an exact matching
     GPU-created linear D24S8 surface through an R24 view. New eligible surfaces
     are initialized from guest memory, converting the Z24S8 field order;
-    full-surface GPU depth clears also initialize them. Recreated surfaces
-    cannot be reseeded from stale guest data and require a full-surface depth
-    clear. When bound for depth writes, a separate snapshot avoids simultaneous
-    DSV/SRV binding. An independent opt-in reconstructs the three packed
+    full-surface GPU depth clears also initialize them. Checked guest spans,
+    including padding and allocation identities, detect changes on eligible
+    unscaled surfaces. A clean owner is transactionally reseeded; changes
+    after potential GPU writes, invalid spans, incompatible dirty owner
+    transitions and conflicting color/depth or partial overlaps reject work.
+    A stable full depth-and-stencil clear can rebaseline a live conflicted
+    allocation. This project-side workaround is not ordered write notification
+    or synchronized guest readback. When bound for depth writes, a separate
+    snapshot avoids simultaneous DSV/SRV binding. An independent opt-in reconstructs the three packed
     depth bytes and stencil alpha through a GPU compute shader for exact
     `0x41` overlaps, requiring both planes to be initialized. Ordinary
-    `0x41` textures are unchanged.
+    non-overlapping `0x41` textures are unchanged. With depth aliasing on but
+    packed-stencil aliasing off, `0x41` over tracked depth is rejected rather
+    than falling back to possibly stale guest bytes.
     PROJECT2D and PROJECT3D shadow comparisons follow
     [xemu's shader translation](https://github.com/xemu-project/xemu/blob/dc10b4cea96e403d30c17ed53551fdaf023bc17f/hw/xbox/nv2a/pgraph/glsl/psh.c).
-    Guest writes, partial aliases, other formats and CPU reference decoding
-    remain unsupported; incompatible aliases are rejected.
+    Same-value and unchecked concurrent writes, guest reads, unknown
+    suballocations, partial aliases, scaled aliases, other formats and CPU
+    `0x2E` decoding remain unsupported. The CPU samples `0x41` guest bytes
+    with a separate float depth buffer and no stencil.
     *Tests:* WARP and hardware fixtures cover every comparison above, below
     and at the reference depth, a bound depth target that is written between
     draws, an unbound target, base draws, and rejected pitch, size, offset,
@@ -1041,23 +1059,35 @@ own GPU back end, an extended interface for it, and its own pacing fixes.
     initialization, invalid overlaps and base/vertex-program paths. A
     synthetic replay of the traced bright-pass combiner demonstrates the
     effect of stale versus GPU-cleared stencil on its threshold and an
-    additive composite, without replaying gameplay or its blur.
+    additive composite, without replaying gameplay or its blur. New WARP and
+    hardware ownership fixtures cover clean/dirty guest changes, clear
+    rebaselining, guarded and short ranges, padding, exact/partial color and
+    depth overlaps, allocation release/reuse, layout changes, injected
+    snapshot races and transactional rollback. Both switches explicitly
+    reject scaled aliases.
     *Overlap:* Blood Wake's optional ambient-occlusion path in
     `bw_d3d11.c` creates an `R24G8_TYPELESS` resource with D24S8 and R24
     views. It is not a guest-depth-alias implementation. The
     [brute-force-2003-reloaded recreation](https://github.com/kduong-dev/brute-force-2003-reloaded)
     describes a stencil-aware glare pipeline but is not an xboxrecomp
-    renderer or an original-hardware oracle. Recheck #184 and emulator
-    implementations before preparing a generic contribution.
+    renderer or an original-hardware oracle. The previous #184 index check was
+    2026-11-11; no fresh overlap search or upstream interaction was performed
+    for this follow-up.
     *Before filing:* the darker Basic Controls image is now validated against
-    a native xemu reference. Preserve GPU contents across surface recreation,
-    track guest writes, define partial and scaled aliases, and validate
+    a native xemu reference. Coordinate a generic ownership contract in #306,
+    refresh upstream overlap with approval before action, preserve GPU
+    contents across surface recreation, define partial and scaled aliases,
+    and validate
     matched movement, sun-facing, fade and split-screen scenes. The focused
     same-generation pair is one run per variant and is correctness evidence,
     not a performance result.
     *Status:* experimental project-only implementation.
 
 26. **Pass window clips to capable GPU back ends.**
+    *Problem:* GPU backends need the same explicit clip state as CPU draws;
+    clear and stencil side effects must not silently escape the clipping rule.
+    *Evidence:* the existing project executor forwards opt-in NV2A rectangle
+    state; synthetic scenes exercise it, not original-hardware reset behavior.
     *Change:* [0021-gpu-window-clip.patch](../patches/xboxrecomp/0021-gpu-window-clip.patch)
     carries the existing rectangle state and an explicit backend capability.
     Back ends without the capability still reject the opt-in. The D3D11 base,
@@ -1067,8 +1097,14 @@ own GPU back end, an extended interface for it, and its own pacing fixes.
     rectangles and color masks.
     *Tests:* CPU, WARP and hardware fixtures check all eight rectangles,
     empty and incomplete state, inclusive/exclusive masks, state changes,
-    both AA shifts, clear behavior and GPU vertex programs.
-    *Status:* local patch; original-hardware behavior still needs validation.
+    both AA shifts, scale-two mapping, clear behavior, base/transformed/GPU
+    vertex paths, and depth/stencil discard side effects. GPU stencil is
+    checked separately because the CPU renderer does not model it.
+    *Overlap:* #222 and the #184 index were last checked in the recorded
+    2026-11-10/11 review; no new upstream check or contact was made.
+    *Before filing:* reconcile #222 state/reset semantics, test other
+    backends and obtain matched gameplay/original-hardware evidence.
+    *Status:* local patch and project fixtures; keep the switch default off.
 
 27. **Honor rectangular GPU clears and avoid redundant software depth clears.**
     *Problem:* treating a partial clear as a whole-target clear can erase
@@ -1131,6 +1167,14 @@ own GPU back end, an extended interface for it, and its own pacing fixes.
     flip events, requested and buffered input, routes, backend callbacks,
     fallback, rejection and software-cull counters. Non-dropped routes have
     **unknown** visibility; callback invocation is not evidence of pixels.
+    [0044-geometry-depth-audit.patch](../patches/xboxrecomp/0044-geometry-depth-audit.patch)
+    distinguishes CPU post-clip output from GPU pre-clip submissions,
+    reports CPU `0x2E`/`0x41` current-zeta bindings, and attributes dropped
+    primitive/input counts to at most eight recent unhandled/mirror-only
+    method events, expired after 256 method events and reset at flips. These
+    correlations and bindings do not prove causation, sampling or visibility.
+    It also fixes frame traces that could reuse stale CPU vertices for GPU
+    submissions and labels CPU-transformed trace vertices pre-clip.
     Tables are bounded, counters saturate and overflow is reported. The
     existing PFB flush, semaphore and flip-hold behavior is unchanged.
     *Tests:* the patch includes a standalone audit on/off collector fixture.
@@ -1142,7 +1186,10 @@ own GPU back end, an extended interface for it, and its own pacing fixes.
     cases passed, including frame-statistics, window-clip and CPU/GPU parity
     regressions; three toolkit-metadata and four standalone framework CTest
     cases also passed. Hardware mode did not log its adapter identity.
-    Coverage and limitations are in
+    Additional standalone and real-executor cases cover the history bound,
+    expiry/flip reset, clipping scopes, depth-binding diagnostics, and
+    audit-off/on guest bytes and callback ordering on CPU, WARP and available
+    hardware. Coverage and limitations are in
     [FINDINGS](./FINDINGS.md#gpu-audit-instrumentation).
     *Overlap:* public PR-title and tracking-index metadata checked 2026-10-31:
     merged [#152](https://github.com/sp00nznet/xboxrecomp/pull/152) and
@@ -1154,12 +1201,14 @@ own GPU back end, an extended interface for it, and its own pacing fixes.
     `src/gpu/bw_gpu_audit.{c,h}` at `e631edddfe56d22344e9f696923aeb6d78a9e7ba`;
     the MIT notice is retained and credited in
     [THIRD_PARTY_NOTICES.md](../THIRD_PARTY_NOTICES.md).
+    No new overlap search or upstream contact was performed for patch 0044;
+    these are the prior recorded checks.
     *Before filing:* recheck upstream and coordinate with prior authors; move
     the executor integration cases into a standalone framework test, test
     Linux/pthread and other backends, assess disabled-path overhead and
     snapshot durability, and review the bounded-table loss semantics. No
     title-specific data or captured game content belongs in a contribution.
-    *Status:* local patch; not prepared or filed.
+    *Status:* local patches 0025 and 0044; synthetic-tested, not prepared or filed.
 
 29. **Associate flip dumps with frame-statistics records.**
     *Problem:* sequential framebuffer-dump names do not identify their

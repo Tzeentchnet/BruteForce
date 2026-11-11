@@ -278,7 +278,8 @@ def test_gpu_audit_truncated_at_shutdown_fails_attempt(tmp_path, fake_runtime):
 
 
 AUDIT_EXE = os.environ.get("BRUTEFORCE_TEST_GPU_AUDIT")
-XBE = ROOT / ".deps" / "xboxrecomp" / "tools" / "conformance" / "test.xbe"
+XBE = Path(os.environ.get(
+    "BRUTEFORCE_TEST_XBE", ROOT / ".deps" / "xboxrecomp" / "tools" / "conformance" / "test.xbe"))
 
 
 @pytest.mark.skipif(not AUDIT_EXE or not XBE.is_file(), reason="native synthetic GPU audit fixture unavailable")

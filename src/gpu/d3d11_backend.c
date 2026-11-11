@@ -700,7 +700,10 @@ typedef struct {
     uint32_t logical_w[2], logical_h[2];
     unsigned scale_epoch;
     uint64_t revision, packed_revision;
-    int packed_valid;
+    int packed_valid, gpu_dirty, guest_conflict;
+    uint8_t *guest_shadow;
+    size_t guest_shadow_bytes;
+    GuestSpanIdentity identity;
     ID3D11Texture2D *tex, *snapshot;
     ID3D11DepthStencilView *dsv;
     ID3D11ShaderResourceView *srv, *snapshot_srv;
@@ -894,6 +897,8 @@ static void release_depth(Depth *d)
     if (d->srv) ID3D11ShaderResourceView_Release(d->srv);
     if (d->dsv) ID3D11DepthStencilView_Release(d->dsv);
     if (d->tex) ID3D11Texture2D_Release(d->tex);
+    free(d->guest_shadow);
+    d->guest_shadow = NULL;
 }
 
 static DXGI_FORMAT surf_format(uint32_t bpp)
@@ -1393,30 +1398,105 @@ done:
     return accepted;
 }
 
-/* Xbox Z24S8 stores depth in the high 24 bits; D3D11 R24G8 stores it in
- * the low 24. Seed before any GPU depth writes, not from stale guest bytes
- * when an existing GPU surface must be recreated. */
-static uint32_t *depth_seed(uint32_t va, uint32_t w, uint32_t h, uint32_t pitch,
-                            uint32_t format, uint32_t surface_type)
+static int depth_guest_span(const Depth *d, size_t *span)
 {
-    uint64_t row = (uint64_t)w * 4, span;
+    uint64_t row = (uint64_t)d->w * 4;
+    uint64_t bytes;
+    if (!d->w || !d->h || d->format != 2 || d->surface_type != 1 ||
+        d->pitch < row)
+        return 0;
+    bytes = (uint64_t)(d->h - 1) * d->pitch + row;
+    if (bytes > SIZE_MAX || bytes > XBOX_CONTIG_SIZE)
+        return 0;
+    *span = (size_t)bytes;
+    return 1;
+}
+
+static int capture_depth_guest(Depth *d)
+{
+    GuestSpanIdentity identity;
+    uint8_t *shadow;
+    size_t span;
+    if (!depth_guest_span(d, &span) || !readable_guest_range(d->va, span))
+        return 0;
+    shadow = (uint8_t *)malloc(span);
+    if (!shadow)
+        return 0;
+    if (checked_guest_copy(d->va, span, shadow, GUEST_BOUNDS_TRACK_IF_REGISTERED,
+                           &identity) != GUEST_COPY_OK) {
+        free(shadow);
+        return 0;
+    }
+    if (d->identity.layout == identity.layout && d->identity.allocation &&
+        !identity.allocation) {
+        free(shadow);
+        return 0;
+    }
+    free(d->guest_shadow);
+    d->guest_shadow = shadow;
+    d->guest_shadow_bytes = span;
+    d->identity = identity;
+    return 1;
+}
+
+/* A different nonzero allocation identity, or a new memory layout, proves
+ * the previous resource belonged to an ended guest lifetime. */
+static int depth_new_lifetime(const Depth *d, const GuestSpanIdentity *current)
+{
+    return d->identity.layout && current->layout &&
+           (d->identity.layout != current->layout ||
+            (d->identity.allocation && current->allocation &&
+             d->identity.allocation != current->allocation));
+}
+
+/* -1: unreadable or unverifiable, 0: unchanged, 1: changed, 2: new lifetime. */
+static int probe_depth_guest(const Depth *d)
+{
+    GuestSpanIdentity identity;
+    size_t span;
+    uint8_t *probe;
+    if (!d->guest_shadow || !depth_guest_span(d, &span) ||
+        span != d->guest_shadow_bytes || !readable_guest_range(d->va, span))
+        return -1;
+    if (span > s_surface_probe_cap) {
+        probe = (uint8_t *)realloc(s_surface_probe, span);
+        if (!probe) return -1;
+        s_surface_probe = probe;
+        s_surface_probe_cap = span;
+    }
+    if (checked_guest_copy(d->va, span, s_surface_probe,
+                           GUEST_BOUNDS_TRACK_IF_REGISTERED, &identity) != GUEST_COPY_OK)
+        return -1;
+    if (d->identity.layout == identity.layout && d->identity.allocation &&
+        !identity.allocation)
+        return -1;
+    if (depth_new_lifetime(d, &identity))
+        return 2;
+    if (!same_guest_identity(&d->identity, &identity) ||
+        memcmp(d->guest_shadow, s_surface_probe, span))
+        return 1;
+    return 0;
+}
+
+/* Xbox Z24S8 stores depth in the high 24 bits; D3D11 R24G8 stores it in
+ * the low 24. Only a checked snapshot may seed a GPU depth resource. */
+static uint32_t *depth_seed(const Depth *d)
+{
     uint32_t *seed, x, y;
-    if (!w || !h || format != 2 || surface_type != 1 || pitch < row)
+    size_t row = (size_t)d->w * 4;
+    if (!d->guest_shadow || d->h > SIZE_MAX / row)
         return NULL;
-    span = (uint64_t)(h - 1) * pitch + row;
-    if (!readable_guest_range(va, span))
-        return NULL;
-    seed = (uint32_t *)malloc((size_t)row * h);
+    seed = (uint32_t *)malloc(row * d->h);
     if (!seed) {
-        fprintf(stderr, "[GPU-D3D11] cannot allocate depth seed for surface %08X\n", va);
+        fprintf(stderr, "[GPU-D3D11] cannot allocate depth seed for surface %08X\n", d->va);
         return NULL;
     }
-    for (y = 0; y < h; y++) {
-        const uint8_t *src = GUEST(va) + (size_t)y * pitch;
-        for (x = 0; x < w; x++) {
+    for (y = 0; y < d->h; y++) {
+        const uint8_t *src = d->guest_shadow + (size_t)y * d->pitch;
+        for (x = 0; x < d->w; x++) {
             uint32_t value;
             memcpy(&value, src + (size_t)x * 4, sizeof value);
-            seed[(size_t)y * w + x] = (value >> 8) | (value << 24);
+            seed[(size_t)y * d->w + x] = (value >> 8) | (value << 24);
         }
     }
     return seed;
@@ -1469,8 +1549,13 @@ static int create_depth_resource(Depth *d, int existing)
     td.Usage = D3D11_USAGE_DEFAULT;
     td.BindFlags = D3D11_BIND_DEPTH_STENCIL |
                    (depth_views_enabled() ? D3D11_BIND_SHADER_RESOURCE : 0);
-    if (depth_views_enabled() && !existing)
-        seed = depth_seed(d->va, d->w, d->h, d->pitch, d->format, d->surface_type);
+    if (depth_views_enabled() && !gpu_scale_requested() &&
+        d->format == 2 && d->surface_type == 1) {
+        if (capture_depth_guest(d) && !existing)
+            seed = depth_seed(d);
+        if (!d->guest_shadow || (!existing && !seed))
+            d->guest_conflict = 1;
+    }
     memset(&init, 0, sizeof init);
     init.pSysMem = seed;
     init.SysMemPitch = d->w * 4;
@@ -1482,6 +1567,7 @@ static int create_depth_resource(Depth *d, int existing)
                         " sampling will require a GPU depth clear\n", d->va, (unsigned long)hr);
         free(seed);
         seed = NULL;
+        d->guest_conflict = 1;
         hr = ID3D11Device_CreateTexture2D(s_dev, &td, NULL, &d->tex);
     }
     if (FAILED(hr))
@@ -1509,6 +1595,14 @@ static int create_depth_resource(Depth *d, int existing)
         if (FAILED(hr))
             goto failed;
     }
+#ifdef BRUTEFORCE_D3D11_TESTING
+    if (seeded && scale_test_failure("depth-seed-race"))
+        *(uint32_t *)GUEST(d->va) ^= 1u;
+#endif
+    if (seeded && probe_depth_guest(d) != 0) {
+        hr = E_FAIL;
+        goto failed;
+    }
     if (seeded)
         s_st.depth_seeds++;
     return 1;
@@ -1522,6 +1616,239 @@ failed:
     return 0;
 }
 
+static void depth_reject(const char *reason, uint32_t va, uint32_t other)
+{
+    static unsigned reports;
+    s_st.depth_rejected++;
+    if (reports < 32) {
+        ++reports;
+        fprintf(stderr, "[GPU-D3D11] depth ownership rejected: %s (%08X, %08X)%s\n",
+                reason, va, other, reports == 32 ? " (further reports suppressed)" : "");
+    }
+}
+
+static void retire_depth(Depth *d)
+{
+    if (s_cur_depth == d) {
+        if (s_cur)
+            bind_targets(s_cur, NULL);
+        else
+            s_cur_depth = NULL;
+    }
+    release_depth(d);
+    memset(d, 0, sizeof *d);
+}
+
+static int depth_reseed(Depth *d)
+{
+    Depth replacement;
+    int bound = s_cur && s_cur_depth == d;
+    memset(&replacement, 0, sizeof replacement);
+    replacement.va = d->va;
+    replacement.w = d->w;
+    replacement.h = d->h;
+    replacement.pitch = d->pitch;
+    replacement.format = d->format;
+    replacement.surface_type = d->surface_type;
+    replacement.scale_epoch = d->scale_epoch;
+    replacement.recreated = 1;
+    replacement.revision = d->revision + 1;
+    replacement.identity = d->identity;
+    memcpy(replacement.logical_w, d->logical_w, sizeof replacement.logical_w);
+    memcpy(replacement.logical_h, d->logical_h, sizeof replacement.logical_h);
+    if (!create_depth_resource(&replacement, 0))
+        return 0;
+    if (replacement.initialized != 3 || replacement.guest_conflict) {
+        release_depth(&replacement);
+        return 0;
+    }
+    release_depth(d);
+    *d = replacement;
+    if (bound)
+        bind_targets(s_cur, d);
+    return 1;
+}
+
+static int sync_depth_guest(Depth *d)
+{
+    int change;
+    if (!depth_views_enabled() || gpu_scale_requested() ||
+        d->format != 2 || d->surface_type != 1)
+        return 1;
+    change = probe_depth_guest(d);
+    if (change == 2 || (!d->gpu_dirty && change >= 0 &&
+                        (change != 0 || d->guest_conflict))) {
+        if (depth_reseed(d))
+            return 1;
+    } else if (change == 0 && !d->guest_conflict) {
+        return 1;
+    }
+    d->guest_conflict = 1;
+    depth_reject(change < 0 ? "guest depth range unreadable or unverifiable" :
+                 "guest bytes or identity conflict with GPU depth", d->va, 0);
+    return 0;
+}
+
+/* A full depth+stencil clear can discard the old GPU planes, but only after
+ * establishing a fresh, checked baseline for subsequent guest-write checks. */
+static int rebaseline_depth(Depth *d)
+{
+    Depth snapshot = *d;
+    snapshot.guest_shadow = NULL;
+    snapshot.guest_shadow_bytes = 0;
+    if (!capture_depth_guest(&snapshot))
+        goto failed;
+#ifdef BRUTEFORCE_D3D11_TESTING
+    if (scale_test_failure("depth-baseline-race"))
+        *(uint32_t *)GUEST(snapshot.va) ^= 1u;
+#endif
+    if (probe_depth_guest(&snapshot) != 0)
+        goto failed;
+    free(d->guest_shadow);
+    d->guest_shadow = snapshot.guest_shadow;
+    d->guest_shadow_bytes = snapshot.guest_shadow_bytes;
+    d->identity = snapshot.identity;
+    d->guest_conflict = 0;
+    return 1;
+
+failed:
+    free(snapshot.guest_shadow);
+    depth_reject("cannot establish guest baseline for full clear", d->va, 0);
+    return 0;
+}
+
+static int physical_range(uint64_t start, uint64_t span, uint64_t *physical);
+
+static int guest_ranges_overlap(uint32_t a, uint64_t aspan, uint32_t b, uint64_t bspan)
+{
+    uint64_t ap = 0, bp = 0;
+    int av, bv;
+    if (!aspan || !bspan || (uint64_t)a + aspan > 0x100000000ull ||
+        (uint64_t)b + bspan > 0x100000000ull)
+        return 1;
+    av = physical_range(a, aspan, &ap);
+    bv = physical_range(b, bspan, &bp);
+    return av < 0 || bv < 0 ||
+           ((uint64_t)a < (uint64_t)b + bspan && (uint64_t)b < (uint64_t)a + aspan) ||
+           (av > 0 && bv > 0 && ap < bp + bspan && bp < ap + aspan);
+}
+
+static int depth_known_stale(const Depth *d)
+{
+    uint32_t remaining;
+    uint64_t allocation, layout;
+    if (!d->identity.layout)
+        return 0;
+    layout = xbox_MemoryLayoutGeneration();
+    allocation = guest_allocation_identity(d->va, &remaining);
+    return (layout && layout != d->identity.layout) ||
+           (d->identity.allocation && allocation && allocation != d->identity.allocation);
+}
+
+static int tracked_allocation_lost(uint32_t va, const GuestSpanIdentity *identity)
+{
+    uint32_t remaining;
+    return identity->allocation && identity->layout == xbox_MemoryLayoutGeneration() &&
+           !guest_allocation_identity(va, &remaining);
+}
+
+static uint64_t depth_owner_span(const Depth *d)
+{
+    uint32_t height = d->logical_h[0] > d->logical_h[1]
+                    ? d->logical_h[0] : d->logical_h[1];
+    return (uint64_t)d->pitch * height;
+}
+
+static int depth_owners_compatible(uint32_t va, uint64_t span, Depth *same,
+                                   const Surf *target)
+{
+    int i;
+    for (i = 0; i < s_ndepth; ++i) {
+        Depth *other = &s_depth[i];
+        if (!other->tex || other == same)
+            continue;
+        if (depth_known_stale(other)) {
+            retire_depth(other);
+            continue;
+        }
+        if (!guest_ranges_overlap(va, span, other->va, depth_owner_span(other)))
+            continue;
+        if (other->gpu_dirty || other->guest_conflict ||
+            tracked_allocation_lost(other->va, &other->identity)) {
+            depth_reject("overlapping GPU depth owners", va, other->va);
+            return 0;
+        }
+        retire_depth(other);
+    }
+    for (i = 0; i < s_nsurf; ++i) {
+        Surf *other = &s_surf[i];
+        size_t other_span;
+        int current;
+        if (!other->tex)
+            continue;
+        current = surf_identity_current(other);
+        if (!current && !tracked_allocation_lost(other->va, &other->identity))
+            continue;
+        if (!surface_guest_span(other, &other_span) ||
+            guest_ranges_overlap(va, span, other->va, other_span)) {
+            if (!current || other == target || other->gpu_dirty || other->alias_uncertain) {
+                depth_reject("overlapping color and depth owners", va, other->va);
+                return 0;
+            }
+            if (s_cur == other) {
+                ID3D11DeviceContext_OMSetRenderTargets(s_ctx, 0, NULL, NULL);
+                s_cur = NULL;
+                s_cur_depth = NULL;
+            }
+            if (s_last_presented == other)
+                s_last_presented = NULL;
+            release_surf(other);
+            release_surf_guest(other);
+        }
+    }
+    return 1;
+}
+
+static int color_depth_compatible(const Nv2aSurface *in)
+{
+    uint32_t bpp = in->bytes_per_pixel ? in->bytes_per_pixel : 4;
+    uint32_t width = in->pitch && in->pitch / bpp >= in->width
+                   ? in->pitch / bpp : in->width;
+    uint32_t height = in->height;
+    uint64_t row, span;
+    int i;
+    for (i = 0; i < s_nsurf; ++i) {
+        Surf *existing = &s_surf[i];
+        if (existing->tex && existing->va == in->color_va && surf_identity_current(existing)) {
+            if (width < existing->w) width = existing->w;
+            if (height < existing->h) height = existing->h;
+            break;
+        }
+    }
+    row = (uint64_t)width * bpp;
+    span = height && in->pitch
+         ? (uint64_t)(height - 1) * in->pitch +
+           (row < in->pitch ? row : in->pitch) : 0;
+    for (i = 0; i < s_ndepth; ++i) {
+        Depth *other = &s_depth[i];
+        if (!other->tex)
+            continue;
+        if (depth_known_stale(other)) {
+            retire_depth(other);
+            continue;
+        }
+        if (!guest_ranges_overlap(in->color_va, span, other->va, depth_owner_span(other)))
+            continue;
+        if (other->gpu_dirty || other->guest_conflict ||
+            tracked_allocation_lost(other->va, &other->identity)) {
+            depth_reject("color overlaps GPU depth owner", in->color_va, other->va);
+            return 0;
+        }
+        retire_depth(other);
+    }
+    return 1;
+}
+
 static Depth *get_depth(uint32_t va, const Surf *surf)
 {
     uint32_t w = surf->pw, h = surf->ph;
@@ -1529,22 +1856,37 @@ static Depth *get_depth(uint32_t va, const Surf *surf)
     uint32_t surface_format = nv2a_backend_reg(0x0208);
     uint32_t format = (surface_format >> 4) & 0xF;
     uint32_t surface_type = (surface_format >> 8) & 0xF;
-    Depth *d = NULL, replacement;
-    int existing, same_layout, i;
+    Depth *d = NULL, *empty = NULL, replacement;
+    uint32_t guest_height = surf->h;
+    int existing, same_layout, unsafe_recreation, i;
 
     if (!va)
         return NULL;
-    for (i = 0; i < s_ndepth; i++)
-        if (s_depth[i].va == va) { d = &s_depth[i]; break; }
+    for (i = 0; i < s_ndepth; i++) {
+        if (s_depth[i].tex && s_depth[i].va == va) { d = &s_depth[i]; break; }
+        if (!s_depth[i].tex && !empty) empty = &s_depth[i];
+    }
+    if (d && depth_views_enabled() && depth_known_stale(d)) {
+        retire_depth(d);
+        empty = d;
+        d = NULL;
+    }
     existing = d != NULL;
     same_layout = d && (!depth_views_enabled() ||
                         (d->pitch == pitch && d->format == format &&
                          d->surface_type == surface_type));
+    if (d) {
+        if (guest_height < d->logical_h[0]) guest_height = d->logical_h[0];
+        if (guest_height < d->logical_h[1]) guest_height = d->logical_h[1];
+    }
+    if (depth_views_enabled() &&
+        !depth_owners_compatible(va, (uint64_t)pitch * guest_height, d, surf))
+        return NULL;
     if (d && d->scale_epoch == gpu_scale_epoch() && d->w >= w && d->h >= h && same_layout) {
         depth_record_use(d, surf);
         return d;
     }
-    if (!d && s_ndepth == MAX_SURF) {
+    if (!d && !empty && s_ndepth == MAX_SURF) {
         fprintf(stderr, "[GPU-D3D11] depth surface limit reached for %08X\n", va);
         return NULL;
     }
@@ -1561,18 +1903,36 @@ static Depth *get_depth(uint32_t va, const Surf *surf)
     replacement.format = format; replacement.surface_type = surface_type;
     replacement.recreated = existing;
     replacement.scale_epoch = gpu_scale_epoch();
+    unsafe_recreation = depth_views_enabled() && d && (d->gpu_dirty || d->guest_conflict);
+    if (unsafe_recreation &&
+        (gpu_scale_requested() || format != 2 || surface_type != 1)) {
+        depth_reject("dirty depth transition to unsupported layout", va, va);
+        return NULL;
+    }
+    if (d) {
+        replacement.revision = d->revision + 1;
+        replacement.identity = d->identity;
+    }
     depth_record_use(&replacement, surf);
-    if (!create_depth_resource(&replacement, existing)) {
+    if (!create_depth_resource(&replacement, depth_views_enabled() ? unsafe_recreation : existing)) {
         if (d)
             fprintf(stderr, "[GPU-D3D11] retaining prior depth resources for %08X\n", va);
         return NULL;
     }
+    if (unsafe_recreation) {
+        replacement.gpu_dirty = 1;
+        replacement.guest_conflict = 1;
+    }
     if (d) {
-        if (s_cur_depth == d)
-            s_cur_depth = NULL;
+        if (s_cur_depth == d) {
+            if (s_cur)
+                bind_targets(s_cur, NULL);
+            else
+                s_cur_depth = NULL;
+        }
         release_depth(d);
     } else {
-        d = &s_depth[s_ndepth++];
+        d = empty ? empty : &s_depth[s_ndepth++];
     }
     *d = replacement;
     return d;
@@ -1635,6 +1995,10 @@ static Depth *overlapping_depth(const Nv2aTexture *t, int cube, int *ambiguous)
         int depth_physical_valid, overlaps;
         if (!d->tex)
             continue;
+        if (depth_views_enabled() && depth_known_stale(d)) {
+            retire_depth(d);
+            continue;
+        }
         depth_physical_valid = physical_range(d->va, depth_span, &depth_physical);
         overlaps = !valid || !depth_span || physical_valid < 0 || depth_physical_valid < 0 ||
                    (start < depth_end && d->va < end) ||
@@ -1669,7 +2033,7 @@ static Depth *check_depth_texture(const Nv2aTexture *t, int cube, unsigned level
     int i;
 
     for (i = 0; i < s_ndepth; i++)
-        if (s_depth[i].va == t->offset) { d = &s_depth[i]; break; }
+        if (s_depth[i].tex && s_depth[i].va == t->offset) { d = &s_depth[i]; break; }
     overlap = overlapping_depth(t, cube, &ambiguous);
     if (!d || !d->srv || cube || levels > 1 || ambiguous || overlap != d ||
         gpu_scale_requested() || d->format != 2 || d->surface_type != 1 ||
@@ -1687,6 +2051,8 @@ static Depth *check_depth_texture(const Nv2aTexture *t, int cube, unsigned level
         }
         return NULL;
     }
+    if (!sync_depth_guest(d))
+        return NULL;
     if ((d->initialized & initialized) != initialized) {
         static int warned_uninitialized;
         s_st.depth_rejected++;
@@ -1754,7 +2120,7 @@ static int required_depth_alias(const Nv2aTexture *t, int cube)
 {
     int ambiguous;
     return (s_depth_texture && t->color == 0x2E) ||
-           (s_stencil_alias && overlapping_depth(t, cube, &ambiguous));
+           (depth_views_enabled() && overlapping_depth(t, cube, &ambiguous));
 }
 
 static const char s_depth_packed_hlsl[] =
@@ -1927,7 +2293,29 @@ static void apply_scissor(const Nv2aSurface *s)
     ID3D11DeviceContext_RSSetScissorRects(s_ctx, 1, &r);
 }
 
-static int begin(const Nv2aSurface *s, const Nv2aRenderState *rs)
+static void surface_clear_rect(const Nv2aSurface *s, const Surf *surf, D3D11_RECT *rect)
+{
+    uint32_t bounds[4];
+    if (nv2a_backend_clear_rect(bounds)) {
+        uint32_t sx = s->aa_sx > 1 ? 2 : 1, sy = s->aa_sy > 1 ? 2 : 1;
+        uint32_t x0 = bounds[0] * sx, y0 = bounds[1] * sy;
+        uint32_t x1 = bounds[2] * sx, y1 = bounds[3] * sy;
+        x0 = x0 < surf->w ? x0 : surf->w;
+        y0 = y0 < surf->h ? y0 : surf->h;
+        x1 = x1 < surf->w ? x1 : surf->w;
+        y1 = y1 < surf->h ? y1 : surf->h;
+        rect->left = scale_edge(x0, surf->w, surf->pw);
+        rect->top = scale_edge(y0, surf->h, surf->ph);
+        rect->right = scale_edge(x1, surf->w, surf->pw);
+        rect->bottom = scale_edge(y1, surf->h, surf->ph);
+    } else {
+        rect->left = rect->top = 0;
+        rect->right = (LONG)surf->pw;
+        rect->bottom = (LONG)surf->ph;
+    }
+}
+
+static int begin(const Nv2aSurface *s, const Nv2aRenderState *rs, uint32_t clear_flags)
 {
     Surf *surf;
     Depth *d;
@@ -1935,12 +2323,24 @@ static int begin(const Nv2aSurface *s, const Nv2aRenderState *rs)
     if (!ensure_device() || !s || !s->color_va)
         return 0;
     gpu_work_begin();
+    if (depth_views_enabled() && !color_depth_compatible(s))
+        return 0;
     surf = get_surf(s);
     if (!surf)
         return 0;
-    d = rs ? get_depth(rs->zeta_va, surf) : NULL;
-    if (rs && rs->zeta_va && !d)
+    d = rs && (!depth_views_enabled() || !clear_flags || (clear_flags & 3))
+      ? get_depth(rs->zeta_va, surf) : NULL;
+    if (rs && rs->zeta_va && !d &&
+        (!depth_views_enabled() || !clear_flags || (clear_flags & 3)))
         return 0;
+    if (d && !sync_depth_guest(d)) {
+        D3D11_RECT rect;
+        surface_clear_rect(s, surf, &rect);
+        if ((clear_flags & 3) != 3 || rect.left != 0 || rect.top != 0 ||
+            (uint32_t)rect.right != d->w || (uint32_t)rect.bottom != d->h ||
+            !rebaseline_depth(d))
+            return 0;
+    }
     if (surf != s_cur || d != s_cur_depth) {
         int counting = surf != s_cur ? query_suspend_clear() : 0;
         bind_targets(surf, d);
@@ -2642,7 +3042,7 @@ static ID3D11ShaderResourceView *get_texture(const Nv2aTexture *t, int cube, uns
             return get_packed_depth_texture(t, cube || (format & 4) != 0, levels);
         }
     }
-    if (s_stencil_alias) {
+    if (depth_views_enabled()) {
         int ambiguous;
         if (overlapping_depth(t, cube, &ambiguous)) {
             static int warned_overlap;
@@ -3036,6 +3436,7 @@ static int depth_state_can_write(const Nv2aRenderState *rs)
 
 static void depth_written(Depth *depth)
 {
+    depth->gpu_dirty = 1;
     if (++depth->revision == 0)
         depth->packed_valid = 0;
 }
@@ -3460,32 +3861,15 @@ static void clear_draw(const D3D11_RECT *rect, uint32_t flags, uint32_t argb,
 static void d3d_clear(const Nv2aSurface *s, const Nv2aRenderState *rs, uint32_t flags,
                       uint32_t argb, uint32_t zstencil)
 {
-    uint32_t bounds[4];
     uint32_t depth_flags = flags & 3;
     uint32_t color_flags = flags & 0xF0;
     D3D11_RECT rect;
     float c[4], z;
     int full_color, full_depth;
 
-    if (!begin(s, rs))
+    if (!begin(s, rs, flags))
         return;
-    if (nv2a_backend_clear_rect(bounds)) {
-        uint32_t sx = s->aa_sx > 1 ? 2 : 1, sy = s->aa_sy > 1 ? 2 : 1;
-        uint32_t x0 = bounds[0] * sx, y0 = bounds[1] * sy;
-        uint32_t x1 = bounds[2] * sx, y1 = bounds[3] * sy;
-        x0 = x0 < s_cur->w ? x0 : s_cur->w;
-        y0 = y0 < s_cur->h ? y0 : s_cur->h;
-        x1 = x1 < s_cur->w ? x1 : s_cur->w;
-        y1 = y1 < s_cur->h ? y1 : s_cur->h;
-        rect.left = scale_edge(x0, s_cur->w, s_cur->pw);
-        rect.top = scale_edge(y0, s_cur->h, s_cur->ph);
-        rect.right = scale_edge(x1, s_cur->w, s_cur->pw);
-        rect.bottom = scale_edge(y1, s_cur->h, s_cur->ph);
-    } else {
-        rect.left = rect.top = 0;
-        rect.right = (LONG)s_cur->pw;
-        rect.bottom = (LONG)s_cur->ph;
-    }
+    surface_clear_rect(s, s_cur, &rect);
     s_st.clears++;
     if (rect.left >= rect.right || rect.top >= rect.bottom)
         return;
@@ -3595,7 +3979,7 @@ static void d3d_draw(const Nv2aSurface *s, const Nv2aBatch *b)
     float bf[4], tw = 1.0f, th = 1.0f;
     unsigned mip_levels = 1;
 
-    if (!b || !b->count || !b->state || !begin(s, b->state) ||
+    if (!b || !b->count || !b->state || !begin(s, b->state, 0) ||
         !sync_guest_surface(s_cur, 0) || !set_window_clip(s))
         return;
     rs = b->state;
@@ -3711,7 +4095,7 @@ static int xdraw_prepare(const Nv2aSurface *s, const Nv2aXBatch *b)
     float bf[4];
     int st;
 
-    if (!b || !b->state || !begin(s, b->state) ||
+    if (!b || !b->state || !begin(s, b->state, 0) ||
         !sync_guest_surface(s_cur, 0) || !set_window_clip(s))
         return 0;
     rs = b->state;
@@ -5691,6 +6075,9 @@ int bruteforce_d3d11_test_pipeline(uint32_t color_va, uint32_t depth_va,
         stats->depth_revision = depth->revision;
         stats->packed_revision = depth->packed_revision;
         stats->packed_valid = depth->packed_valid;
+        stats->depth_gpu_dirty = depth->gpu_dirty;
+        stats->depth_conflict = depth->guest_conflict;
+        stats->depth_initialized = depth->initialized;
         stats->stencil_conversions = s_st.stencil_conversions;
     }
     return 1;

@@ -13,7 +13,7 @@ ROOT = Path(__file__).resolve().parents[1]
 TOOLKIT_DIR = ROOT / ".deps" / "xboxrecomp"
 TOOLKIT_URL = "https://github.com/sp00nznet/xboxrecomp.git"
 TOOLKIT_BASE = "343b6d8901723b37ce568b2418c5df4e1fe1d223"
-TOOLKIT_TREE = "e9c4349117b38482bd8ec3a64556996f549682b1"
+TOOLKIT_TREE = "153571c77e95ccb7e337d40aa03a5633233ccb44"
 LOCAL_PATCHES = (
     ROOT / "patches" / "xboxrecomp" / "0002-model-wbinvd.patch",
     ROOT / "patches" / "xboxrecomp" / "0003-synchronize-semaphore-target.patch",
@@ -55,6 +55,7 @@ LOCAL_PATCHES = (
     ROOT / "patches" / "xboxrecomp" / "0041-texture-snapshots-and-bounds.patch",
     ROOT / "patches" / "xboxrecomp" / "0042-bounded-nv2a-diagnostics.patch",
     ROOT / "patches" / "xboxrecomp" / "0043-checked-snapshot-lifetimes.patch",
+    ROOT / "patches" / "xboxrecomp" / "0044-geometry-depth-audit.patch",
 )
 
 # PRs #314, #319, and #320, in their tested application order.

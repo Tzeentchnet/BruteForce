@@ -27,6 +27,7 @@ def campaign_run(campaign, number, audio, tagged=True):
     files = []
     for index in range(3):
         image = Image.new("RGB", (4, 4), (80, 90, 100))
+        image.putpixel((3, 3), (81, 90, 100))
         if index == 2:
             image.putpixel((2, 2), (150, 90, 100))
         name = f"hold{index + 101:010}.bmp" if tagged else f"hold{index:05}.bmp"

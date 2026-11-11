@@ -13,7 +13,8 @@ pytestmark = pytest.mark.skipif(
 
 
 def run_clip(mode, trace=None):
-    xbe = ROOT / ".deps" / "xboxrecomp" / "tools" / "conformance" / "test.xbe"
+    xbe = Path(os.environ.get(
+        "BRUTEFORCE_TEST_XBE", ROOT / ".deps" / "xboxrecomp" / "tools" / "conformance" / "test.xbe"))
     env = os.environ.copy()
     env.pop("RECOMP_FRAME_TRACE", None)
     env.pop("RECOMP_FRAME_TRACE_METHODS", None)

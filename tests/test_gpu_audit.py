@@ -10,7 +10,8 @@ ROOT = Path(__file__).resolve().parents[1]
 AUDIT_EXE = os.environ.get("BRUTEFORCE_TEST_GPU_AUDIT")
 D3D11_EXE = os.environ.get("BRUTEFORCE_TEST_D3D11")
 HARDWARE = os.environ.get("BRUTEFORCE_TEST_D3D11_HARDWARE") == "1"
-XBE = ROOT / ".deps" / "xboxrecomp" / "tools" / "conformance" / "test.xbe"
+XBE = Path(os.environ.get(
+    "BRUTEFORCE_TEST_XBE", ROOT / ".deps" / "xboxrecomp" / "tools" / "conformance" / "test.xbe"))
 pytestmark = pytest.mark.skipif(
     not AUDIT_EXE, reason="set BRUTEFORCE_TEST_GPU_AUDIT to the native audit fixture"
 )
@@ -163,6 +164,49 @@ def test_gpu_preparation_falls_back_and_reports_missing_program(tmp_path):
     assert count(rows, "route", "DROPPED") == 1
     assert count(rows, "output", "NO_TRIANGLES_EMITTED") == 1
     assert not any(category == "backend" for category, _ in rows)
+
+
+@pytest.mark.parametrize("backend", [False, True])
+def test_postclip_submission_and_unsupported_route_context_are_not_visibility(tmp_path, backend):
+    mode = "geometry-backend" if backend else "geometry"
+    _, report, _ = run_fixture(tmp_path, mode, "1", mode)
+    rows = read_report(report)
+    assert rows[("batch_geometry", "00000002:IMMEDIATE:DROPPED:NOT_SUBMITTED")] == (1, 4)
+    assert rows[("recent_method_for_drop", "00000002:UNHANDLED:0:1D7C")] == (1, 4)
+    assert rows[("recent_method_for_drop", "00000002:MIRROR:0:1B0C")] == (1, 4)
+    states = [int(key.split(":")[1], 16) for category, key in rows
+              if category == "unsupported_state" and key.startswith("00000002:")]
+    assert len(states) == 1 and states[0] & 3 == 2 and states[0] & (1 << 10)
+    assert rows[("unsupported_size", "16:16")] == (1, 4)
+    assert rows[("batch_geometry", "00000005:ARRAY:CPU_PROGRAM:CPU_POSTCLIP_OUTPUT")] == (
+        1 if backend else 2, 3 if backend else 6)
+    assert rows[("post_clip_triangles", "CPU_PROGRAM")][0] == (2 if backend else 4)
+    if backend:
+        assert rows[("batch_geometry", "00000005:ARRAY:GPU_VERTEX:GPU_PRECLIP_UNKNOWN")] == (1, 3)
+        assert not any(category == "cpu_depth_binding" for category, _ in rows)
+    else:
+        assert rows[("cpu_depth_binding", "0:2E:EXACT_CURRENT_ZETA")][0] == 2
+        assert rows[("cpu_depth_binding", "0:41:EXACT_CURRENT_ZETA")][0] == 1
+    assert count(rows, "visibility", "UNKNOWN") == 2
+    assert count(rows, "visibility", "NOT_SUBMITTED") == 1
+
+
+def test_frame_trace_never_reuses_cpu_vertices_for_a_gpu_vertex_batch(tmp_path):
+    flag = tmp_path / "trace.flag"
+    flag.write_text("trace", encoding="ascii")
+    env = clean_env()
+    env["RECOMP_FRAME_TRACE"] = str(flag)
+    result = subprocess.run(
+        [AUDIT_EXE, str(XBE), "geometry-backend", str(tmp_path / "snapshot")],
+        capture_output=True, text=True, check=False, timeout=60, cwd=tmp_path, env=env,
+    )
+    assert result.returncode == 0, result.stderr
+    assert "CPU post-clip triangle count; visibility unknown" in result.stderr
+    assert "GPU pre-clip submitted; post-clip and visibility unknown" in result.stderr
+    cpu, gpu = result.stderr.split("GPU pre-clip submitted; post-clip and visibility unknown")
+    assert "[FTRACE]     pre-clip v0 " in cpu
+    assert "[FTRACE]     transformed vertices unavailable for this batch" in gpu
+    assert "[FTRACE]     pre-clip v0 " not in gpu
 
 
 def test_concurrent_report_snapshot_keeps_open_request_and_full_dimensions(tmp_path):

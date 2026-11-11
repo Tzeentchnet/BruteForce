@@ -6,8 +6,8 @@ results are in [FINDINGS.md](FINDINGS.md), and framework work is
 tracked in [UPSTREAM.md](UPSTREAM.md). The current
 toolkit uses xboxrecomp v0.17.0 at
 `343b6d8901723b37ce568b2418c5df4e1fe1d223`, selected post-release commits
-from #314, #319 and #320, and 40 local patches. Its isolated and independently
-replayed tree is `e9c4349117b38482bd8ec3a64556996f549682b1`.
+from #314, #319 and #320, and 41 local patches. Its isolated and independently
+replayed tree is `153571c77e95ccb7e337d40aa03a5633233ccb44`.
 
 Supported retail generation `20261111-002138-a9dbc18a` is a Release build on
 the earlier v0.17 tree `131abd8d1f4559bb36dba4391e4c644925cff5df`;
@@ -43,7 +43,7 @@ xemu Basic Controls frame is now content-matched to fresh v0.17 CPU and D3D11
 captures, and a same-generation controlled comparison identifies the packed
 stencil alias as the mechanism that removes the large brightness difference.
 The next gate is to extend that evidence through the sun-facing and
-end-of-opening-fade states and finish E1-E2 ownership coverage; the old
+end-of-opening-fade states and verify E1-E2 ownership in gameplay; the old
 generation remains only the reviewed measurement baseline. Patch 0037's
 one-line Windows raster diagnostic correction is the strongest small upstream
 candidate, followed by the software-interrupt ABI fix, immediate-entry guard,
@@ -190,9 +190,11 @@ Direct3D 12 work remain deferred. See
 - Both variants of the new movement campaign logged unsupported texture
   format `0x2E` (`LIN_D24S8`). Its effect on the visible image is not yet
   established; the CPU reference also lacks a decoder for that format.
-- Experimental GPU depth aliases now cover exact matching D24S8 surfaces,
-  with guest-memory initialization and snapshots for a bound depth target;
-  other aliases and guest writes remain unsupported. An initial combined
+- Experimental GPU depth aliases cover exact matching D24S8 surfaces,
+  with checked guest-memory initialization, clean-owner reseeding and
+  conservative rejection of conflicting writes and overlaps. This is
+  synthetic coverage, not a complete guest-write or readback contract.
+  An initial combined
   run rejected 29,261 depth samples in periodic reports and was stopped
   after a missing-character observation. After guest-depth seeding, one
   diagnostic recorded 19,029 accepted samples and no rejections in periodic
@@ -358,7 +360,12 @@ GPU methods in the CPU-path census.
    missing or incomplete post-window snapshot instead of accepting a
    success-shaped run. Synthetic retry, disabled, malformed and native-fixture
    cases pass.
-   Visibility remains unknown for non-dropped routes. A fresh v0.17 scripted
+   Patch 0044 adds CPU post-clip triangle counts, separately identifies GPU
+   pre-clip submissions, preserves unknown visibility, and correlates dropped
+   primitive types with a bounded recent-method history. It also reports
+   CPU-path `0x2E`/`0x41` bindings without claiming a texture was sampled.
+   Frame traces no longer reuse stale CPU vertices for GPU programs.
+   A fresh v0.17 scripted
    run produced a complete post-window report with 4,486,537 requests,
    including 1,106 unsupported line requests with 4,424 vertices, 161
    distinct unhandled methods and 22 mirror-only methods. It also produced
@@ -391,17 +398,17 @@ GPU methods in the CPU-path census.
    HUD validation remains.** Use hardware D3D11 and the existing user
    captures first to investigate why the HUD and glow can disappear together.
    Match the view and capture actual programmable vertex/clip state before
-   attributing this to the near plane; current GPU-program frame traces may
-   print stale CPU-transformed vertices and count submitted rather than
-   post-clip triangles. Isolate the screen-zero plane and packed alias
+   attributing this to the near plane; GPU-program traces now label submissions
+   as pre-clip with post-clip output and visibility unknown. Isolate the
+   screen-zero plane and packed alias
    separately, and check the stencil threshold and packed-depth conversion
    against real gameplay values. A fresh same-generation pair with every
    other control fixed reduced xemu differences above 8/255 from 43.4320%
    with packed aliases off to 3.7119% with them on. This identifies stale
    packed stencil as the large matched-panel brightness cause, but unsupported
-   guest writes, partial overlaps, scaled aliases and other scenes still
-   block a default. Explain and minimize any further gameplay run. Do not add
-   a global gamma or brightness adjustment.
+   untracked/concurrent guest writes, partial overlaps, scaled aliases and
+   other scenes still block a default. Explain and minimize any further
+   gameplay run. Do not add a global gamma or brightness adjustment.
 4. **Display gamma ramp (hypothesis not supported by the matched panel).** Blood Wake found that
    the toolkit's NV2A registers are plain memory, so the title's write of a
    gamma ramp to the video DAC was lost and every frame was shown as if the
@@ -422,23 +429,36 @@ GPU methods in the CPU-path census.
    runtime evidence before changing presentation. Only if the title writes a
    relevant ramp, apply its own ramp at present behind a switch, as Blood Wake
    does; that differs from a global adjustment.
-5. **Black frames and the missing character.** Make the movement gate
-   measure visible world change. The harness reports two known solid-black
-   hashes, but other dark images and intentional fades still need
-   classification. A zero match count is not proof of valid world frames.
-6. **`LIN_D24S8` (`0x2E`).** Validate the opt-in path with matched gameplay
-   captures and a reference. Extend guest-write tracking, partially
-   overlapping aliases and the CPU reference behaviour before making it the
-   default. Establish first whether the unsupported format affects any
-   visible pixels.
-7. **Points, lines and other dropped primitives.** Use the A1 inventory to
-   establish whether the title draws any. Blood Wake v0.3.1 now keeps
-   eligible point batches on the GPU and expands point sprites there, but it
-   does not solve Brute Force's observed line-list drops. Adapt its optional
-   point-size/sprite contract only if a visible point route is established;
-   investigate the 174 recorded line-list requests separately.
-8. **GPU window clipping.** Validate it in gameplay, then make it the default
-   if no regression remains.
+5. **Black frames and the missing character.** Synthetic-tested classification
+   distinguishes reviewer-labelled intentional fades/solid frames from
+   unexplained black, dark, solid and unchanged intervals. Movement collection
+   is explicitly inconclusive and exits 2; a separate complete review needs
+   a real world change and presented-frame validation.
+   A zero black-hash count is not proof of visible world or character.
+   Review a matched movement campaign; do not infer fades from darkness.
+6. **`LIN_D24S8` (`0x2E`).** The default-off, unscaled path now snapshots
+   eligible guest spans and allocation identities, reseeds clean owners and
+   rejects conflicts, unsupported layouts and partial overlaps rather than
+   sampling stale bytes. Synthetic fixtures cover changes, guards, lifetime
+   reuse, clears, rollback and scaled rejection. Same-value and unchecked
+   concurrent writes, guest reads, unknown suballocations and general alias
+   semantics remain open. The CPU reference still cannot decode `0x2E` and
+   does not model stencil. Validate matched gameplay/reference states and
+   establish whether `0x2E` affects visible pixels before considering a
+   default; never treat this conservative detection as synchronization.
+7. **Points, lines and other dropped primitives.** Synthetic audit fixtures
+   now preserve primitive/input counts and bounded, temporal method context;
+   they do not prove a dropped request was visible or that a method caused it.
+   No generic line or point rasterization was added without independently
+   verified NV2A semantics. Rank the recorded line-list requests and method
+   routes in matched scenes; adapt Blood Wake's optional point contract only
+   after visible use and semantics are established.
+8. **GPU window clipping.** Expanded CPU, WARP and hardware fixtures cover
+   multiple rectangles, incomplete state, AA and render scaling, base and
+   vertex paths, clears, and depth/stencil discard side effects. CPU stencil
+   is unmodeled, so that side effect is checked on GPU separately. Keep the
+   switch off by default until matched gameplay and reference evidence settle
+   reset semantics and regressions.
 
 *Done when:* the A1 inventory lists every difference from the reference with
 a cause or an accepted reason; no recurring black interval or missing

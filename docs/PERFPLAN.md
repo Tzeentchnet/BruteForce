@@ -20,7 +20,7 @@ licensed, so they can be adapted here with attribution in
 `THIRD_PARTY_NOTICES.md`. Its title-specific hooks, addresses, and Remastered
 features do not apply and must not be copied.
 
-## Status (2026-11-10)
+## Status
 
 Measurements are in [FINDINGS.md](./FINDINGS.md#performance-plan-phase-0-and-the-first-gpu-path-results);
 next steps are in [NEXTSTEPS.md](./NEXTSTEPS.md).
@@ -37,6 +37,15 @@ all other controls fixed and reduced D3D11 pixels over 8/255 against xemu
 from 43.4320% to 3.7119% when the packed-stencil alias was enabled. This
 identifies one rendering mechanism but is not an A/B/A throughput result and
 does not close G4 for movement or other scenes.
+
+Synthetic-only follow-up advances Phase 0 diagnostics and Phase 5 correctness:
+patch 0044 separates CPU post-clip counts from GPU pre-clip submissions and
+adds bounded dropped-route context; movement collection now fails closed as
+inconclusive without reviewed content. The opt-in unscaled packed-depth path
+detects changed clean/dirty guest snapshots and rejects conflicting ownership,
+and window-clip fixtures cover additional depth/stencil and scaled cases.
+These are not new gameplay, throughput, A/B/A or original-hardware evidence.
+G4 and the existing Phase 5 exit remain open.
 
 | Phase | Status |
 | --- | --- |
@@ -169,9 +178,12 @@ frame. The current whole-frame pixel hash also sees HUD changes, so measured
 distinct movement fps is not yet proof that every counted change is a new
 world frame. In the previous six-run GPU campaign, 58.9–60.2% of movement
 flips in each run matched a solid-black image; those throughput figures do
-not establish G2 or playability. The harness reports known-black matches but
-cannot classify all dark frames or distinguish an intentional fade.
-For a complete reviewed manifest, the harness also reports world-frame
+not establish G2 or playability. The harness does not infer a fade from a
+hash or darkness: reviewed intentional fades/solid frames are separate from
+unknown black, dark, solid and unchanged intervals, and unreviewed movement
+collection exits 2 with an inconclusive status. For a complete real-image
+manifest with at least one reviewed world change, the offline analyzer
+reports reviewer-asserted world-frame
 cadence from each reviewed baseline to the next `world_changed` frame and
 between successive `world_changed` frames. Static-world and HUD-only flips
 remain inside those intervals; fades, invalid frames and unreviewed gaps break
@@ -330,8 +342,9 @@ Done before writing renderer code. All evidence stays local.
    downsample or post-processing render-to-texture. That is a hypothesis to
    confirm. Patch 0025 adds a separate opt-in request audit for early drops,
    backend outcomes, method/subchannel accounting and unknown visibility;
-   it does not replace the state census. Its synthetic fixtures pass, but it
-   has not yet been run on the tutorial. Rank observed ignored methods and
+   it does not replace the state census. Patch 0044 adds post-clip CPU versus
+   pre-clip GPU scopes and bounded temporal method context. Fresh tutorial
+   counts exist but their scene identity remains unreviewed. Rank ignored methods and
    compare matched CPU/GPU/xemu captures before inferring visible impact.
 4. **Guest surface reads.** Determine whether the title's CPU code ever reads
    a rendered colour or depth surface. Candidates: screenshots, the save

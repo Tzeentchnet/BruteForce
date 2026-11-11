@@ -95,6 +95,42 @@ For hardware-device coverage as well as WARP, set
 `BRUTEFORCE_TEST_D3D11_HARDWARE=1` before the pytest command.
 The host fixture does not contain game code and cannot run the game.
 
+For the render-artifact audit, depth-ownership, clipping and benchmark
+regressions using an already prepared **isolated** framework checkout:
+
+```powershell
+$toolkit = "$PWD\build\artifact-toolkit"
+python tools\toolkit.py --verify --checkout $toolkit
+cmake -S "$toolkit\tests\nv2a_gpu_audit" -B build\artifact-audit `
+  -G "Visual Studio 17 2022" -A x64
+cmake --build build\artifact-audit --config Release
+ctest --test-dir build\artifact-audit -C Release --output-on-failure
+cmake -S . -B build\artifact-fixtures -G "Visual Studio 17 2022" -A x64 `
+  "-DXBOXRECOMP_DIR=$toolkit" "-DBRUTEFORCE_GEN_DIR=$PWD\tests\fixtures\generated"
+cmake --build build\artifact-fixtures --config Release --target `
+  bruteforce_gpu_audit_test bruteforce_window_clip_test bruteforce_d3d11_test
+$env:BRUTEFORCE_TEST_XBE = "$toolkit\tools\conformance\test.xbe"
+$env:BRUTEFORCE_TEST_GPU_AUDIT = "$PWD\build\artifact-fixtures\Release\bruteforce_gpu_audit_test.exe"
+$env:BRUTEFORCE_TEST_WINDOW_CLIP = "$PWD\build\artifact-fixtures\Release\bruteforce_window_clip_test.exe"
+$env:BRUTEFORCE_TEST_D3D11 = "$PWD\build\artifact-fixtures\Release\bruteforce_d3d11_test.exe"
+$env:BRUTEFORCE_TEST_D3D11_HARDWARE = "1" # omit to use WARP only
+python -m pytest -q --basetemp build\artifact-fixtures\pytest-render `
+  tests\test_gpu_audit.py tests\test_window_clip.py tests\test_d3d11.py `
+  -k "gpu_audit or window_clip or packed_depth or depth_alias or stencil_alias or traced_glare or pipeline_packed_revision or pipeline_scaled_depth_guest_range or rectangular_clears or gpu_matches_cpu_reference or gpu_scene_has_expected_content or gpu_vertex_culling"
+python -m pytest -q --basetemp build\artifact-fixtures\pytest-benchmark `
+  tests\test_bench.py tests\test_bench_control.py tests\test_bench_world.py `
+  tests\test_bench_match.py tests\test_bench_audit.py
+```
+
+`BRUTEFORCE_TEST_XBE` points the render-test modules and benchmark-audit
+fixture at the isolated checkout's synthetic conformance XBE; unset it to
+use the usual `.deps` path. The fixtures cover clean/dirty guest-byte changes,
+padding, allocation reuse, guarded ranges, overlap and clear recovery, injected
+seed/baseline races, scale rejection, clip side effects and audit semantics.
+Hardware tests use the default D3D11 adapter when requested. CPU stencil is
+unmodeled and checked separately on GPU. None of these fixtures validates
+retail content, scanout, arbitrary concurrent writes or performance.
+
 For the camera-trace and presenter-size safety fixtures:
 
 ```powershell

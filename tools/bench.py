@@ -20,10 +20,11 @@ apply. The executor's RECOMP_FRAME_STATS then helps find the measured windows:
 
 Whole-picture hash changes and the vertex-constant fallback are diagnostics,
 not distinct world frames. Known-black hashes identify only specific surfaces;
-without reviewed images all other movement frames remain unknown. Use
+without reviewed images even those black frames have an unknown cause. Use
 --analyze-world on a separately reviewed local manifest (see bench_world.py)
 to classify images and exclude HUD regions; raw ROI changes alone are not
-world-frame FPS.
+world-frame FPS. A collected but unreviewed movement campaign, or an
+inconclusive offline world analysis, exits with status 2.
 
 --capture-audio reserves a unique WAV for each audio-enabled attempt. A console
 control event requests the runtime's WAV close handler; a killed process, an
@@ -1029,6 +1030,10 @@ def run_once(out_dir, label, scene, env_overrides, threads, watchdog, profile, c
         result["movement_known_black"] = known_black_metrics(rows[a:b])
         result["movement_agreement"] = pixel_constant_agreement(rows, a, b)
         result["movement_world"] = bench_world.unreviewed_metrics(rows[a:b])
+    if scene == "movement":
+        result["measurement_status"] = "failed" if result.get("error") else "inconclusive"
+        result["measurement_reason"] = result.get("error") or (
+            "Movement collection requires independent frame, state, and presentation review.")
     if profile:
         result["profile"] = parse_profile(out_dir / "profile.txt")
     if census:
@@ -1193,8 +1198,9 @@ def main(argv=None):
         if args.analyze_world and args.compare_matched:
             raise BenchError("--analyze-world and --compare-matched are separate offline modes")
         if args.analyze_world:
-            print(json.dumps(bench_world.analyze_manifest(args.analyze_world), indent=2))
-            return 0
+            analysis = bench_world.analyze_manifest(args.analyze_world)
+            print(json.dumps(analysis, indent=2))
+            return 0 if analysis["status"] == "reviewer_asserted" else 2
         if args.compare_matched:
             comparison = bench_match.compare_manifest(args.compare_matched, MOVEMENT_INPUT)
             print(json.dumps(comparison, indent=2))
@@ -1291,6 +1297,10 @@ def main(argv=None):
                 print(f"[bench]   {result['error']}", flush=True)
             result["attempts"] = attempt + 1
             result["attempt_errors"] = attempt_errors
+            if args.scene == "movement":
+                result["measurement_status"] = "failed" if result.get("error") else "inconclusive"
+                result["measurement_reason"] = result.get("error") or (
+                    "Movement collection requires independent frame, state, and presentation review.")
             build.write_json(attempt_dir / "result.json", result)
             results.append(result)
             stationary = result.get("stationary") or {}
@@ -1302,7 +1312,8 @@ def main(argv=None):
             world = result.get("movement_world")
             if world:
                 print(f"[bench]   world-frame rate inconclusive: {world['known_black_frames']} "
-                      f"known black, {world['unknown_frames']} unknown; no reviewed labels",
+                      f"known black among {world['unknown_frames']} unclassified flips; "
+                      "no reviewed labels",
                       flush=True)
             black = result.get("movement_known_black")
             if black and black["matched_frames"]:
@@ -1312,6 +1323,10 @@ def main(argv=None):
             table = summarize(results)
             build.write_json(out / "summary.json", {
                 "scene": args.scene, "runs_per_variant": args.runs, "threads": args.threads,
+                "status": ("failed" if result.get("error") else
+                           "inconclusive" if args.scene == "movement" else "collection_complete"),
+                "collection_status": ("failed" if result.get("error") else
+                                      "complete" if number == len(sequence) else "in_progress"),
                 "sequence": [name for name, _ in sequence], "table": table,
                 "generation": generation, "audio_modes": audio_modes,
                 "options": result.get("options"),
@@ -1332,6 +1347,11 @@ def main(argv=None):
                 return 1
         print_table(summarize(results))
         print(f"\n[bench] results: {out}")
+        if args.scene == "movement":
+            print("[bench] INCONCLUSIVE: movement data were collected, but world content, "
+                  "dark/unchanged intervals, and presented frames remain unreviewed.",
+                  file=sys.stderr)
+            return 2
     except (BenchError, build.BuildError, bench_control.BenchControlError,
             bench_world.WorldLabelError, OSError) as exc:
         print(f"Error: {exc}", file=sys.stderr)

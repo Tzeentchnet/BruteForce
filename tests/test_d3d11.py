@@ -13,7 +13,8 @@ HARDWARE = os.environ.get("BRUTEFORCE_TEST_D3D11_HARDWARE") == "1"
 pytestmark = pytest.mark.skipif(
     not D3D11_EXE, reason="set BRUTEFORCE_TEST_D3D11 to the native D3D11 parity fixture"
 )
-XBE = ROOT / ".deps" / "xboxrecomp" / "tools" / "conformance" / "test.xbe"
+XBE = Path(os.environ.get(
+    "BRUTEFORCE_TEST_XBE", ROOT / ".deps" / "xboxrecomp" / "tools" / "conformance" / "test.xbe"))
 SIZE = 64
 
 
@@ -1271,16 +1272,18 @@ def test_rectangular_clears_preserve_channels_depth_stencil_and_draw_state(mode,
     ("cpu-clip", "gpu-clip-warp"),
     ("cpu-clip", "gpu-clip-scale2-warp"),
     ("cpu-clip-vsh", "gpu-clip-vsh-warp"),
+    ("cpu-clip-vsh", "gpu-clip-cpuvsh-warp"),
+    ("cpu-clip-vsh", "gpu-clip-vsh-scale2-warp"),
     pytest.param("cpu-clip", "gpu-clip-hardware", marks=pytest.mark.skipif(
         not HARDWARE, reason="set BRUTEFORCE_TEST_D3D11_HARDWARE=1 for a hardware device")),
     pytest.param("cpu-clip-vsh", "gpu-clip-vsh-hardware", marks=pytest.mark.skipif(
         not HARDWARE, reason="set BRUTEFORCE_TEST_D3D11_HARDWARE=1 for a hardware device")),
 ])
 def test_window_clip_on_base_extended_and_gpu_vertex_paths(tmp_path, cpu_mode, gpu_mode):
-    cpu, _ = render_frames(cpu_mode, tmp_path / "cpu-clip.raw", 12)
-    gpu, result = render_frames(gpu_mode, tmp_path / "gpu-clip.raw", 12)
-    assert "window clip frames 12" in result.stdout
-    if "vsh" in gpu_mode:
+    cpu, _ = render_frames(cpu_mode, tmp_path / "cpu-clip.raw", 18)
+    gpu, result = render_frames(gpu_mode, tmp_path / "gpu-clip.raw", 18)
+    assert "window clip frames 18" in result.stdout
+    if "vsh" in gpu_mode and "cpuvsh" not in gpu_mode:
         checks = re.findall(r"\[VSH-VERIFY\] (\d+) batches checked, (\d+) differ", result.stderr)
         assert checks and all(int(differ) == 0 for _, differ in checks), result.stderr
 
@@ -1303,9 +1306,19 @@ def test_window_clip_on_base_extended_and_gpu_vertex_paths(tmp_path, cpu_mode, g
                 black if eight else white,
                 black,
                 white,
+                white if (x, y) in ((0, 0), (63, 63)) else black,
+                black if (x, y) in ((0, 0), (63, 63)) else white,
+                white if (x >= 60 and y >= 60) or (3 <= x <= 6 and 30 <= y <= 35) else black,
+                white if (10 <= x <= 20 and 10 <= y <= 20) or
+                         (15 <= x <= 25 and 15 <= y <= 25) else black,
+                white if 10 <= x <= 19 and 10 <= y <= 19 else (0, 255, 0),
+                (0, 255, 0) if 10 <= x <= 19 and 10 <= y <= 19 else black,
             ]
             for frame, color in enumerate(expected):
-                assert rgb_at(cpu[frame], x, y) == color, (cpu_mode, frame, x, y, color)
+                # The CPU reference does not model stencil; the second draw
+                # is therefore green everywhere in the stencil-only case.
+                cpu_color = (0, 255, 0) if frame == 17 else color
+                assert rgb_at(cpu[frame], x, y) == cpu_color, (cpu_mode, frame, x, y, cpu_color)
                 assert rgb_at(gpu[frame], x, y) == color, (gpu_mode, frame, x, y, color)
 
 
@@ -1321,7 +1334,8 @@ def test_depth_alias_shadow_comparisons_and_layout_guards(mode, tmp_path):
     frames, result = render_frames(mode, tmp_path / "depth.raw", 45)
     assert "depth texture frames 45" in result.stdout
     assert "depth texture alias rejected" in result.stderr
-    assert "has not been initialized from guest memory or a GPU depth clear" in result.stderr
+    assert "depth ownership rejected" in result.stderr
+    assert "dirty depth transition to unsupported layout" in result.stderr
     assert "depth texture stage mode 3 is unsupported" in result.stderr
     assert "depth texture stage mode 2 is unsupported on base draws" in result.stderr
     assert "depth cube textures are unsupported" in result.stderr
@@ -1364,7 +1378,7 @@ def test_packed_depth_alias_tracks_gpu_stencil_and_all_color_channels(mode, tmp_
     frames, result = render_frames(mode, tmp_path / "stencil.raw", 13)
     assert "packed depth frames 13" in result.stdout
     assert "depth texture alias rejected" in result.stderr
-    assert "has not been initialized from guest memory or a GPU depth clear" in result.stderr
+    assert "depth ownership rejected" in result.stderr
     if "vsh" in mode:
         checks = re.findall(r"\[VSH-VERIFY\] (\d+) batches checked, (\d+) differ", result.stderr)
         assert checks and int(checks[-1][0]) > 0
@@ -1396,6 +1410,42 @@ def test_packed_depth_alias_tracks_gpu_stencil_and_all_color_channels(mode, tmp_
                     assert actual[3] == color[3], (mode, frame, x, y, actual, color)
 
 
+@pytest.mark.parametrize("device", [
+    "warp",
+    pytest.param("hardware", marks=pytest.mark.skipif(
+        not HARDWARE, reason="set BRUTEFORCE_TEST_D3D11_HARDWARE=1 for a hardware device")),
+])
+@pytest.mark.parametrize("vertex", ["", "-vsh"])
+@pytest.mark.parametrize("alias", ["stencil", "stencil-depth"])
+def test_packed_depth_guest_writes_and_ownership(device, vertex, alias, tmp_path):
+    mode = f"gpu-ownership-{alias}{vertex}-{device}"
+    frames, result = render_frames(mode, tmp_path / "ownership.raw", 9)
+    assert "depth ownership frames 9" in result.stdout
+    assert "depth ownership rejected" in result.stderr
+    expected = [
+        (0x11, 0x22, 0x33, 0x44),
+        None,
+        (0xA1, 0xB2, 0xC3, 0xD4),
+        (0x19, 0x33, 0x4D, 0xFF),
+        (0xDE, 0xAD, 0xBE, 0xEF),
+        (0x19, 0x33, 0x4D, 0xFF),
+        (0x24, 0x68, 0xAC, 0x5A),
+        (0x77, 0x88, 0x99, 0xAA),
+        (0xFF, 0x33, 0x44, 0x55),
+    ]
+    for y in range(2, SIZE - 2):
+        for x in range(2, SIZE - 2):
+            for frame, color in enumerate(expected):
+                if frame == 1:
+                    color = ((0x55, 0x66, 0x77, 0x88) if x < SIZE // 2
+                             else (0x11, 0x22, 0x33, 0x44))
+                actual = rgba_at(frames[frame], x, y)
+                assert max(abs(a - b) for a, b in zip(actual, color)) <= 1, (
+                    mode, frame, x, y, actual, color
+                )
+                assert actual[3] == color[3], (mode, frame, x, y, actual, color)
+
+
 GLARE_CASES = [
     ((0x20, 0x20, 0x20), 0xFF, 0xC0, False),
     ((0xA0, 0xA0, 0xA0), 0xFF, 0xC0, False),
@@ -1424,24 +1474,29 @@ def glare_pixels(color, alpha, passes):
         not HARDWARE, reason="set BRUTEFORCE_TEST_D3D11_HARDWARE=1 for a hardware device")),
 ])
 @pytest.mark.parametrize("depth_texture", [False, True])
-def test_traced_glare_threshold_uses_gpu_stencil_only_with_alias(
+def test_traced_glare_threshold_respects_alias_ownership(
     device, vertex_program, depth_texture, tmp_path
 ):
     vertex = "-vsh" if vertex_program else ""
     depth = "-depth" if depth_texture else ""
-    baseline, _ = render_frames(
+    baseline, baseline_result = render_frames(
         f"gpu-glare{depth}{vertex}-{device}", tmp_path / "baseline.raw", 18
     )
     aliased, result = render_frames(
         f"gpu-glare-stencil{depth}{vertex}-{device}", tmp_path / "alias.raw", 18
     )
     assert "glare threshold frames 18" in result.stdout
+    assert ("texture overlaps GPU-owned depth with an unsupported format or address" in
+            baseline_result.stderr) is depth_texture
     if vertex_program:
         checks = re.findall(r"\[VSH-VERIFY\] (\d+) batches checked, (\d+) differ", result.stderr)
         assert checks and all(int(differ) == 0 for _, differ in checks), result.stderr
     for case, (color, alpha, stencil, passes) in enumerate(GLARE_CASES):
         for frames, uses_gpu_stencil in ((baseline, False), (aliased, True)):
-            bright, composite = glare_pixels(color, alpha, not uses_gpu_stencil or passes)
+            if depth_texture and not uses_gpu_stencil:
+                bright, composite = (0, 0, 0), color
+            else:
+                bright, composite = glare_pixels(color, alpha, not uses_gpu_stencil or passes)
             for y in range(2, SIZE - 2):
                 for x in range(2, SIZE - 2):
                     for frame, expected in ((2 * case, bright), (2 * case + 1, composite)):
@@ -1609,10 +1664,17 @@ def test_scaled_rendering_rejects_disabled_shared_presentation(tmp_path):
     assert "scaled rendering requires shared GPU presentation" in result.stderr
 
 
-def test_scaled_depth_aliases_are_rejected_explicitly(tmp_path):
+@pytest.mark.parametrize("mode", [
+    "gpu-scale2-depth",
+    "gpu-scale2-stencil",
+    "gpu-scale2-depth-stencil",
+    "gpu-scale05-stencil",
+    "gpu-scale-window-depth-stencil",
+])
+def test_scaled_depth_aliases_are_rejected_explicitly(tmp_path, mode):
     env = {key: value for key, value in os.environ.items() if not key.startswith("RECOMP_")}
     result = subprocess.run(
-        [D3D11_EXE, str(XBE), "gpu-scale2-depth", str(tmp_path / "unused.raw")],
+        [D3D11_EXE, str(XBE), mode, str(tmp_path / "unused.raw")],
         capture_output=True, text=True, check=False, timeout=30, env=env,
     )
     assert result.returncode != 0

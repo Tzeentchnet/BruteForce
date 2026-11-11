@@ -25,10 +25,12 @@ local JSON manifest can instead describe individually reviewed images:
 Rectangles use exclusive right/bottom coordinates. Labels are assertions by
 the reviewer, not inferred from pixel intensity. "world" starts a reviewed
 baseline; later world frames need world_changed, world_static, or hud_only.
-Other labels are known_black, intentional_fade, invalid, dark_unknown, and
-unknown. Image paths are relative to the manifest. Flip-ID-tagged benchmark
-dumps can be aligned with the frame-statistics CSV; legacy numbered dumps still
-need independent alignment. Neither establishes the actual presented image.
+Other labels are intentional_fade, intentional_solid, known_black, invalid,
+dark_unknown, and unknown. A solid or black image is not necessarily an
+intentional transition. Image paths are relative to the manifest.
+Flip-ID-tagged benchmark dumps can be aligned with the frame-statistics CSV;
+legacy numbered dumps still need independent alignment. Neither establishes
+the actual presented image.
 """
 
 import json
@@ -41,13 +43,19 @@ FLIP_ID_ALIGNMENT = "flip_id_filename_v1"
 
 LABELS = frozenset((
     "world", "world_changed", "world_static", "hud_only", "known_black",
-    "intentional_fade", "invalid", "dark_unknown", "unknown",
+    "intentional_fade", "intentional_solid", "invalid", "dark_unknown", "unknown",
 ))
 WORLD_CATEGORIES = frozenset(("world_baseline", "world_changed", "world_static", "hud_only"))
 CATEGORIES = (
     "world_baseline", "world_changed", "world_static", "hud_only",
-    "known_black", "intentional_fade", "invalid", "dark_unknown", "unknown",
+    "known_black", "intentional_fade", "intentional_solid", "invalid",
+    "dark_unknown", "solid_unknown", "unchanged_unknown", "unknown",
 )
+UNCLASSIFIED = frozenset((
+    "known_black", "dark_unknown", "solid_unknown", "unchanged_unknown", "unknown",
+))
+DARK_MAX_CHANNEL = 16
+MAX_INTERVALS = 64
 
 
 class WorldLabelError(ValueError):
@@ -55,23 +63,80 @@ class WorldLabelError(ValueError):
 
 
 def unreviewed_metrics(rows):
-    """Only exact known black hashes are identified without reviewed images."""
-    black = sum(row["distinct"] >= 0 and
-                row["hash"].lower() in KNOWN_BLACK_FRAME_HASHES for row in rows)
+    """Hashes identify some black and unchanged images, never their cause."""
+    details = []
+    previous = None
+    for row in rows:
+        hashed = row["distinct"] >= 0
+        signature = row["hash"].lower() if hashed else None
+        consecutive = (previous is not None and
+                       (row.get("flip") is None or previous.get("flip") is None or
+                        row["flip"] == previous["flip"] + 1))
+        if signature in KNOWN_BLACK_FRAME_HASHES:
+            category = "known_black"
+        elif (consecutive and row["distinct"] == 0 and
+              previous["distinct"] >= 0 and signature == previous["hash"].lower()):
+            category = "unchanged_unknown"
+        else:
+            category = "unknown"
+        details.append({"classification": category, "flip": row.get("flip"), "t": row.get("t")})
+        previous = row
+    black = sum(frame["classification"] == "known_black" for frame in details)
     return {
         "status": "inconclusive",
         "source": "whole-frame hash metadata; no reviewed movement images",
-        "reason": "other frames, fades, invalid images, HUD, and world motion are unclassified",
+        "reason": ("Known-black and unchanged signatures do not establish an intentional "
+                   "fade, valid world, missing character, or presented pixels."),
         "frames": len(rows),
         "known_black_frames": black,
         "intentional_fade_frames": None,
+        "intentional_solid_frames": None,
         "invalid_frames": None,
-        "unknown_frames": len(rows) - black,
+        "unknown_frames": len(rows),
+        "unchanged_unknown_frames": sum(
+            frame["classification"] == "unchanged_unknown" for frame in details),
+        "unclassified_intervals": _unclassified_intervals(details),
         "reviewed_world_frames": 0,
         "reviewed_world_changes": 0,
         "reviewed_world_changes_per_second": None,
         "reviewed_world_low_1pct_fps": None,
         "reviewed_world_cadence": None,
+    }
+
+
+def _unclassified_intervals(details):
+    """Return bounded consecutive unclassified spans; times cover observed endpoints only."""
+    intervals = []
+    current = None
+    total = 0
+    for frame in details:
+        category, flip, timestamp = frame["classification"], frame.get("flip"), frame.get("t")
+        adjacent = (current is not None and category == current["classification"] and
+                    (flip is None or current["end_flip"] is None or
+                     flip == current["end_flip"] + 1))
+        if category not in UNCLASSIFIED:
+            current = None
+            continue
+        if not adjacent:
+            total += 1
+            current = {
+                "classification": category, "start_flip": flip, "end_flip": flip,
+                "start_t": timestamp, "end_t": timestamp, "frames": 0,
+            }
+            if len(intervals) < MAX_INTERVALS:
+                intervals.append(current)
+        current["frames"] += 1
+        current["end_flip"] = flip
+        current["end_t"] = timestamp
+    for interval in intervals:
+        start, end = interval["start_t"], interval["end_t"]
+        interval["observed_seconds"] = (
+            round(end - start, 3) if isinstance(start, (int, float)) and
+            isinstance(end, (int, float)) and math.isfinite(start) and math.isfinite(end)
+            and end >= start else None)
+    return {
+        "scope": "unclassified observed flips; endpoint spans exclude the trailing interval",
+        "intervals": intervals, "total": total, "omitted": total - len(intervals),
     }
 
 
@@ -236,7 +301,10 @@ def analyze_manifest(path):
             region_pixels, whole_changed = _pixel_changes(previous, image, mask, tolerance)
             raw_compared += 1
             raw_changed += region_pixels > 0
-        is_black = image is not None and all(low == high == 0 for low, high in image.getextrema())
+        extrema = image.getextrema() if image is not None else None
+        is_solid = extrema is not None and all(low == high for low, high in extrema)
+        is_black = is_solid and all(low == 0 for low, _ in extrema)
+        is_dark = extrema is not None and max(high for _, high in extrema) <= DARK_MAX_CHANNEL
         solid_black += is_black
 
         if label == "invalid":
@@ -247,6 +315,11 @@ def analyze_manifest(path):
             category, error = "unknown", "flip gap: the preceding frame is not available"
         elif label == "intentional_fade":
             category = "intentional_fade"
+        elif label == "intentional_solid":
+            if is_solid:
+                category = "intentional_solid"
+            else:
+                category, error = "invalid", "intentional-solid label conflicts with image pixels"
         elif is_black:
             if label in ("world", "world_changed", "world_static", "hud_only"):
                 category, error = "invalid", "world label conflicts with a solid-black image"
@@ -254,8 +327,13 @@ def analyze_manifest(path):
                 category = "known_black"
         elif label == "known_black":
             category, error = "invalid", "known-black label conflicts with image pixels"
-        elif label in ("unknown", "dark_unknown"):
-            category = label
+        elif is_solid and label in ("world", "world_changed", "world_static", "hud_only"):
+            category, error = "invalid", "world label conflicts with a solid image"
+        elif label == "dark_unknown":
+            category = "dark_unknown"
+        elif label == "unknown":
+            category = ("dark_unknown" if is_dark else "solid_unknown" if is_solid
+                        else "unchanged_unknown" if whole_changed is False else "unknown")
         elif label == "world":
             category = "world_baseline" if previous_category not in WORLD_CATEGORIES else "unknown"
             if category == "unknown":
@@ -283,6 +361,7 @@ def analyze_manifest(path):
             "flip": flip, "t": timestamp, "image": image_path, "label": label,
             "classification": category,
             "region_pixels_over_tolerance": region_pixels, "solid_black_pixels": is_black,
+            "solid_pixels": is_solid, "dark_pixels": is_dark,
             "reason": error,
         })
         previous, previous_category = image, category
@@ -294,18 +373,20 @@ def analyze_manifest(path):
             ("reviewer", "method", "region_validation", "alignment_validation",
              "presentation_validation"))
     )
-    classified = not (counts["invalid"] or counts["unknown"] or counts["dark_unknown"])
+    classified = not (counts["invalid"] or any(counts[category] for category in UNCLASSIFIED))
     duration = frames[-1]["t"] - frames[0]["t"]
     world_transitions = counts["world_changed"] + counts["world_static"] + counts["hud_only"]
-    eligible = review_complete and classified and aligned and duration > 0 and world_transitions > 0
+    eligible = (review_complete and classified and aligned and duration > 0 and
+                world_transitions > 0 and counts["world_changed"] > 0)
     cadence = _world_cadence(details) if eligible else None
     raw_complete = len(frames) > 1 and raw_compared == len(frames) - 1 and aligned
     return {
         "status": "reviewer_asserted" if eligible else "inconclusive",
         "reason": ("Individual labels and alignment are reviewer assertions, not an automated "
                    "proof of world FPS." if eligible else
-                   "Complete real-image labels and validated region, flip alignment, and "
-                   "presented-image source are required."),
+                   "Complete real-image labels, at least one reviewed world change, and "
+                   "validated region, flip alignment, and presented-image source are required. "
+                   "Unexplained black, dark, solid, or unchanged frames remain inconclusive."),
         "review": review,
         "region": list(region), "exclude": [list(rect) for rect in exclusions],
         "image_dimensions": list(size) if size else None,
@@ -313,8 +394,11 @@ def analyze_manifest(path):
         "observed_solid_black_frames": solid_black,
         "known_black_frames": counts["known_black"],
         "intentional_fade_frames": counts["intentional_fade"],
+        "intentional_solid_frames": counts["intentional_solid"],
         "invalid_frames": counts["invalid"],
-        "unknown_frames": counts["unknown"] + counts["dark_unknown"],
+        "unknown_frames": sum(counts[category] for category in UNCLASSIFIED),
+        "unclassified_intervals": _unclassified_intervals(details),
+        "dark_heuristic": f"all RGB channels <= {DARK_MAX_CHANNEL}; not a fade or world classifier",
         "reviewed_world_frames": sum(counts[category] for category in WORLD_CATEGORIES),
         "reviewed_world_changes": counts["world_changed"],
         "reviewed_world_changes_per_second": (

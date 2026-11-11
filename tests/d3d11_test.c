@@ -1053,15 +1053,20 @@ static int scene_window_clip(const char *out_path, int program)
 {
     static const Pos p[4] = {{0, 0, 1, 1}, {64, 0, 1, 1},
                              {64, 64, 1, 1}, {0, 64, 1, 1}};
+    static const Pos near_quad[4] = {{0, 0, 0.25f, 1}, {64, 0, 0.25f, 1},
+                                     {64, 64, 0.25f, 1}, {0, 64, 0.25f, 1}};
+    static const Pos far_quad[4] = {{0, 0, 0.5f, 1}, {64, 0, 0.5f, 1},
+                                    {64, 64, 0.5f, 1}, {0, 64, 0.5f, 1}};
     static const uint32_t white[4] = {0xFFFFFFFFu, 0xFFFFFFFFu, 0xFFFFFFFFu, 0xFFFFFFFFu};
     static const uint32_t green[4] = {0xFF00FF00u, 0xFF00FF00u, 0xFF00FF00u, 0xFF00FF00u};
     static const float uv[4][2] = {{0, 0}, {0, 0}, {0, 0}, {0, 0}};
     uint32_t b = xbox_ContiguousAlloc(B_SIZE * B_SIZE * 4, 4096);
+    uint32_t z = xbox_ContiguousAlloc(B_SIZE * B_SIZE * 4, 4096);
     uint32_t vb = xbox_ContiguousAlloc(0x1000, 4096);
     FILE *f = fopen(out_path, "wb");
     unsigned i;
 
-    REQUIRE(b && vb && f, "initialize clipping fixture");
+    REQUIRE(b && z && vb && f, "initialize clipping fixture");
     identity_matrix();
     if (program)
         load_program();
@@ -1140,8 +1145,71 @@ static int scene_window_clip(const char *out_path, int program)
     clear(0xF0, 0xFF000000u, 0);
     draw(8, p, white, uv, 4, vb);
     REQUIRE(save_frame(f, b), "save empty exclusive frame");
+
+    method(0x02B4, 0);
+    method(0x02C0, bounds(0, 0));
+    method(0x02E0, bounds(0, 0));
+    method(0x02C4, bounds(63, 63));
+    method(0x02E4, bounds(63, 63));
+    clear(0xF0, 0xFF000000u, 0);
+    screen_quad(0xFFFFFFFFu);
+    REQUIRE(save_frame(f, b), "save inclusive one-pixel corners");
+    method(0x02B4, 1);
+    clear(0xF0, 0xFF000000u, 0);
+    draw(8, p, white, uv, 4, vb);
+    REQUIRE(save_frame(f, b), "save exclusive one-pixel corners");
+
+    method(0x02B4, 0);
+    method(0x02C0, bounds(60, 70));
+    method(0x02E0, bounds(60, 70));
+    method(0x02C4, bounds(3, 6));
+    method(0x02E4, bounds(30, 35));
+    clear(0xF0, 0xFF000000u, 0);
+    draw(8, p, white, uv, 4, vb);
+    REQUIRE(save_frame(f, b), "save rectangles crossing surface edges");
+    method(0x02C0, bounds(10, 20));
+    method(0x02E0, bounds(10, 20));
+    method(0x02C4, bounds(15, 25));
+    method(0x02E4, bounds(15, 25));
+    clear(0xF0, 0xFF000000u, 0);
+    screen_quad(0xFFFFFFFFu);
+    REQUIRE(save_frame(f, b), "save overlapping rectangle union");
+
+    surface(b, B_SIZE, z);
+    method(0x02C0, bounds(10, 19));
+    method(0x02E0, bounds(10, 19));
+    method(0x030C, 1);
+    method(0x0354, 0x201);
+    method(0x035C, 1);
+    clear(0xF3, 0xFF000000u, 0xFFFFFF00u);
+    draw(8, near_quad, white, uv, 4, vb);
+    method(0x02C0, bounds(0, 63));
+    method(0x02E0, bounds(0, 63));
+    draw(8, far_quad, green, uv, 4, vb);
+    REQUIRE(save_frame(f, b), "save clipped depth-write frame");
+
+    method(0x030C, 0);
+    method(0x035C, 0);
+    method(0x032C, 1);
+    method(0x0360, 0xFF);
+    method(0x0364, 0x207);
+    method(0x0368, 0x5A);
+    method(0x036C, 0xFF);
+    method(0x0370, 0x1E00);
+    method(0x0374, 0x1E00);
+    method(0x0378, 0x1E01);
+    clear(0xF3, 0xFF000000u, 0xFFFFFF00u);
+    method(0x02C0, bounds(10, 19));
+    method(0x02E0, bounds(10, 19));
+    draw(8, p, white, uv, 4, vb);
+    method(0x02C0, bounds(0, 63));
+    method(0x02E0, bounds(0, 63));
+    method(0x0364, 0x202);
+    method(0x0378, 0x1E00);
+    draw(8, p, green, uv, 4, vb);
+    REQUIRE(save_frame(f, b), "save clipped stencil-write frame");
     REQUIRE(fclose(f) == 0, "close clipping frames");
-    puts("window clip frames 12");
+    puts("window clip frames 18");
     return 1;
 }
 
@@ -1392,9 +1460,9 @@ static int scene_stencil_texture(const char *out_path, int program, int mip_prob
     clear(0xF0, 0xFF000000u, 0);
     draw(8, full, white, uv, 4, vb);
     REQUIRE(save_frame(f, b), "save uninitialized stencil rejection frame");
-    clear(2, 0, 0x000000FFu);
+    clear(3, 0, 0x445566FFu);
     draw(8, full, white, uv, 4, vb);
-    REQUIRE(save_frame(f, b), "save separately initialized depth and stencil frame");
+    REQUIRE(save_frame(f, b), "save fully reinitialized depth and stencil frame");
 
     if (program)
         method(0x1E94, 0);
@@ -1410,6 +1478,292 @@ static int scene_stencil_texture(const char *out_path, int program, int mip_prob
     }
     REQUIRE(fclose(f) == 0, "close packed depth frames");
     puts("packed depth frames 13");
+    return 1;
+}
+
+static int scene_depth_ownership(const char *out_path, int program, int depth_alias)
+{
+    static const Pos full[4] = {{0, 0, 0, 1}, {64, 0, 0, 1},
+                                 {64, 64, 0, 1}, {0, 64, 0, 1}};
+    static const uint32_t white[4] = {0xFFFFFFFFu, 0xFFFFFFFFu, 0xFFFFFFFFu, 0xFFFFFFFFu};
+    static const float uv[4][2] = {{0, 0}, {64, 0}, {64, 64}, {0, 64}};
+    const uint32_t bytes = B_SIZE * B_SIZE * 4;
+    uint32_t color = xbox_ContiguousAlloc(bytes, 4096);
+    uint32_t depth = xbox_ContiguousAlloc(bytes * 2, 4096);
+    uint32_t other_z = xbox_ContiguousAlloc(bytes, 4096);
+    uint32_t transition = xbox_ContiguousAlloc(bytes, 4096);
+    uint32_t dirty_color = xbox_ContiguousAlloc(bytes, 4096);
+    uint32_t clean_depth = xbox_ContiguousAlloc(bytes, 4096);
+    uint32_t guard_depth = xbox_ContiguousAlloc(bytes, 4096);
+    uint32_t bounds_depth = xbox_ContiguousAlloc(bytes, 4096);
+    uint32_t padded_depth = xbox_ContiguousAlloc(B_SIZE * (B_SIZE * 4 + 16), 4096);
+    uint32_t vb = xbox_ContiguousAlloc(4096, 4096);
+    uint32_t old_depth, short_depth, remaining;
+    BruteforceD3D11PipelineStats before, after;
+    Nv2aTexture texture, shadow, padded, clean_texture;
+    MEMORY_BASIC_INFORMATION guard;
+    DWORD old_protect, ignored;
+    unsigned x, y, levels;
+    FILE *f = fopen(out_path, "wb");
+
+    REQUIRE(color && depth && other_z && transition && dirty_color && clean_depth &&
+            guard_depth && bounds_depth && padded_depth && vb && f,
+            "allocate depth ownership fixture");
+    for (y = 0; y < B_SIZE; ++y)
+        for (x = 0; x < B_SIZE; ++x)
+            ((uint32_t *)guest(depth))[y * B_SIZE + x] = 0x11223344u;
+    memset(&texture, 0, sizeof texture);
+    texture.offset = depth;
+    texture.width = texture.height = B_SIZE;
+    texture.pitch = B_SIZE * 4;
+    texture.color = 0x41;
+    texture.levels = 1;
+    shadow = texture;
+    shadow.color = 0x2E;
+    identity_matrix();
+    if (program) load_program();
+    method(0x030C, 0);
+    method(0x035C, 0);
+    method(0x032C, 0);
+    surface(color, B_SIZE, depth);
+    clear_rect(0, 0, 63, 63);
+    combiners(0);
+    draw(8, full, white, uv, 4, vb);
+    REQUIRE(bruteforce_d3d11_test_pipeline(color, depth, &before) &&
+            !before.depth_gpu_dirty && before.depth_initialized == 3,
+            "guest seed starts with a clean depth owner");
+    texture_packed_depth(depth, B_SIZE, B_SIZE, B_SIZE * 4);
+    combiners(1);
+    clear(0xF0, 0xFF000000u, 0);
+    draw(8, full, white, uv, 4, vb);
+    REQUIRE(save_frame(f, color), "save initial checked depth seed");
+    REQUIRE(bruteforce_d3d11_test_pipeline(color, depth, &before) && before.packed_valid,
+            "initial packed conversion is cached");
+    for (y = 0; y < B_SIZE; ++y)
+        for (x = 0; x < B_SIZE / 2; ++x)
+            ((uint32_t *)guest(depth))[y * B_SIZE + x] = 0x55667788u;
+    bruteforce_d3d11_test_fail("depth-seed-race", 1);
+    REQUIRE(!bruteforce_d3d11_test_texture(&texture, 0, 0, &levels) &&
+            bruteforce_d3d11_test_pipeline(color, depth, &after) &&
+            after.depth_conflict && after.depth_revision == before.depth_revision,
+            "a raced seed retains the old owner and rejects its stale conversion");
+    REQUIRE(bruteforce_d3d11_test_texture(&texture, 0, 0, &levels) &&
+            bruteforce_d3d11_test_pipeline(color, depth, &after) &&
+            after.depth_revision != before.depth_revision &&
+            after.stencil_conversions == before.stencil_conversions + 1 &&
+            !after.depth_gpu_dirty && !after.depth_conflict,
+            "guest changes transactionally reseed clean depth and invalidate conversion");
+    clear(0xF0, 0xFF000000u, 0);
+    draw(8, full, white, uv, 4, vb);
+    REQUIRE(save_frame(f, color), "save partially rewritten guest seed");
+
+    clear(3, 0, 0xA1B2C3D4u);
+    clear(0xF0, 0xFF000000u, 0);
+    draw(8, full, white, uv, 4, vb);
+    REQUIRE(save_frame(f, color), "save GPU-owned depth");
+    REQUIRE(bruteforce_d3d11_test_pipeline(color, depth, &before) && before.depth_gpu_dirty,
+            "GPU clear owns the depth planes");
+    ((uint32_t *)guest(depth))[0] ^= 0x00000100u;
+    clear(0xF0, 0xFF19334Du, 0);
+    draw(8, full, white, uv, 4, vb);
+    REQUIRE(save_frame(f, color), "save rejected conflicting draw");
+    REQUIRE(!bruteforce_d3d11_test_texture(&texture, 0, 0, &levels) &&
+            (!depth_alias || !bruteforce_d3d11_test_texture(&shadow, 0, 0, &levels)) &&
+            bruteforce_d3d11_test_pipeline(color, depth, &after) &&
+            after.depth_conflict && after.depth_revision == before.depth_revision,
+            "guest/GPU conflict rejects bound packed and depth views");
+    clear_rect(0, 0, 31, 31);
+    clear(3, 0, 0);
+    clear_rect(0, 0, 63, 63);
+    clear(1, 0, 0);
+    REQUIRE(bruteforce_d3d11_test_pipeline(color, depth, &after) &&
+            after.depth_conflict && after.depth_revision == before.depth_revision,
+            "partial and single-plane clears cannot recover conflicting ownership");
+    bruteforce_d3d11_test_fail("depth-baseline-race", 1);
+    clear(3, 0, 0xDEADBEEFu);
+    REQUIRE(bruteforce_d3d11_test_pipeline(color, depth, &after) &&
+            after.depth_conflict && after.depth_revision == before.depth_revision,
+            "a raced full-clear baseline is not committed");
+    clear(3, 0, 0xDEADBEEFu);
+    REQUIRE(bruteforce_d3d11_test_pipeline(color, depth, &after) &&
+            !after.depth_conflict && after.depth_initialized == 3 &&
+            after.depth_revision == before.depth_revision + 1,
+            "full depth and stencil clear establishes a fresh baseline");
+    clear(0xF0, 0xFF000000u, 0);
+    draw(8, full, white, uv, 4, vb);
+    REQUIRE(save_frame(f, color), "save recovered packed depth");
+
+    surface(color, B_SIZE, other_z);
+    clear(0xF3, 0xFF000000u, 0x11111111u);
+    ((uint32_t *)guest(depth))[B_SIZE * B_SIZE - 1] ^= 1u;
+    clear(0xF0, 0xFF19334Du, 0);
+    draw(8, full, white, uv, 4, vb);
+    REQUIRE(save_frame(f, color), "save rejected unbound conflicting alias");
+    REQUIRE(!bruteforce_d3d11_test_texture(&texture, 0, 0, &levels),
+            "unbound conflicting depth cannot be sampled");
+    surface(color, B_SIZE, depth);
+    clear(3, 0, 0x2468AC5Au);
+    clear(0xF0, 0xFF000000u, 0);
+    draw(8, full, white, uv, 4, vb);
+    REQUIRE(save_frame(f, color), "save recovered unbound depth");
+
+    old_depth = depth;
+    REQUIRE(xbox_ContiguousFree(depth), "free previous GPU depth allocation");
+    REQUIRE(!bruteforce_d3d11_test_texture(&texture, 0, 0, &levels),
+            "a freed GPU-owned depth allocation cannot be sampled");
+    surface(color, B_SIZE, depth);
+    clear(3, 0, 0);
+    REQUIRE(bruteforce_d3d11_test_pipeline(color, depth, &after) && after.depth_conflict,
+            "a full clear cannot recover a freed tracked allocation");
+    depth = xbox_ContiguousAlloc(bytes * 2, 4096);
+    REQUIRE(depth == old_depth, "reuse the old guest depth address");
+    for (y = 0; y < B_SIZE * B_SIZE; ++y)
+        ((uint32_t *)guest(depth))[y] = 0x778899AAu;
+    texture.offset = shadow.offset = depth;
+    surface(color, B_SIZE, depth);
+    texture_packed_depth(depth, B_SIZE, B_SIZE, B_SIZE * 4);
+    clear(0xF0, 0xFF000000u, 0);
+    draw(8, full, white, uv, 4, vb);
+    REQUIRE(save_frame(f, color), "save new allocation at reused depth address");
+    REQUIRE(bruteforce_d3d11_test_pipeline(color, depth, &after) &&
+            !after.depth_gpu_dirty && !after.depth_conflict,
+            "new tracked allocation does not inherit old GPU ownership");
+
+    surface(transition, B_SIZE, 0);
+    clear(0xF0, 0xFF334455u, 0);
+    REQUIRE(bruteforce_d3d11_test_pipeline(transition, 0, &after) && !after.gpu_dirty,
+            "full color clear leaves a guest-coherent owner");
+    surface(color, B_SIZE, transition);
+    texture_packed_depth(transition, B_SIZE, B_SIZE, B_SIZE * 4);
+    clear(0xF0, 0xFF000000u, 0);
+    draw(8, full, white, uv, 4, vb);
+    REQUIRE(save_frame(f, color), "save clean color-to-depth transition");
+
+    surface(dirty_color, B_SIZE, 0);
+    combiners(0);
+    draw(8, full, white, uv, 4, vb);
+    REQUIRE(bruteforce_d3d11_test_pipeline(dirty_color, 0, &after) && after.gpu_dirty,
+            "create a GPU-owned color surface");
+    surface(color, B_SIZE, dirty_color);
+    clear(3, 0, 0);
+    REQUIRE(!bruteforce_d3d11_test_pipeline(color, dirty_color, &after),
+            "GPU-owned color cannot silently become depth");
+
+    surface(color, B_SIZE, depth);
+    clear(3, 0, 0x12345678u);
+    REQUIRE(bruteforce_d3d11_test_texture(&texture, 0, 0, &levels) &&
+            bruteforce_d3d11_test_pipeline(color, depth, &before) &&
+            before.depth_gpu_dirty && before.packed_valid,
+            "capture the dirty owner before unsupported layout transitions");
+    method(0x0208, 0x118);                         /* linear Z16 */
+    clear(0xF3, 0xFF123456u, 0);
+    REQUIRE(bruteforce_d3d11_test_pipeline(color, depth, &after) &&
+            after.depth_revision == before.depth_revision && after.packed_valid &&
+            after.depth_gpu_dirty && !after.depth_conflict,
+            "Z16 transition cannot discard or clear the dirty D24S8 owner");
+    method(0x0208, 0x228);                         /* swizzled Z24S8 */
+    clear(0xF3, 0xFF123456u, 0);
+    REQUIRE(bruteforce_d3d11_test_pipeline(color, depth, &after) &&
+            after.depth_revision == before.depth_revision && after.packed_valid &&
+            after.depth_gpu_dirty && !after.depth_conflict,
+            "swizzled transition cannot discard or clear the dirty D24S8 owner");
+    surface(color, B_SIZE, depth);
+    REQUIRE(bruteforce_d3d11_test_texture(&texture, 0, 0, &levels),
+            "the original D24S8 owner remains available after rejected transitions");
+    surface(depth + 4, B_SIZE, 0);
+    clear(0xF0, 0xFF000000u, 0);
+    REQUIRE(!bruteforce_d3d11_test_pipeline(depth + 4, 0, &after),
+            "partial color alias cannot replace GPU-owned depth");
+    surface(depth, B_SIZE, 0);
+    clear(0xF0, 0xFF000000u, 0);
+    REQUIRE(!bruteforce_d3d11_test_pipeline(depth, 0, &after),
+            "exact color alias cannot replace GPU-owned depth");
+
+    surface(color, B_SIZE, clean_depth);
+    combiners(0);
+    draw(8, full, white, uv, 4, vb);
+    REQUIRE(bruteforce_d3d11_test_pipeline(color, clean_depth, &after) &&
+            !after.depth_gpu_dirty, "create a clean depth owner");
+    clean_texture = texture;
+    clean_texture.offset = clean_depth;
+    texture_packed_depth(clean_depth, B_SIZE, B_SIZE, B_SIZE * 4);
+    REQUIRE(xbox_ContiguousFree(clean_depth) &&
+            !bruteforce_d3d11_test_texture(&clean_texture, 0, 0, &levels),
+            "a freed clean depth owner cannot be reseeded from unallocated bytes");
+    surface(clean_depth, B_SIZE, 0);
+    clear(0xF0, 0xFF556677u, 0);
+    REQUIRE(!bruteforce_d3d11_test_pipeline(clean_depth, 0, &after),
+            "a freed clean depth owner cannot become a color surface");
+    REQUIRE(xbox_ContiguousAlloc(bytes, 4096) == clean_depth,
+            "reuse the clean depth allocation");
+    surface(color, B_SIZE, clean_depth);
+    combiners(0);
+    draw(8, full, white, uv, 4, vb);
+    surface(clean_depth, B_SIZE, 0);
+    clear(0xF0, 0xFF556677u, 0);
+    REQUIRE(bruteforce_d3d11_test_pipeline(clean_depth, 0, &after) &&
+            !bruteforce_d3d11_test_pipeline(0, clean_depth, &after),
+            "clean depth may transition to a color owner");
+
+    memset(guest(padded_depth), 0x5C, B_SIZE * (B_SIZE * 4 + 16));
+    surface(color, B_SIZE, padded_depth);
+    method(0x020C, B_SIZE * 4 | (B_SIZE * 4 + 16) << 16);
+    draw(8, full, white, uv, 4, vb);
+    padded = texture;
+    padded.offset = padded_depth;
+    padded.pitch = B_SIZE * 4 + 16;
+    texture_packed_depth(padded_depth, B_SIZE, B_SIZE, padded.pitch);
+    REQUIRE(bruteforce_d3d11_test_texture(&padded, 0, 0, &levels) &&
+            bruteforce_d3d11_test_pipeline(color, padded_depth, &before) &&
+            !before.depth_gpu_dirty, "capture padded clean depth");
+    ((uint8_t *)guest(padded_depth))[B_SIZE * 4] ^= 1u;
+    REQUIRE(bruteforce_d3d11_test_texture(&padded, 0, 0, &levels) &&
+            bruteforce_d3d11_test_pipeline(color, padded_depth, &after) &&
+            after.depth_revision != before.depth_revision,
+            "a write in row padding invalidates the clean depth snapshot");
+    clear(3, 0, 0x11223344u);
+    ((uint8_t *)guest(padded_depth))[B_SIZE * 4 + 1] ^= 1u;
+    REQUIRE(!bruteforce_d3d11_test_texture(&padded, 0, 0, &levels),
+            "padding changes conflict with GPU-owned depth conservatively");
+    clear(3, 0, 0x55667788u);
+    REQUIRE(bruteforce_d3d11_test_texture(&padded, 0, 0, &levels),
+            "full depth clear recovers a padded guest snapshot");
+
+    REQUIRE(VirtualProtect(guest(guard_depth + 4096), 4096,
+                           PAGE_READWRITE | PAGE_GUARD, &old_protect),
+            "guard an interior depth page");
+    surface(color, B_SIZE, guard_depth);
+    clear(3, 0, 0x01020304u);
+    REQUIRE(bruteforce_d3d11_test_pipeline(color, guard_depth, &after) &&
+            after.depth_conflict &&
+            VirtualQuery(guest(guard_depth + 4096), &guard, sizeof guard) == sizeof guard &&
+            (guard.Protect & PAGE_GUARD), "guarded depth is rejected without consuming guard");
+    REQUIRE(VirtualProtect(guest(guard_depth + 4096), 4096, old_protect, &ignored),
+            "restore guarded depth page");
+    clear(3, 0, 0x01020304u);
+    REQUIRE(bruteforce_d3d11_test_pipeline(color, guard_depth, &after) &&
+            !after.depth_conflict && after.depth_initialized == 3,
+            "restored depth range accepts a full clear");
+
+    REQUIRE(xbox_GuestBoundsRegister(bounds_depth, 4096), "register short depth bounds");
+    surface(color, B_SIZE, bounds_depth);
+    clear(3, 0, 0);
+    REQUIRE(bruteforce_d3d11_test_pipeline(color, bounds_depth, &after) &&
+            after.depth_conflict, "registered short depth range is rejected");
+    REQUIRE(xbox_GuestBoundsUnregister(bounds_depth), "remove short depth bounds");
+    clear(3, 0, 0x01020304u);
+    REQUIRE(bruteforce_d3d11_test_pipeline(color, bounds_depth, &after) &&
+            !after.depth_conflict, "valid range recovers after unregister and full clear");
+
+    short_depth = xbox_ContiguousAlloc(4096, 4096);
+    REQUIRE(short_depth && xbox_ContiguousBlockIdentity(short_depth, &remaining) && remaining == 4096,
+            "allocate a genuinely short depth range");
+    surface(color, B_SIZE, short_depth);
+    clear(3, 0, 0);
+    REQUIRE(bruteforce_d3d11_test_pipeline(color, short_depth, &after) &&
+            after.depth_conflict, "short allocation cannot seed or clear a depth owner");
+    REQUIRE(fclose(f) == 0, "close depth ownership frames");
+    puts("depth ownership frames 9");
     return 1;
 }
 
@@ -1587,6 +1941,7 @@ static int scene_depth_texture(const char *out_path, int program)
     REQUIRE(save_frame(f, b), "save fully-cleared resized-depth frame");
 
     surface(b, B_SIZE, growth_z);
+    clear(0xF0, 0xFF000000u, 0);
     method(0x0208, 0x228);                           /* swizzled surface is not a linear alias */
     clear(0xF3, 0xFF000000u, 0xC0000000u);
     draw_with_texcoords(8, p, white, &uv[0][0], 4, 4, vb);
@@ -3356,8 +3711,9 @@ static int test_pipeline_stencil(int program)
     surface(color, B_SIZE, depth + 4096);
     clear_rect(0, 0, 63, 63);
     clear(3, 0, 0x12345678u);
-    REQUIRE(!bruteforce_d3d11_test_texture(&texture, 0, 0, &levels),
-            "reject two overlapping tracked depth owners");
+    REQUIRE(!bruteforce_d3d11_test_pipeline(color, depth + 4096, &after) &&
+            bruteforce_d3d11_test_texture(&texture, 0, 0, &levels),
+            "reject a second overlapping depth owner without losing the first");
     puts("packed revision and overlap guards verified");
     return 1;
 }
@@ -3400,7 +3756,8 @@ int main(int argc, char **argv)
     SetErrorMode(SEM_NOGPFAULTERRORBOX | SEM_FAILCRITICALERRORS);
     if (argc != 4)
         return 2;
-    if ((strstr(argv[2], "texture-lifetime") || strstr(argv[2], "color-alias")) &&
+    if ((strstr(argv[2], "texture-lifetime") || strstr(argv[2], "color-alias") ||
+         strstr(argv[2], "ownership-stencil")) &&
         _putenv_s("RECOMP_HEAP_RECLAIM", "1") != 0)
         return 1;
     perf_mode = strcmp(argv[2], "gpu-perf-counters") == 0;
@@ -3510,6 +3867,9 @@ int main(int argc, char **argv)
         return test_pipeline_producer_failure(argv[2], argv[3]) ? 0 : 1;
     if (strstr(argv[2], "pipeline-scaled-z-overlap"))
         return test_pipeline_scaled_depth_overlap() ? 0 : 1;
+    if (strstr(argv[2], "ownership-stencil"))
+        return scene_depth_ownership(argv[3], strstr(argv[2], "vsh") != NULL,
+                                     strstr(argv[2], "depth") != NULL) ? 0 : 1;
     if (strstr(argv[2], "pipeline-stencil"))
         return test_pipeline_stencil(strstr(argv[2], "vsh") != NULL) ? 0 : 1;
     if (strcmp(argv[2], "gpu-cache-keys") == 0)

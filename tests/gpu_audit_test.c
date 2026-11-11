@@ -24,6 +24,7 @@ extern void nv2a_pb_exec_method(uint32_t subch, uint32_t method, uint32_t param)
 static char s_events[128];
 static unsigned s_event_count;
 static int s_accept_vsh, s_bad_callback;
+static unsigned s_expected_extended = 3;
 
 static void event(char value)
 {
@@ -52,7 +53,7 @@ static void fake_base(const Nv2aSurface *surface, const Nv2aBatch *batch)
 
 static void fake_extended(const Nv2aSurface *surface, const Nv2aXBatch *batch)
 {
-    if (!surface || !batch || !batch->vertices || batch->count != 3)
+    if (!surface || !batch || !batch->vertices || batch->count != s_expected_extended)
         s_bad_callback = 1;
     event('E');
 }
@@ -368,6 +369,57 @@ static int missing_program(const char *xbe)
     return 1;
 }
 
+static int geometry_semantics(const char *xbe, int backend)
+{
+    static const float vertices[3][4] = {
+        {0, 0, 0.5f, 1}, {16, 0, 0.5f, 1}, {0, 16, -0.5f, 1}
+    };
+    uint32_t surface, depth, vb;
+    REQUIRE(initialize(xbe), "initialize geometry fixture");
+    surface = xbox_ContiguousAlloc(4096, 4096);
+    depth = xbox_ContiguousAlloc(4096, 4096);
+    vb = xbox_ContiguousAlloc(4096, 4096);
+    REQUIRE(surface && depth && vb, "allocate geometry fixture buffers");
+    if (backend) {
+        s_expected_extended = 6;
+        nv2a_backend_ext_register(&s_extended);
+        nv2a_backend_register(&s_backend);
+    }
+    method(0x0200, 16u << 16);
+    method(0x0204, 16u << 16);
+    method(0x0208, 0x128);
+    method(0x020C, 64u | 64u << 16);
+    method(0x0210, surface - XBOX_CONTIG_BASE);
+    method(0x0214, depth - XBOX_CONTIG_BASE);
+    method(0x1720, vb - XBOX_CONTIG_BASE);
+    method(0x1760, 0x1042);
+    memcpy(guest(vb), vertices, sizeof vertices);
+    set_program();
+    if (getenv("RECOMP_FRAME_TRACE")) {
+        method(0x012C, 0);
+        method(0x0130, 0);
+    }
+    method(0x1B00, depth - XBOX_CONTIG_BASE);
+    method(0x1B04, 2u << 4 | 0x2Eu << 8 | 1u << 16);
+    method(0x1B10, 64u << 16);
+    method(0x1B1C, 16u << 16 | 16u);
+    method(0x1B0C, 0x80000000u);
+    method(0x1D7C, 1);
+    immediate(2, 4);
+    s_accept_vsh = 0;
+    array_draw(5, 3);
+    method(0x1B04, 2u << 4 | 0x41u << 8 | 1u << 16);
+    s_accept_vsh = backend;
+    array_draw(5, 3);
+    if (getenv("RECOMP_FRAME_TRACE")) {
+        method(0x012C, 0);
+        method(0x0130, 0);
+    }
+    REQUIRE(!s_bad_callback, "geometry callback and post-clip size");
+    puts("GPU audit geometry semantics verified");
+    return 1;
+}
+
 static DWORD WINAPI report_thread(void *unused)
 {
     unsigned i;
@@ -415,6 +467,10 @@ int main(int argc, char **argv)
         return rejection_and_offscreen(argv[1]) ? 0 : 1;
     if (!strcmp(argv[2], "missing-program"))
         return missing_program(argv[1]) ? 0 : 1;
+    if (!strcmp(argv[2], "geometry"))
+        return geometry_semantics(argv[1], 0) ? 0 : 1;
+    if (!strcmp(argv[2], "geometry-backend"))
+        return geometry_semantics(argv[1], 1) ? 0 : 1;
     if (!strcmp(argv[2], "snapshot"))
         return report_snapshot() ? 0 : 1;
     return 2;

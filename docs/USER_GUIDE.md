@@ -580,18 +580,20 @@ title.
 `RECOMP_GPU_DEPTH_TEXTURE=1` enables experimental `LIN_D24S8` depth-texture
 aliases on D3D11. It only accepts exact matches to GPU-created D24S8 surfaces
 with matching linear layout, dimensions and pitch. New eligible surfaces
-are seeded from guest memory; a full-surface GPU depth clear also initializes
-them.
-Recreated surfaces are not reseeded from potentially stale guest memory and
-must receive a full-surface depth clear before sampling. Sampling a currently
-bound depth target uses a GPU snapshot; PROJECT2D and PROJECT3D apply the shadow comparison
-function on extended draws; base draws only support PROJECT2D. Guest writes,
-partially overlapping aliases, depth cube textures, multiple mip levels,
-other depth formats, and CPU reference decoding are not supported. Draws
-using rejected depth aliases or stage modes are skipped with a diagnostic.
-The option is off by default and has not established original-hardware
-equivalence. It cannot be combined with an active render scale. The depth
-alias option itself does not change readback or synchronization.
+are seeded from checked guest memory, including row padding and allocation
+identity. A changed clean owner is recreated and reseeded; a changed
+GPU-dirty owner, guarded/short span or conflicting overlap is rejected.
+A stable full-surface clear of both depth and stencil can rebaseline a live
+owner; partial or single-plane clears cannot. Sampling a currently bound
+depth target uses a GPU snapshot; PROJECT2D and PROJECT3D apply the shadow
+comparison function on extended draws; base draws only support PROJECT2D.
+Partially overlapping aliases, depth cubes, multiple mip levels and other
+depth formats remain unsupported. Draws using rejected depth aliases or stage
+modes are skipped with a diagnostic. The option is off by default and has not
+established original-hardware equivalence. It cannot be combined with an
+active render scale. With this option on but packed-stencil aliasing off,
+a `0x41` texture over tracked depth is rejected rather than reading
+potentially stale guest bytes; with both options off, legacy behavior remains.
 
 `RECOMP_GPU_STENCIL_ALIAS=1` separately enables experimental packed D24S8
 sampling when a `0x41` texture exactly aliases a tracked GPU depth surface.
@@ -601,11 +603,19 @@ are rejected rather than read from stale guest memory, including recognized
 physical and tiled RAM aliases and unsupported formats over tracked depth.
 Ordinary non-overlapping `0x41` textures are unchanged. Read-only draw
 states preserve a packed conversion; potentially writing draws invalidate it
-even when no fragment ultimately writes. Guest writes and partially overlapping aliases
-remain unsupported. A synthetic replay of the traced bright-pass state shows
+even when no fragment ultimately writes. The same conservative guest-span
+checks apply; conflicting partial aliases remain unsupported. A synthetic
+replay of the traced bright-pass state shows
 how stale stencil bytes could exaggerate glow, but the effect on the reported
 gameplay bloom and original-hardware fidelity remain unestablished. It cannot
 be combined with an active render scale.
+
+Neither alias switch establishes a synchronized guest-write/read contract.
+Same-value writes, concurrent writes after a check, unregistered
+suballocations and guest reads of GPU-owned depth can evade detection. The CPU
+reference cannot decode `0x2E`, reads `0x41` from guest bytes, uses a separate
+float depth buffer and does not model stencil. Audit format bindings alone do
+not prove sampling or visible effects.
 
 `RECOMP_GPU_DIRECT_PRESENT=1` lets the D3D11 renderer hand a finished
 32-bit GPU surface, whose dimensions may differ from the guest framebuffer,
@@ -668,6 +678,13 @@ with alpha 0 or 255. This is a diagnostic, not a detector for every black or
 dark frame; intentional fades can match too. Pixel-distinct fps, including HUD
 changes, is not necessarily distinct world fps.
 
+Every successful `--scene movement` collection is marked `inconclusive` in
+`result.json` and `summary.json` and exits with status **2**, even if its data
+were collected successfully. Failed collection exits **1**. Hash metadata
+reports bounded unclassified black/unchanged intervals, not a cause or a
+success-shaped world rate. Record these exit codes in automation rather than
+treating 2 as a renderer crash.
+
 `--capture-world` records movement flips for later review and names each
 `holdNNNNNNNNNN.bmp` with the corresponding `flip` in `frames.csv`. These are
 guest-surface snapshots, not proof of what the window displayed: overlays,
@@ -684,12 +701,31 @@ letterboxed tutorial cutscene at a frame-rate-dependent time. This keeps panel
 dismissal and scene content fixed rather than relying on adaptive A presses;
 captured runs must still be reviewed to confirm the panel and cutscene are
 absent.
-When every frame is classified and the review metadata is complete, the
-offline analyzer reports reviewer-asserted world changes per second plus
+Offline analysis uses a separately completed manifest:
+
+```powershell
+python tools\bench.py --analyze-world path\to\reviewed-labels.json
+```
+
+Labels `intentional_fade` and `intentional_solid` require explicit review;
+solid images labelled as such must actually be solid. Output categories
+`known_black`, `dark_unknown`, `solid_unknown`, and `unchanged_unknown`
+remain unclassified.
+The dark heuristic means every RGB channel of the whole image is at most 16,
+not that the world or character is missing. The report lists up to 64
+unclassified intervals plus the omitted count; its durations are observed
+endpoint spans, not inferred time after the last flip.
+
+When every frame is classified, the review metadata is complete and at least
+one world change is verified, the offline analyzer reports reviewer-asserted
+world changes per second plus
 baseline-to-change and change-to-change frame-time percentiles and a 1% low.
 Static-world and HUD-only flips remain inside those intervals. Fades, invalid
 frames and unreviewed gaps break the cadence, and a trailing incomplete
-interval is not counted as a completed world frame.
+interval is not counted as a completed world frame. This analyzer exits **0**
+for `reviewer_asserted`, **2** for `inconclusive`, and **1** for invalid input.
+Review assertions do not prove physical scanout or independently establish
+which pixels reached the display.
 Phase frame metrics include `frame_ms_max` as well as p50, p90, p99, and the
 1% low. Structured runtime diagnostics summarize cache compile and hit counts,
 total time, and maximum request time from `[GPU-PSCACHE]` events. Cold compile
@@ -717,7 +753,13 @@ resolved path in that attempt's metadata and fails the attempt when the
 post-window report is missing or incomplete. Do not pass
 `RECOMP_GPU_AUDIT_FILE` in a variant: one shared path could let attempts
 overwrite each other and is rejected. Audit CSVs can contain guest addresses;
-keep them local.
+keep them local. `batch_geometry` and `post_clip_triangles` distinguish CPU
+post-clip output from GPU pre-clip submissions; non-dropped visibility is
+unknown. Dropped `batch_geometry` rows, `unsupported_state` and
+`recent_method_for_drop` provide bounded temporal context, not evidence that
+a method caused a visible defect.
+`cpu_depth_binding` counts exact current-zeta addresses at request time, not
+successful texture samples.
 
 The default-off E1 camera diagnostic uses:
 
@@ -810,7 +852,10 @@ Remove-Item Env:\RECOMP_WINDOW_CLIP
 This is disabled by default and has not been validated against original
 hardware during gameplay. Before both clip axes have been programmed, this
 implementation leaves clipping inactive; the hardware's initial state still
-needs investigation. Other registered draw backends must advertise support
+needs investigation. Expanded synthetic CPU, WARP and hardware fixtures
+cover rectangle unions/exclusions, AA, scale, vertex paths, clears and GPU
+depth/stencil discard side effects; the CPU reference does not model stencil.
+Other registered draw backends must advertise support
 for window clips or the executor stops with an error. This option is not a
 4K mode.
 

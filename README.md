@@ -58,7 +58,10 @@ independent, default-off foreground-only Windows display-awake experiment; it
 is not a launcher default.
 
 True Hor+ widescreen is not implemented; internal-resolution choices retain
-the 4:3 picture. The camera trace is diagnostic only.
+the 4:3 picture. The camera trace is diagnostic only. Initial widescreen work
+is scoped to proven single-view scenes; split-screen reference, layout,
+widescreen and performance work are deferred, and no split-screen support is
+claimed.
 
 The pinned framework has been updated to xboxrecomp v0.17.0 plus selected
 post-release fixes. Integrated Release generation

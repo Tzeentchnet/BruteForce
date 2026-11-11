@@ -229,8 +229,10 @@ unavailable in the fixture report.
   collection or incomplete review is inconclusive, not world FPS.
 
 The matched Basic Controls evidence and historical A/B/A measurements below
-remain unchanged. Future matched sun-facing, opening-fade, movement and
-split-screen evidence still requires an operator, and G4 remains open.
+remain unchanged. Future matched sun-facing, opening-fade and movement
+evidence still requires an operator, and G4 remains open. Split-screen
+reference and equivalence work are explicitly deferred and are not a current
+G4 gate.
 
 ## Private xemu reference attempt (2026-10-30)
 
@@ -366,13 +368,15 @@ before the first flip, so no gamma presentation change was made.
 The stationary, turned and upward native frames establish reusable xemu
 reference views but are not frame-matched to project captures. The upward
 view is not independently classified as sun-facing, and a native
-end-of-opening-fade frame and split-screen layout remain uncollected. Later
-unattended attempts were stopped after foreground-focus failures and an
-undismissed Basic Controls overlay made their camera-sweep labels invalid.
-Those frames are excluded from the evidence set. Repeating full boots without
-an operator confirming each requested state would not add trustworthy
-evidence, so the remaining reference scenes are an explicit operator
-checkpoint rather than an unattended retry loop. The
+end-of-opening-fade frame and split-screen layout remain uncollected.
+Split-screen capture is now explicitly deferred and is not part of the
+remaining operator checkpoint. Later unattended attempts were stopped after
+foreground-focus failures and an undismissed Basic Controls overlay made
+their camera-sweep labels invalid. Those frames are excluded from the
+evidence set. Repeating full boots without an operator confirming each
+requested active state would not add trustworthy evidence, so the remaining
+sun-facing/fade reference scenes are an explicit operator checkpoint rather
+than an unattended retry loop. The
 ignored local evidence manifest records run provenance, inputs, hashes,
 comparison statistics and limitations under
 `analysis/xemu-reference-v017-20261111-0125/`; no capture or proprietary
@@ -2556,9 +2560,10 @@ throughout; its units, scene role and relation to the absent caller remain
 unverified.
 
 This route therefore supplies runtime classes for one caller but does not
-complete E2. Menus, movie/cutscene identity, the second caller, split screen,
-frustum rebuilds, projected markers and object/world/effect culling still
-need operator-classified coverage.
+complete E2. Menus, movie/cutscene identity, the second caller, frustum
+rebuilds, projected markers and object/world/effect culling still need
+operator-classified coverage. Split-screen caller and layout classification
+are explicitly deferred and are not part of E2.
 
 #### Hor+ implementation safety review
 
@@ -2603,8 +2608,8 @@ A first functional mode must be opt-in, D3D11-only and default to unchanged
 
 1. An aspect factor `K` independent of render scale `S`.
 2. Runtime classification of both perspective-builder callers and the
-   camera update path across gameplay, menus, movies, in-engine cutscenes and
-   split screen.
+   camera update path across supported single-view gameplay, menus, movies
+   and in-engine cutscenes.
 3. Hor+ projection plus matching frustum/object/world visibility. Projected
    HUD markers need an equivalent correction if the title uses them.
 4. A runtime census that identifies which full-screen colour/depth targets
@@ -2613,14 +2618,18 @@ A first functional mode must be opt-in, D3D11-only and default to unchanged
 5. Title-specific markers around verified 2D and movie submission
    boundaries, delivered by a generic executor/backend metadata hook.
 6. Per-view 2D remapping, including explicit treatment of full-view fades,
-   copied scene backdrops and split-screen centres.
+   and copied scene backdrops.
 7. Centred guest-sized readback and a wide shared presentation source.
    Frame dumps, frame statistics and any guest surface readers continue to
    receive their documented 4:3 guest view.
 8. An unchanged CPU 4:3 reference. First validate 4:3 A/B/A, then 16:9 and
    21:9 at matched scenes and scripted input. List side-region geometry,
-   culling, effects, HUD, movies and split-screen differences rather than
-   hiding them.
+   culling, effects, HUD and movie differences rather than hiding them.
+
+Split-screen widening, reference capture, layout classification and
+performance validation are deferred. They are not part of this first
+functional boundary, and single-view evidence must not be presented as
+split-screen support.
 
 The implemented first slice is diagnostic only: the opt-in trace records
 bounded call-site and camera-state candidates without changing matrices.

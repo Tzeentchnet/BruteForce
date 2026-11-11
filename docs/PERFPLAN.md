@@ -662,12 +662,15 @@ order:
 1. Alternating 4:3 A/B/A on one generation, scene and scripted input, with no
    intended output or timing change.
 2. Alternating 16:9 and 21:9 runs that compare the centre 4:3 region and
-   inspect newly visible side geometry, culling, effects, HUD, movies and
-   split screen.
+   inspect newly visible side geometry, culling, effects, HUD and movies.
 3. Performance reporting only after correctness: record the aspect, render
    scale, GPU, thread count and options, and report distinct world frames
    separately from flips. Wider output naturally increases pixel work and
    must not be compared with 4:3 as if the workload were equal.
+
+Split-screen widescreen behavior and performance validation are explicitly
+deferred. They are outside the current true-widescreen exit and G2-G5
+campaigns; do not report or imply split-screen support from single-view data.
 
 The mode does not relax G4, does not justify skipping guest readback before
 its consumers are replaced, and must not skip or prematurely satisfy flush,

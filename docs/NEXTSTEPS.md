@@ -89,11 +89,12 @@ Direct3D 12 work remain deferred. See
   reduces the fresh D3D11/xemu over-8/255 difference from 43.4320% to
   3.7119%; the single-run pair is correctness evidence, not a performance
   comparison. Stationary, turned and upward references are retained locally;
-  a confirmed sun-facing view, end-of-opening fade and split-screen layout
-  remain an operator checkpoint. Later unattended retries were stopped after
-  focus failures and an undismissed Basic Controls overlay invalidated their
-  camera-sweep labels; do not spend additional full boots on those states
-  without an operator confirming each capture. See
+  a confirmed sun-facing view and end-of-opening fade remain an operator
+  checkpoint. Split-screen reference capture and layout work are explicitly
+  deferred and are not an active completion gate. Later unattended retries
+  were stopped after focus failures and an undismissed Basic Controls overlay
+  invalidated their camera-sweep labels; do not spend additional full boots
+  on the remaining active states without an operator confirming each capture. See
   [FINDINGS](FINDINGS.md#native-xemu-reference-and-packed-stencil-match-2026-11-11).
 - Default-off presenter-source capture links Windows GDI and CPU-upload
   D3D11 submissions to verified flip records in synthetic tests, including
@@ -416,9 +417,10 @@ GPU methods in the CPU-path census.
    comparisons. Native stationary, turned and upward captures exist, and
    Basic Controls is matched without resizing, alignment or color correction.
    The remaining reference work is a confirmed sun-facing frame, the
-   end-of-opening fade and available split-screen layouts. Treat these as an
-   operator checkpoint: unattended retries that cannot verify the visible
-   state are not evidence and should not be repeated.
+   end-of-opening fade. Treat these as an operator checkpoint: unattended
+   retries that cannot verify the visible state are not evidence and should
+   not be repeated. Native split-screen references and layout classification
+   are deferred and do not block A2.
 3. **Mechanism established at Basic Controls; broader brightness, bloom and
    HUD validation remains.** Use hardware D3D11 and the existing user
    captures first to investigate why the HUD and glow can disappear together.
@@ -834,17 +836,20 @@ builder and camera aspect/tangent state that appear suitable, but their
 runtime roles and all culling paths are not yet classified.
 
 **Safety gate:** no Hor+ mode is enabled or exposed. The existing trace does
-not identify a gameplay-only caller, a safe full-screen view, or split
-screen. A matrix-only change cannot provide the requested 4:3 fallbacks or
-preserve title culling. The presenter reports only a fitted 4:3 size, and
-its shared frame can subsequently be rejected in favour of CPU pixels.
+not identify a gameplay-only caller or a safe full-screen view. It also does
+not classify split screen; split-screen widening is explicitly deferred, so
+an initial mode must remain off or use the existing 4:3 path whenever it
+cannot establish one supported full-screen view. A matrix-only change cannot
+provide the requested 4:3 fallbacks or preserve title culling. The presenter
+reports only a fitted 4:3 size, and its shared frame can subsequently be
+rejected in favour of CPU pixels.
 Implementing a wide mode requires a coherent per-frame picture/resize epoch
 and fallback contract as well as operator-classified title evidence; do not
 treat a requested aspect or a candidate viewport as proof of the displayed
 picture. The new synthetic fixtures cover trace state preservation for
 perspective-shaped and unchanged matrices and demonstrate the presenter's
-4:3 size collision; they do not implement or validate Hor+ or split-screen
-rejection.
+4:3 size collision; they do not implement or validate Hor+ or a fail-closed
+single-view eligibility guard.
 
 1. **Implemented; retail coverage pending: diagnostic-only camera trace.**
    `BRUTEFORCE_CAMERA_TRACE=1` wraps the central perspective builder and
@@ -858,9 +863,10 @@ rejection.
    It observed only caller `0x0006BE90`, four parent return classes and six
    candidate camera states; all matrices were readable and changed across the
    generated call. Caller `0x0006D240` did not appear. Runtime coverage still
-   needs operator-classified gameplay, menus, movies, in-engine cutscenes and
-   every available split-screen layout. The trace does not alter the matrix
-   or establish ownership by itself.
+   needs operator-classified gameplay, menus, movies and in-engine cutscenes.
+   Split-screen caller and layout classification are deferred and are not an
+   E1 gate. The trace does not alter the matrix or establish ownership by
+   itself.
 2. **Establish title ownership before choosing hooks.** Confirm where each
    gameplay camera's aspect and horizontal/vertical tangent are finalized,
    which routine rebuilds dependent frustum planes, and whether another
@@ -899,18 +905,21 @@ rejection.
    Compare the 4:3 centre against the reference and inspect the added side
    regions for missing objects, pop-in, effects, shadows and invalid
    geometry. Exercise menus, all movie paths, fades, HUD, projected markers,
-   cutscenes and split screen. Report distinct world frames separately from
-   flips and do not weaken flush, semaphore, report or flip ordering.
+   and cutscenes. Split-screen is outside the current acceptance matrix; do
+   not claim support, and keep the wide mode off or on the existing 4:3 path
+   for unsupported multi-view scenes. Report distinct world frames separately
+   from flips and do not weaken flush, semaphore, report or flip ordering.
 9. **Defer HUD-edge relocation.** A centred 4:3 HUD is the first correctness
    target. Moving selected panels to outer corners is optional title layout
    work after the base mode passes.
 
-*Done when:* 4:3 remains unchanged, the 16:9 and 21:9 centre matches the
-reference within the existing renderer's listed differences, newly visible
-side geometry survives matching title culling, HUD and movies retain their
-shape, guest readback remains 4:3, and split-screen behavior is documented.
+*Done when:* for the supported single-view scenes, 4:3 remains unchanged, the
+16:9 and 21:9 centre matches the reference within the existing renderer's
+listed differences, newly visible side geometry survives matching title
+culling, HUD and movies retain their shape, and guest readback remains 4:3.
+Split-screen support is a deferred follow-up, not part of this gate.
 
-## Decisions (settled 2026-10-30)
+## Decisions (settled 2026-10-30; updated 2026-11-11)
 
 1. **Rendering reference:** xemu, run on the same disc at matched states (A2).
 2. **DSP direction:** the xemu v0.8.139 DSP is implemented. Project-owned
@@ -931,15 +940,20 @@ shape, guest readback remains 4:3, and split-screen behavior is documented.
 7. **Widescreen:** pursue genuine Hor+ with matching culling and protected
    2D, not stretched output. Keep it default-off, D3D11-only and separate
    from internal resolution until E's gates pass.
+8. **Split screen:** defer native references, camera/layout classification,
+   Hor+ behavior and performance validation. It is not an active A2, E or
+   performance completion gate, and no split-screen support is claimed.
 
 Still open: access to a native 4K display. Optional 5.1 output is deferred.
 
 ## Order
 
-1. Complete A1 and E1-E2, then A2-A4 as the reference and gamma-ramp question
-   allow. The widescreen trace is diagnostic and must not change output.
-2. Implement E3-E8 behind one default-off mode, with a 4:3 regression gate
-   before wide output. Keep HUD relocation deferred.
+1. Complete A1 and the single-view E1-E2 scope, then A2-A4 as the reference
+   and gamma-ramp question allow. The widescreen trace is diagnostic and must
+   not change output.
+2. Implement the single-view E3-E8 scope behind one default-off mode, with a
+   4:3 regression gate before wide output. Keep HUD relocation and split
+   screen deferred.
 3. Continue B1-B10 behind switches with default scale-1 behavior unchanged.
 4. Run C's human listening pass against the stable scene from A; repeat
    automated audio probes only for a new symptom or materially different

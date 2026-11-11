@@ -257,7 +257,9 @@ This preserves HUD, text and movie proportions inside full-screen and
 split-screen views. Full-view fades, flashes and copies of an already-wide
 scene need explicit classification rather than a blanket 2D rule. Marker
 state is reset at every flip so a missing end marker is bounded to one
-frame.
+frame. The split-screen form is retained as future design context only;
+split-screen implementation and validation are deferred. Current widescreen
+work targets proven single full-screen views.
 
 At flip, the shared GPU source keeps the wide dimensions and the presenter
 fits that source aspect inside the client area. Guest memory, CPU captures
@@ -695,13 +697,16 @@ replace matched gameplay or original-hardware validation.
   change rates are not validated world FPS.
 - One native xemu Basic Controls scene is matched: the packed-stencil option
   reduces the large whole-frame brightness difference, while its unsupported
-  ownership cases and title-wide behavior keep G4 open. Sun-facing, fade,
-  movement and split-screen equivalence remain open. The CPU reference has
-  its own known stencil gap.
+  ownership cases and title-wide behavior keep G4 open. Sun-facing, fade and
+  movement equivalence remain open. Split-screen equivalence is explicitly
+  deferred and is not a current G4 gate. The CPU reference has its own known
+  stencil gap.
 - True widescreen remains an unimplemented, default-off workstream. It needs
   coordinated title projection/culling, ordered 2D classification, selective
   target widening, centred guest readback and aspect-aware presentation;
-  changing the framebuffer dimensions alone is not an acceptable mode.
+  changing the framebuffer dimensions alone is not an acceptable mode. The
+  current scope is single-view; split-screen widening remains unsupported and
+  deferred.
 - Guest reads and writes of GPU-owned surfaces, concurrent texture changes,
   generalized fence completion, and general on-demand readback need further
   investigation. A clean surface-guard diagnostic alone is insufficient to

@@ -1161,9 +1161,10 @@ own GPU back end, an extended interface for it, and its own pacing fixes.
     refresh upstream overlap with approval before action, preserve GPU
     contents across surface recreation, define partial and scaled aliases,
     and validate
-    matched movement, sun-facing, fade and split-screen scenes. The focused
-    same-generation pair is one run per variant and is correctness evidence,
-    not a performance result.
+    matched movement, sun-facing and fade scenes. Split-screen title
+    validation is deferred and is not a filing gate for this generic
+    ownership work. The focused same-generation pair is one run per variant
+    and is correctness evidence, not a performance result.
     *Status:* experimental project-only implementation.
 
 26. **Pass window clips to capable GPU back ends.**

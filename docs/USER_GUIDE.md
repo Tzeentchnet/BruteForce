@@ -938,6 +938,46 @@ ready-state token, and review captured intervals and matched CPU/D3D11 frames.
 Do not run this simultaneously with the texture-index comparison or report
 the retained census as a speedup.
 
+## Optional compiler-profile comparisons
+
+The supported default remains the ordinary Release build. Two experimental
+profiles build separate executables without overwriting it:
+
+```powershell
+python tools\build.py build --config Release --parallel 4 --compiler-profile ltcg
+python tools\build.py build --config Release --parallel 4 --compiler-profile avx2
+```
+
+`ltcg` enables `/GL` plus link-time code generation for title-executable
+sources. `avx2` enables `/arch:AVX2` for those sources and therefore requires a
+compatible host CPU. Profiles are Release-only, mutually exclusive, and kept
+under `build\compiler-ltcg` and `build\compiler-avx2`; the normal executable
+remains under `build\Release`. A successful build establishes neither
+correctness nor speed.
+
+When the higher-priority Phase 5 gates are complete and an operator can
+confirm every attempt, run each compiler candidate as its own campaign:
+
+```powershell
+python tools\bench.py --performance --compiler-comparison ltcg `
+  --scene movement --readiness manual `
+  --ready-state "Basic Controls popup fully visible at the initial tutorial spawn; no cinematic or briefing" `
+  --no-auto-panels --capture-world --profile-callers --runs 3 --retries 0
+
+python tools\bench.py --performance --compiler-comparison avx2 `
+  --scene movement --readiness manual `
+  --ready-state "Basic Controls popup fully visible at the initial tutorial spawn; no cinematic or briefing" `
+  --no-auto-panels --capture-world --profile-callers --runs 3 --retries 0
+```
+
+This mode owns both variants, alternates the default and selected profile,
+enables performance counters in both, and keeps every runtime performance
+switch off. Collection rejects changed generation/toolkit or per-profile
+binary identity. Offline performance review permits the two executable hashes
+to differ only because the recorded compiler profiles differ, and applies G4
+and G5 to the candidate binary. Skip cinematics and the mission briefing;
+never combine LTCG and AVX2 or infer performance from executable size.
+
 ## Experimental NV2A wait and segment options
 
 The current default-off Phase 4 implementation can replace the title's busy

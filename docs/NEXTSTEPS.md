@@ -9,7 +9,7 @@ toolkit uses xboxrecomp v0.17.0 at
 from #314, #319 and #320, and 43 local patches. Its isolated and independently
 replayed tree is `3e3ae3600802d2bf4446d86fc546322d60849047`.
 The framework tools on that tree report 995 passed, 2 skipped and 134
-subtests passed; the project suite reports 969 passed with WARP and the
+subtests passed; the project suite reports 972 passed with WARP and the
 available hardware adapter; eleven focused framework groups report 47 CTests
 passed; and the presenter suite reports 19 passed. The Phase 4 subset
 comprises 22 of those CTests, while generated-store coverage reports 3 passed
@@ -814,6 +814,15 @@ These are synthetic results, not a title comparison.
   campaign with `RECOMP_GPU_TEX_INDEX=0` held in both variants. Do not combine
   this measurement with the texture-index candidate or infer speedup from the
   census.
+- The supported compiler profile remains the ordinary Release build. Separate
+  `ltcg` and `avx2` Release profiles now build in isolated directories, apply
+  only to title-executable sources, cannot be combined, and carry exact
+  metadata. The multi-binary benchmark alternates default/candidate
+  executables and rejects runtime-switch changes or unstable hashes. Both
+  candidates compile, but neither has been started or matched against retail,
+  CPU/D3D11 output or performance. Run default/LTCG and default/AVX2 as
+  separate reviewed campaigns only after the higher-priority texture-index
+  and index-word gates; keep AVX2 optional because it narrows compatibility.
 - The fixed segment-only and all-three bring-up smokes reached reviewed
   movement once each without retry. The 24-run isolation/combined campaign is
   deferred; do not schedule the three poll/event pairs or the idle, segment

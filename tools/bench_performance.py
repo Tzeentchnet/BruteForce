@@ -6,6 +6,9 @@ baseline_labels, candidate_labels, matched=true, start_match, end_match and
 interval_match. Paths are relative to the manifest. ``native`` optionally
 supplies labels, matched=true and evidence. ``g4`` and ``g5`` are separate
 reviewed correctness/headroom evidence; absent evidence is inconclusive.
+Compiler comparisons may use distinct stable executable hashes only when the
+baseline is the default profile, the candidate is exactly LTCG or AVX2, and
+all runtime performance switches remain off.
 """
 
 import math
@@ -32,6 +35,26 @@ def _identity(run):
             type(values[3]) is not int or values[3] < 1):
         raise bench_match.MatchError("missing generation, toolkit tree, executable hash or thread count")
     return values
+
+
+def _base_identity(run):
+    values = (run.get("generation"), run.get("toolkit_tree"), run.get("threads"))
+    if (not all(values) or not re.fullmatch(r"[0-9a-fA-F]{40}", str(values[1])) or
+            type(values[2]) is not int or values[2] < 1):
+        raise bench_match.MatchError("missing generation, toolkit tree or thread count")
+    return values
+
+
+def _compiler_profile(run):
+    profile = (run.get("options") or {}).get("compiler_profile", "default")
+    if profile not in ("default", "ltcg", "avx2"):
+        raise bench_match.MatchError("missing or invalid compiler profile")
+    return profile
+
+
+def _comparison_options(run):
+    return {key: value for key, value in run["options"].items()
+            if key != "compiler_profile"}
 
 
 def _clean_shutdown(run):
@@ -317,7 +340,9 @@ def _compare(path, movement_input):
     if not isinstance(pairs, list) or len(pairs) < 3:
         raise bench_match.MatchError("at least three reviewed alternating pairs are required")
     entries, numbers, baseline_runs, candidate_runs = [], [], [], []
-    campaign = identity = common = candidate_switches = image_identity = None
+    campaign = base_identity = baseline_identity = candidate_identity = None
+    baseline_profile = candidate_profile = compiler_comparison = None
+    common = candidate_switches = image_identity = None
     for pair in pairs:
         if not isinstance(pair, dict) or pair.get("matched") is not True:
             raise bench_match.MatchError("each pair requires matched-state review")
@@ -335,18 +360,53 @@ def _compare(path, movement_input):
         if bn != an + 1:
             raise bench_match.MatchError("baseline/candidate runs must be adjacent in A/B order")
         numbers.extend((an, bn))
-        current_identity = _identity(a)
-        if current_identity != _identity(b) or (identity is not None and current_identity != identity):
-            raise bench_match.MatchError("generation, toolkit, executable and thread count must match")
-        identity = current_identity
-        if any(_switches(a)) or not any(_switches(b)):
+        current_base = _base_identity(a)
+        if current_base != _base_identity(b) or (
+                base_identity is not None and current_base != base_identity):
+            raise bench_match.MatchError("generation, toolkit and thread count must match")
+        base_identity = current_base
+        current_baseline_identity, current_candidate_identity = _identity(a), _identity(b)
+        current_baseline_profile, current_candidate_profile = (
+            _compiler_profile(a), _compiler_profile(b))
+        pair_compiler = (
+            current_candidate_profile
+            if current_baseline_profile == "default" and
+            current_candidate_profile in ("ltcg", "avx2")
+            else None
+        )
+        if pair_compiler:
+            if (any(_switches(a)) or any(_switches(b)) or
+                    current_baseline_identity[2] == current_candidate_identity[2]):
+                raise bench_match.MatchError(
+                    "compiler comparison requires distinct binaries with all runtime switches off")
+        elif current_baseline_profile != current_candidate_profile:
+            raise bench_match.MatchError("compiler profiles do not form a supported comparison")
+        elif (current_baseline_identity != current_candidate_identity or
+                any(_switches(a)) or not any(_switches(b))):
             raise bench_match.MatchError("expected an all-off baseline and an enabled candidate")
+        if compiler_comparison is not None and pair_compiler != compiler_comparison:
+            raise bench_match.MatchError("compiler candidate changed across pairs")
+        if compiler_comparison is None and baseline_identity is not None and pair_compiler:
+            raise bench_match.MatchError("runtime and compiler comparisons cannot be combined")
+        compiler_comparison = pair_compiler
+        if (baseline_identity is not None and
+                current_baseline_identity != baseline_identity) or (
+                candidate_identity is not None and
+                current_candidate_identity != candidate_identity):
+            raise bench_match.MatchError("per-profile executable identity changed across pairs")
+        baseline_identity = current_baseline_identity
+        candidate_identity = current_candidate_identity
+        if (baseline_profile is not None and current_baseline_profile != baseline_profile) or (
+                candidate_profile is not None and current_candidate_profile != candidate_profile):
+            raise bench_match.MatchError("compiler profile changed across pairs")
+        baseline_profile, candidate_profile = current_baseline_profile, current_candidate_profile
         if candidate_switches is not None and _switches(b) != candidate_switches:
             raise bench_match.MatchError("candidate switches changed across pairs")
         candidate_switches = _switches(b)
-        if _environment(a) != _environment(b) or a["options"] != b["options"]:
+        if (_environment(a) != _environment(b) or
+                _comparison_options(a) != _comparison_options(b)):
             raise bench_match.MatchError("nonexperimental runtime or benchmark options differ")
-        current = (_environment(a), a["options"])
+        current = (_environment(a), _comparison_options(a))
         if common is not None and current != common:
             raise bench_match.MatchError("nonexperimental options changed across pairs")
         common = current
@@ -371,8 +431,8 @@ def _compare(path, movement_input):
     gates = {
         "G2": _native_gate(path.parent, manifest, candidate_windows, state),
         "G3": _profile_gate(candidate_runs),
-        "G4": _g4_gate(path.parent, manifest, identity, candidate_switches, common[0]),
-        "G5": _g5_gate(path.parent, manifest, identity, candidate_switches, common[0]),
+        "G4": _g4_gate(path.parent, manifest, candidate_identity, candidate_switches, common[0]),
+        "G5": _g5_gate(path.parent, manifest, candidate_identity, candidate_switches, common[0]),
     }
     status = ("inconclusive" if any(g["status"] == "inconclusive" for g in gates.values()) else
               "fail" if any(g["status"] == "fail" for g in gates.values()) else "pass")
@@ -380,8 +440,13 @@ def _compare(path, movement_input):
     base_fps = _mean(item["reviewed_world_changes_per_second"] for item in baseline_windows)
     candidate_fps = _mean(item["reviewed_world_changes_per_second"] for item in candidate_windows)
     return {"status": status, "reviewer": reviewer, "state": state,
-            "generation": identity[0], "toolkit_tree": identity[1],
-            "executable_sha256": identity[2], "threads": identity[3],
+            "generation": base_identity[0], "toolkit_tree": base_identity[1],
+            "executable_sha256": candidate_identity[2], "threads": base_identity[2],
+            "baseline_executable_sha256": baseline_identity[2],
+            "candidate_executable_sha256": candidate_identity[2],
+            "baseline_compiler_profile": baseline_profile,
+            "candidate_compiler_profile": candidate_profile,
+            "compiler_comparison": compiler_comparison,
             "candidate_switches": dict(zip(SWITCHES, candidate_switches)),
             "summary": {
                 "baseline_world_fps_mean": base_fps,

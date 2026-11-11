@@ -43,8 +43,8 @@ switch without its separate correctness and measurement gates.
   matched captures, G2, and G3 all pass.
 - [x] Measure cold and warm persistent pixel-shader-cache frame-time hitches
   separately from steady-state throughput.
-- [ ] Make the shader cache a default candidate only after output identity and
-  publication reliability pass.
+- [ ] **Blocked on reviewed output identity and publication reliability:**
+  make the shader cache a default candidate only after both pass.
 
 ## Milestone 2: safe CPU-side overhead
 
@@ -61,8 +61,8 @@ switch without its separate correctness and measurement gates.
   aliases, and failed uploads synthetically.
 - [x] Provide a same-executable exact linear reference behind
   `RECOMP_GPU_TEX_INDEX=0` for an attributable comparison.
-- [ ] Run a matched A/B/A campaign and record whether G2, G3, or NV2A busy time
-  improves.
+- [ ] **Blocked on an operator-confirmed six-attempt campaign:** run matched
+  A/B/A and record whether G2, G3, or NV2A busy time improves.
 
 ## Decision gate
 
@@ -88,8 +88,8 @@ switch without its separate correctness and measurement gates.
   lifetimes and arbitrary guest reads/writes can be intercepted without
   weakening semaphore or flip ordering.
 - [x] Bound unfinished GPU frames, initially to two, with event queries.
-- [ ] Evaluate waitable or multi-slot GPU presentation only after ownership and
-  readback are correct.
+- [ ] **Blocked with on-demand readback:** evaluate waitable or multi-slot GPU
+  presentation only after ownership and readback are correct.
 
 ## Phase 4: bounded run-ahead
 
@@ -114,13 +114,13 @@ switch without its separate correctness and measurement gates.
 - [x] Replace idle `Sleep(0)` behavior with bounded spin-then-wait behavior.
 - [x] Walk and retire one published PUT segment at a time behind its own
   switch.
-- [ ] Consider asynchronous KickOff only if G3 still fails after the Phase 4
-  campaign is explicitly resumed.
+- [ ] **Blocked on resuming Phase 4 and its G3 result:** consider asynchronous
+  KickOff only if G3 still fails.
 
 ## Phase 5: residual work
 
-- [ ] Reprofile before choosing state caching, constant-buffer dirty tracking,
-  or executor batching.
+- [ ] **Blocked on the next reviewed campaign:** reprofile before choosing
+  state caching or constant-buffer dirty tracking.
 - [x] Establish the Brute Force `ARRAY_ELEMENT16/32` census: retained complete
   audit evidence counted 73,787,237 16-bit words and 115,904 32-bit words,
   expanding to 147,690,378 indices exactly matching the requested and
@@ -129,13 +129,18 @@ switch without its separate correctness and measurement gates.
   and segment walkers. Exact scalar/run state, CALL, physical wrap, packet
   split, audit fallback, capacity and invalid-option cases pass
   synthetically; audit mode remains scalar.
-- [ ] Compare scalar and run modes at matched CPU/D3D11 rendered frames, then
+- [ ] **Blocked on operator-confirmed correctness and performance captures:**
+  compare scalar and run modes at matched CPU/D3D11 rendered frames, then
   collect a separate reviewed six-attempt A/B/A campaign at the same Basic
   Controls state. Hold `RECOMP_GPU_TEX_INDEX=0` in both variants so this is
   not combined with the texture-index candidate.
-- [ ] **Blocked on the reviewed Phase 5 profile and an isolated multi-binary
-  A/B protocol:** measure `/GL` with LTCG independently from `/arch:AVX2`.
-- [ ] Treat `/arch:AVX2` as an optional compatibility-reducing build, not a
-  default assumption.
-- [ ] Require bit-exact corpus validation before any native title-function
-  rewrite.
+- [x] Add isolated, mutually exclusive Release profiles for title-executable
+  `/GL` plus LTCG and `/arch:AVX2`, with exact build metadata and a guarded
+  multi-binary benchmark/review protocol.
+- [ ] **Blocked on the higher-priority reviewed gates:** run separate
+  operator-reviewed default/LTCG and default/AVX2 campaigns, keeping all
+  runtime performance switches off and collecting matched CPU/D3D11 frames.
+- [x] Keep `/arch:AVX2` optional and compatibility-reducing; it is not part of
+  the supported default build.
+- [x] Require bit-exact generated/native lockstep over a large recorded corpus
+  before any native title-function rewrite. No rewrite is selected.

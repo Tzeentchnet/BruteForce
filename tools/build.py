@@ -485,41 +485,66 @@ def latest_generation():
 
 
 def cmake_build_command(config, parallel, extra_targets=()):
-    command = ["cmake", "--build", BUILD_DIR, "--config", config, "--parallel", str(parallel)]
+    return cmake_build_command_for_dir(BUILD_DIR, config, parallel, extra_targets)
+
+
+def cmake_build_command_for_dir(build_dir, config, parallel, extra_targets=()):
+    command = ["cmake", "--build", build_dir, "--config", config, "--parallel", str(parallel)]
     if extra_targets:
         command.extend(["--target", "bruteforce", *extra_targets])
     return command
 
 
-def build(config="Release", parallel=4, extra_targets=()):
+def compiler_profile_settings(profile):
+    profiles = {
+        "default": (BUILD_DIR, False, False),
+        "ltcg": (BUILD_DIR / "compiler-ltcg", True, False),
+        "avx2": (BUILD_DIR / "compiler-avx2", False, True),
+    }
+    try:
+        return profiles[profile]
+    except KeyError as exc:
+        raise BuildError(f"Unknown compiler profile: {profile}") from exc
+
+
+def build(config="Release", parallel=4, extra_targets=(), compiler_profile="default"):
     toolkit = verify_toolkit()
     run_dir, gen_dir = latest_generation()
     if parallel < 1:
         raise BuildError("Build parallelism must be at least one")
-    BUILD_DIR.mkdir(parents=True, exist_ok=True)
+    build_dir, ltcg, avx2 = compiler_profile_settings(compiler_profile)
+    if compiler_profile != "default" and config != "Release":
+        raise BuildError("Experimental compiler profiles require a Release build")
+    build_dir.mkdir(parents=True, exist_ok=True)
     configure = [
-        "cmake", "-S", ROOT, "-B", BUILD_DIR,
+        "cmake", "-S", ROOT, "-B", build_dir,
         "-G", "Visual Studio 17 2022", "-A", "x64",
         f"-DXBOXRECOMP_DIR={toolkit}", f"-DBRUTEFORCE_GEN_DIR={gen_dir}",
         f"-DBRUTEFORCE_COMPILE_JOBS={parallel}",
+        f"-DBRUTEFORCE_ENABLE_LTCG={'ON' if ltcg else 'OFF'}",
+        f"-DBRUTEFORCE_ENABLE_AVX2={'ON' if avx2 else 'OFF'}",
     ]
-    run_logged("configure", configure, ROOT, run_dir / "configure.log")
+    log_suffix = "" if compiler_profile == "default" else f"-{compiler_profile}"
+    run_logged("configure", configure, ROOT, run_dir / f"configure{log_suffix}.log")
     run_logged(
         "build",
-        cmake_build_command(config, parallel, extra_targets),
+        cmake_build_command_for_dir(build_dir, config, parallel, extra_targets),
         ROOT,
-        run_dir / f"build-{config}.log",
+        run_dir / f"build-{config}{log_suffix}.log",
     )
-    executable = BUILD_DIR / config / "bruteforce.exe"
+    executable = build_dir / config / "bruteforce.exe"
     if not executable.is_file():
         raise BuildError(f"Build succeeded but the executable is missing: {executable}")
     write_json(
-        BUILD_DIR / "latest.json",
+        build_dir / "latest.json",
         {
             "run_id": run_dir.name,
             "config": config,
             "xbe_sha256": load_json(FINGERPRINT)["xbe_sha256"],
             "toolkit_tree": TOOLKIT_TREE,
+            "compiler_profile": compiler_profile,
+            "ltcg": ltcg,
+            "avx2": avx2,
         },
     )
     print(f"Built: {executable}", flush=True)
@@ -527,7 +552,7 @@ def build(config="Release", parallel=4, extra_targets=()):
 
 def prepare_game_run(config="Release", graphics=False, experimental_tutorial=False,
                      experimental_audio=False, isolated_saves=None, base_env=None,
-                     no_audio=False):
+                     no_audio=False, compiler_profile="default"):
     """Validate the build and return (command, working directory, environment)."""
     if experimental_audio and no_audio:
         raise BuildError("--experimental-audio and --no-audio cannot be combined")
@@ -539,8 +564,11 @@ def prepare_game_run(config="Release", graphics=False, experimental_tutorial=Fal
     fingerprint = load_json(FINGERPRINT)
     verify_xbe(GAME_DIR / "default.xbe", fingerprint)
     run_dir, _ = latest_generation()
-    executable = BUILD_DIR / config / "bruteforce.exe"
-    metadata = BUILD_DIR / "latest.json"
+    build_dir, ltcg, avx2 = compiler_profile_settings(compiler_profile)
+    if compiler_profile != "default" and config != "Release":
+        raise BuildError("Experimental compiler profiles require a Release build")
+    executable = build_dir / config / "bruteforce.exe"
+    metadata = build_dir / "latest.json"
     if not executable.is_file() or not metadata.is_file():
         raise BuildError(f"No {config} executable; run the build command first")
     built = load_json(metadata)
@@ -549,6 +577,9 @@ def prepare_game_run(config="Release", graphics=False, experimental_tutorial=Fal
         or built.get("xbe_sha256") != fingerprint["xbe_sha256"]
         or built.get("run_id") != run_dir.name
         or built.get("toolkit_tree") != TOOLKIT_TREE
+        or built.get("compiler_profile", "default") != compiler_profile
+        or built.get("ltcg", False) is not ltcg
+        or built.get("avx2", False) is not avx2
     ):
         raise BuildError("Build metadata does not match the requested game and configuration")
     env = dict(os.environ if base_env is None else base_env)
@@ -589,10 +620,11 @@ def prepare_game_run(config="Release", graphics=False, experimental_tutorial=Fal
 
 
 def run_game(config="Release", graphics=False, experimental_tutorial=False,
-             experimental_audio=False, isolated_saves=None, no_audio=False):
+             experimental_audio=False, isolated_saves=None, no_audio=False,
+             compiler_profile="default"):
     command, boot_dir, env = prepare_game_run(
         config, graphics, experimental_tutorial, experimental_audio, isolated_saves,
-        no_audio=no_audio,
+        no_audio=no_audio, compiler_profile=compiler_profile,
     )
     return subprocess.run(command, cwd=boot_dir, env=env, check=False).returncode
 
@@ -610,10 +642,18 @@ def main(argv=None):
         command.add_argument("--parallel", type=int, default=4)
         command.add_argument("--extra-target", action="append", default=[],
                              help="also build a named CMake target in the same build; repeatable")
+        command.add_argument(
+            "--compiler-profile", choices=("default", "ltcg", "avx2"), default="default",
+            help="build an isolated default, LTCG-only, or AVX2-only executable",
+        )
         if name == "all":
             command.add_argument("--disc", required=True, help="path to the local XISO")
     run = commands.add_parser("run", help="run a previously built executable")
     run.add_argument("--config", choices=("Release", "Debug", "RelWithDebInfo"), default="Release")
+    run.add_argument(
+        "--compiler-profile", choices=("default", "ltcg", "avx2"), default="default",
+        help="run a previously built isolated compiler profile",
+    )
     run.add_argument(
         "--graphics", action="store_true",
         help="enable graphics with the default Direct3D 11 renderer and presentation",
@@ -643,17 +683,17 @@ def main(argv=None):
         elif args.command == "generate":
             generate()
         elif args.command == "build":
-            build(args.config, args.parallel, args.extra_target)
+            build(args.config, args.parallel, args.extra_target, args.compiler_profile)
         elif args.command == "run":
             return run_game(
                 args.config, args.graphics, args.experimental_tutorial, args.experimental_audio,
-                args.isolated_saves, args.no_audio,
+                args.isolated_saves, args.no_audio, args.compiler_profile,
             )
         else:
             setup_toolkit()
             extract_disc(args.disc)
             generate()
-            build(args.config, args.parallel, args.extra_target)
+            build(args.config, args.parallel, args.extra_target, args.compiler_profile)
     except (BuildError, ToolkitError, OSError, subprocess.CalledProcessError, json.JSONDecodeError) as exc:
         print(f"Error: {exc}", file=sys.stderr)
         return 1

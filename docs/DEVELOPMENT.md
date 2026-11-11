@@ -311,6 +311,24 @@ python -m pytest -q tests\test_pushbuffer.py tests\test_bench.py `
 python tools\toolkit.py --verify
 ```
 
+For compiler-profile infrastructure without starting the title:
+
+```powershell
+python -m pytest -q tests\test_build.py tests\test_bench.py `
+  tests\test_bench_control.py tests\test_bench_performance.py
+python tools\build.py build --config Release --parallel 4 --compiler-profile ltcg
+python tools\build.py build --config Release --parallel 4 --compiler-profile avx2
+```
+
+The profiles use isolated build directories and exact metadata. Inspect the
+generated Release project only as build evidence:
+`WholeProgramOptimization=true` identifies the LTCG profile and
+`EnableEnhancedInstructionSet=AdvancedVectorExtensions2` identifies AVX2.
+CMake rejects enabling both options, and the build helper rejects either
+profile outside Release. Do not start the game merely to validate these
+builds; runtime correctness and performance require the separately reviewed
+campaign in the user guide.
+
 From a VS 2022 x64 developer prompt, the isolated framework's capture and
 presenter-device fixture can be built without retail data:
 

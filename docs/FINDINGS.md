@@ -15,7 +15,7 @@ The complete 43-patch v0.17 framework stack independently replayed to tree
 `3e3ae3600802d2bf4446d86fc546322d60849047` and passed
 `python tools/toolkit.py --verify`. The framework tools reported 995 passed,
 2 skipped and 134 subtests passed. The production-style project suite
-reported 969 passed with WARP and the available hardware adapter. Eleven
+reported 972 passed with WARP and the available hardware adapter. Eleven
 focused framework fixture groups reported 47 CTests passed, and the Windows
 presenter suite reported 19 passed. The Phase 4 subset comprises 7
 bounded-PFB, 6 idle-wait and 9 guarded-segment CTests; three generated
@@ -2344,7 +2344,7 @@ capacity-limited primitives, exact audit counts, CALL/RETURN, physical wrap,
 packet and segment splits, staged walking, invalid values and fail-closed
 streams. The three directly affected framework fixture groups passed 2/2,
 4/4 and 9/9 CTests; the project pushbuffer fixture and structured benchmark
-diagnostics passed. The fully provisioned project suite passed 969 tests with
+diagnostics passed. The fully provisioned project suite passed 972 tests with
 WARP and the available hardware adapter, the framework tool suite passed 995
 tests plus 134 subtests with two skips, and a fresh v0.17 reconstruction
 applied the full stack and verified tree
@@ -2355,6 +2355,39 @@ CPU/D3D11 rendered-output comparison and a separate reviewed scalar/run A/B/A
 campaign remain required. That campaign must hold
 `RECOMP_GPU_TEX_INDEX=0` in both variants so the two Phase 5 candidates are
 not combined. No Brute Force speedup is claimed.
+
+### Isolated LTCG and AVX2 compiler profiles (build evidence only)
+
+The supported Release profile remains unchanged. Two mutually exclusive,
+default-off compiler profiles now apply only to the `bruteforce` executable's
+sources and use separate build trees:
+
+- `ltcg` uses CMake Release interprocedural optimization. The generated MSVC
+  project records `WholeProgramOptimization=true`, and the first link reported
+  a full LTCG compilation of 23,566 functions. Its 28,779,520-byte executable
+  has SHA-256
+  `77ee42a66fe417974aebf53c0ea42f73f71eadd02b19303df3a60a1023e2789a`.
+- `avx2` uses Release `/arch:AVX2`; the generated project records
+  `EnableEnhancedInstructionSet=AdvancedVectorExtensions2`. Its
+  37,607,424-byte executable has SHA-256
+  `090a4ab66256fc7378848a32d1a42943e89e56fc8d80c64580eabf590c3b0611`.
+- The unchanged default executable is 37,578,240 bytes with SHA-256
+  `9112b0f836f94c9ab87b23a4a83bfdde95acaf32b5dae4d62636893b627144bd`.
+
+All three use generation `20261111-084222-7bdb6e56` and framework tree
+`3e3ae3600802d2bf4446d86fc546322d60849047`. Profile metadata records the
+exact compiler choice; the build helper rejects non-Release experimental
+profiles, CMake rejects a combined LTCG/AVX2 configuration, and benchmark
+collection alternates stable per-profile hashes while holding all runtime
+performance switches off. Offline review requires the same generation,
+toolkit, thread count, runtime environment and benchmark controls, plus
+candidate-profile CPU/D3D11 correctness and headroom evidence.
+
+This is build and harness evidence only. Neither compiler executable was
+started, no retail or xemu run was made, and executable size is not a
+performance or correctness result. `/arch:AVX2` narrows host compatibility.
+Separate reviewed default/LTCG and default/AVX2 campaigns remain open and are
+lower priority than the two existing Phase 5 runtime candidates.
 
 ### Synthetic D3D11 compatibility hardening
 

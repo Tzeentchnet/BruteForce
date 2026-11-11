@@ -658,10 +658,16 @@ phases when it is on the critical path:
   an independent reviewed six-attempt A/B/A comparison remain required.
   Hold `RECOMP_GPU_TEX_INDEX=0` in both variants so the texture-index
   candidate is not combined with this measurement.
-- **Generated code:** `/O2` is already active. Measure `/GL` with LTCG and an
-  optional `/arch:AVX2` build independently by A/B; AVX2 narrows host
-  compatibility and is not an assumed default. Also check guest memory-access
-  macro overhead and x87 emulation hot spots in the title's own code.
+- **Generated code:** `/O2` is already active. Isolated, mutually exclusive
+  Release profiles now build title-executable `/GL` plus LTCG and optional
+  `/arch:AVX2` candidates without replacing the supported default. The
+  benchmark can alternate default/candidate binaries, requires stable
+  per-profile hashes and identical runtime switches, and applies correctness
+  gates to the candidate profile. Both candidates compile; neither has retail
+  or matched-render evidence. Measure them in separate reviewed campaigns
+  after the higher-priority Phase 5 gates. AVX2 narrows host compatibility and
+  is not an assumed default. Also check guest memory-access macro overhead and
+  x87 emulation hot spots in the title's own code.
 - **Hot title functions:** a native rewrite is allowed only with the same
   operations in the same order and a bit-exact comparison against the
   generated code over a large recorded corpus. Blood Wake rewrote its water

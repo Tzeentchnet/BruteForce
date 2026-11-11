@@ -12,6 +12,13 @@ set(XBOXRECOMP_DIR "${CMAKE_CURRENT_SOURCE_DIR}/.deps/xboxrecomp" CACHE PATH
 set(BRUTEFORCE_GEN_DIR "" CACHE PATH "Directory containing this build's generated C")
 set(BRUTEFORCE_COMPILE_JOBS 4 CACHE STRING "Parallel MSVC compilation jobs")
 option(BRUTEFORCE_LINK_SYMBOLS "Generate local symbols for crash diagnostics" OFF)
+option(BRUTEFORCE_ENABLE_LTCG "Enable Release whole-program optimization for the title executable" OFF)
+option(BRUTEFORCE_ENABLE_AVX2 "Enable Release AVX2 code generation for the title executable" OFF)
+
+if(BRUTEFORCE_ENABLE_LTCG AND BRUTEFORCE_ENABLE_AVX2)
+    message(FATAL_ERROR
+        "BRUTEFORCE_ENABLE_LTCG and BRUTEFORCE_ENABLE_AVX2 must be measured independently.")
+endif()
 
 if(NOT EXISTS "${XBOXRECOMP_DIR}/CMakeLists.txt")
     message(FATAL_ERROR "xboxrecomp is missing. Run: python tools/toolkit.py")
@@ -218,6 +225,18 @@ if(MSVC)
     target_compile_options(bruteforce_camera_trace_test PRIVATE /experimental:c11atomics)
     target_compile_options(bruteforce_interrupt_test PRIVATE /experimental:c11atomics)
     target_link_options(bruteforce PRIVATE /LARGEADDRESSAWARE)
+    if(BRUTEFORCE_ENABLE_LTCG)
+        include(CheckIPOSupported)
+        check_ipo_supported(RESULT BRUTEFORCE_IPO_SUPPORTED
+            OUTPUT BRUTEFORCE_IPO_ERROR LANGUAGES C)
+        if(NOT BRUTEFORCE_IPO_SUPPORTED)
+            message(FATAL_ERROR "Release LTCG is unavailable: ${BRUTEFORCE_IPO_ERROR}")
+        endif()
+        set_property(TARGET bruteforce PROPERTY INTERPROCEDURAL_OPTIMIZATION_RELEASE TRUE)
+    endif()
+    if(BRUTEFORCE_ENABLE_AVX2)
+        target_compile_options(bruteforce PRIVATE "$<$<CONFIG:Release>:/arch:AVX2>")
+    endif()
     if(BRUTEFORCE_LINK_SYMBOLS)
         foreach(symbol_target IN ITEMS bruteforce bruteforce_crash_test
                 xbox_kernel xbox_d3d8 xbox_dsound xbox_input xbox_input_map

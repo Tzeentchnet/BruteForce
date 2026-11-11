@@ -120,7 +120,7 @@ Patch [0046](../patches/xboxrecomp/0046-index-word-runs.patch) adds the 43rd
 local patch and produces independently replayed tree
 `3e3ae3600802d2bf4446d86fc546322d60849047`, now used by the shared toolkit.
 The framework tool result remains 995 passed, 2 skipped and 134 subtests; the
-fully provisioned project suite reports 969 passed with WARP and the available
+fully provisioned project suite reports 972 passed with WARP and the available
 hardware adapter. Eleven focused framework groups report 47 CTests passed.
 The patch is runtime-only, so the existing generated title retains identical
 `tools` and `templates` fingerprints.
@@ -2220,7 +2220,7 @@ it does not defer a frame until the title releases `VOICE_LOCK`.
   fallback. Framework fixtures cover complete scalar/run executor-state
   equality, capacity and inactive primitives, exact audit counts, invalid
   options and fail-closed stream handling. The directly affected CTests
-  passed 2/2, 4/4 and 9/9; the fully provisioned project suite passed 969;
+  passed 2/2, 4/4 and 9/9; the fully provisioned project suite passed 972;
   framework tools passed 995 plus 134 subtests with two skips; and a fresh
   complete replay verified tree
   `3e3ae3600802d2bf4446d86fc546322d60849047`.

@@ -25,6 +25,54 @@ def test_build_command_batches_extra_targets():
     assert "--target" not in build.cmake_build_command("Release", 4)
 
 
+def test_compiler_profiles_are_isolated_and_exact(tmp_path, monkeypatch):
+    monkeypatch.setattr(build, "BUILD_DIR", tmp_path / "build")
+    assert build.compiler_profile_settings("default") == (tmp_path / "build", False, False)
+    assert build.compiler_profile_settings("ltcg") == (
+        tmp_path / "build" / "compiler-ltcg", True, False)
+    assert build.compiler_profile_settings("avx2") == (
+        tmp_path / "build" / "compiler-avx2", False, True)
+    with pytest.raises(build.BuildError, match="Unknown compiler profile"):
+        build.compiler_profile_settings("combined")
+
+
+def test_ltcg_build_uses_isolated_flags_and_metadata(tmp_path, monkeypatch):
+    configure_generation(tmp_path, monkeypatch)
+    build.generate()
+    build_dir = tmp_path / "build"
+    monkeypatch.setattr(build, "BUILD_DIR", build_dir)
+    commands = []
+
+    def fake_run(name, command, cwd, log):
+        commands.append((name, command, log))
+        if name == "build":
+            executable = Path(command[2]) / "Release" / "bruteforce.exe"
+            executable.parent.mkdir(parents=True)
+            executable.write_bytes(b"fixture")
+        return 0.1
+
+    monkeypatch.setattr(build, "run_logged", fake_run)
+    build.build(compiler_profile="ltcg")
+    configure = commands[0][1]
+    assert configure[configure.index("-B") + 1] == build_dir / "compiler-ltcg"
+    assert "-DBRUTEFORCE_ENABLE_LTCG=ON" in configure
+    assert "-DBRUTEFORCE_ENABLE_AVX2=OFF" in configure
+    assert commands[1][1][2] == build_dir / "compiler-ltcg"
+    assert commands[0][2].name == "configure-ltcg.log"
+    assert commands[1][2].name == "build-Release-ltcg.log"
+    assert build.load_json(build_dir / "compiler-ltcg" / "latest.json") == {
+        "run_id": build.load_json(build.ANALYSIS_DIR / "latest.json")["run_id"],
+        "config": "Release",
+        "xbe_sha256": build.load_json(build.FINGERPRINT)["xbe_sha256"],
+        "toolkit_tree": build.TOOLKIT_TREE,
+        "compiler_profile": "ltcg",
+        "ltcg": True,
+        "avx2": False,
+    }
+    with pytest.raises(build.BuildError, match="require a Release build"):
+        build.build(config="Debug", compiler_profile="ltcg")
+
+
 def test_disc_paths_accept_safe_names():
     paths = build.validate_disc_paths([("", entry("default.xbe")), ("Data", entry("asset.bin"))])
     assert [parts for parts, _ in paths] == [["default.xbe"], ["Data", "asset.bin"]]
@@ -553,18 +601,20 @@ def test_run_cli_passes_graphics_tutorial_audio_and_isolation_options(monkeypatc
     calls = []
     monkeypatch.setattr(
         build, "run_game",
-        lambda config, graphics, tutorial, audio, saves, no_audio:
-            calls.append((config, graphics, tutorial, audio, saves, no_audio)) or 0,
+        lambda config, graphics, tutorial, audio, saves, no_audio, profile:
+            calls.append((config, graphics, tutorial, audio, saves, no_audio, profile)) or 0,
     )
     assert build.main(["run", "--config", "Debug", "--graphics"]) == 0
     assert build.main(["run", "--experimental-tutorial"]) == 0
     assert build.main(["run", "--experimental-tutorial", "--experimental-audio"]) == 0
     assert build.main(["run", "--no-audio"]) == 0
     assert build.main(["run", "--experimental-tutorial", "--isolated-saves", "fresh"]) == 0
+    assert build.main(["run", "--compiler-profile", "ltcg"]) == 0
     assert calls == [
-        ("Debug", True, False, False, None, False),
-        ("Release", False, True, False, None, False),
-        ("Release", False, True, True, None, False),
-        ("Release", False, False, False, None, True),
-        ("Release", False, True, False, Path("fresh"), False),
+        ("Debug", True, False, False, None, False, "default"),
+        ("Release", False, True, False, None, False, "default"),
+        ("Release", False, True, True, None, False, "default"),
+        ("Release", False, False, False, None, True, "default"),
+        ("Release", False, True, False, Path("fresh"), False, "default"),
+        ("Release", False, False, False, None, False, "ltcg"),
     ]

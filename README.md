@@ -95,6 +95,14 @@ coverage pass, but no Brute Force speedup or matched rendered-output result
 has been established. Its reviewed A/B/A campaign remains separate from the
 texture-index comparison.
 
+Release compiler experiments are also isolated from the supported default
+build. `--compiler-profile ltcg` enables title-executable `/GL` plus LTCG;
+`--compiler-profile avx2` enables title-executable `/arch:AVX2`. They use
+separate build directories, cannot be combined, and have a guarded
+multi-binary benchmark mode. Both compile successfully, but neither has been
+run on retail content or shown to improve performance or preserve matched
+rendered output. The supported default remains the ordinary Release profile.
+
 The pre-fix executable also completed one additional D3D11 attempt at the 4K
 preset with mipmaps and anisotropy enabled. It confirms the 2880x2160 4:3
 render path can run on the available hardware, but the observed tutorial

@@ -33,6 +33,10 @@ variants require manual readiness and deterministic input. Their separately
 reported results are not a comparison until content and input are matched.
 --compare-matched checks a separately reviewed local manifest; its result
 remains an operator assertion, not an automatically identified title state.
+--compiler-comparison alternates the isolated default and one compiler-profile
+binary while keeping runtime performance switches off. It does not make
+different compiler outputs comparable without the same manual and offline
+review gates.
 
 The profiler (BRUTEFORCE_PROFILE) and the GPU census (RECOMP_GPU_CENSUS) are
 gated to the measured window of the chosen scene with flag files.
@@ -274,7 +278,7 @@ def parse_env(spec):
     return name or ",".join(f"{k}={v}" for k, v in env.items()) or "default", env
 
 
-def validate_performance_variants(variants, args):
+def validate_performance_variants(variants, args, compiler_comparison=None):
     if len(variants) != 2 or args.runs < 3:
         raise BenchError("performance comparisons require exactly two variants and at least three runs each")
     if (args.scene != "movement" or args.readiness != "manual" or
@@ -289,7 +293,14 @@ def validate_performance_variants(variants, args):
                 raise BenchError(f"{key} must be 0 or 1")
     if any(options[0].get(key, "0") != "0" for key in PERFORMANCE_SWITCHES):
         raise BenchError("the first performance variant must be the all-switches-off baseline")
-    if not any(options[1].get(key, "0") == "1" for key in PERFORMANCE_SWITCHES):
+    if compiler_comparison:
+        if compiler_comparison not in ("ltcg", "avx2"):
+            raise BenchError("compiler comparisons require the ltcg or avx2 profile")
+        if [name for name, _ in variants] != ["default", compiler_comparison]:
+            raise BenchError("compiler comparisons require default then candidate profiles")
+        if any(options[1].get(key, "0") != "0" for key in PERFORMANCE_SWITCHES):
+            raise BenchError("compiler comparisons must keep all runtime performance switches off")
+    elif not any(options[1].get(key, "0") == "1" for key in PERFORMANCE_SWITCHES):
         raise BenchError("the second performance variant must enable at least one performance switch")
     if options[0].get("BRUTEFORCE_PERF_COUNTERS") != "1":
         raise BenchError("performance comparisons require BRUTEFORCE_PERF_COUNTERS=1 in both variants")
@@ -774,7 +785,7 @@ def run_once(out_dir, label, scene, env_overrides, threads, watchdog, profile, c
              config, dump=False, trace_frame=False, capture=False, capture_movement=False,
              trace_after=TRACE_AFTER, readiness="legacy", ready_timeout=600.0,
              ready_state=None, no_auto_panels=False, capture_audio=False, phase_timeout=240.0,
-             capture_world=False, profile_callers=False):
+             capture_world=False, profile_callers=False, compiler_profile="default"):
     if profile_callers and not profile:
         raise BenchError("profile caller attribution requires profiling")
     audit_key = validate_gpu_audit_overrides(env_overrides)
@@ -850,9 +861,14 @@ def run_once(out_dir, label, scene, env_overrides, threads, watchdog, profile, c
     wav_path = bench_control.reserve_audio_capture(out_dir, env) if capture_audio else None
     ready = (bench_control.ManualReadiness(out_dir, ready_state, ready_timeout)
              if readiness == "manual" else None)
-    command, cwd, env = build.prepare_game_run(
-        config, experimental_tutorial=True, isolated_saves=save, base_env=env
-    )
+    prepare_options = {
+        "experimental_tutorial": True,
+        "isolated_saves": save,
+        "base_env": env,
+    }
+    if compiler_profile != "default":
+        prepare_options["compiler_profile"] = compiler_profile
+    command, cwd, env = build.prepare_game_run(config, **prepare_options)
     executable_path = Path(command[0]).resolve()
     executable_sha256 = (
         build.sha256_file(executable_path) if executable_path.is_file() else None
@@ -900,7 +916,8 @@ def run_once(out_dir, label, scene, env_overrides, threads, watchdog, profile, c
                                 if key.upper().startswith(("RECOMP_", "BRUTEFORCE_"))
                                 and key.upper() not in OWNED_ENV},
         "options": {
-            "config": config, "watchdog_seconds": watchdog,
+            "config": config, "compiler_profile": compiler_profile,
+            "watchdog_seconds": watchdog,
             "profile": bool(profile), "profile_callers": profile_callers_enabled,
             "census": bool(census),
             "periodic_dump": bool(dump), "trace_frame": bool(trace_frame),
@@ -1347,6 +1364,11 @@ def main(argv=None):
                              "schema in tools\\bench_match.py")
     parser.add_argument("--performance", action="store_true",
                         help="enforce a controlled, alternating baseline/experiment performance collection")
+    parser.add_argument(
+        "--compiler-comparison", choices=("ltcg", "avx2"),
+        help="alternate the isolated default and selected compiler-profile binaries; "
+             "requires --performance controls and no --variant arguments",
+    )
     parser.add_argument("--compare-performance", type=Path, metavar="MATCHES.json",
                         help="evaluate reviewed performance pairs and G2/G3/G4/G5 offline")
     parser.add_argument("--readiness", choices=("legacy", "manual"), default="legacy",
@@ -1386,7 +1408,18 @@ def main(argv=None):
             return 0 if comparison["status"] == "pass" else 2
         if args.no_profile and args.profile_callers:
             raise BenchError("--profile-callers cannot be combined with --no-profile")
-        variants = [parse_env(spec) for spec in (args.variant or ["cpu:"])]
+        if args.compiler_comparison and not args.performance:
+            raise BenchError("--compiler-comparison requires --performance")
+        if args.compiler_comparison and args.variant:
+            raise BenchError("--compiler-comparison owns the two variants")
+        variants = (
+            [
+                ("default", {"BRUTEFORCE_PERF_COUNTERS": "1"}),
+                (args.compiler_comparison, {"BRUTEFORCE_PERF_COUNTERS": "1"}),
+            ]
+            if args.compiler_comparison else
+            [parse_env(spec) for spec in (args.variant or ["cpu:"])]
+        )
         if args.capture_movement and args.scene != "movement":
             raise BenchError("--capture-movement requires --scene movement")
         if args.capture_world and args.scene != "movement":
@@ -1420,10 +1453,11 @@ def main(argv=None):
                     print(f"[bench] warning: {message}", file=sys.stderr, flush=True)
                 if key.upper() == "RECOMP_AUDIO_WAV":
                     raise BenchError("RECOMP_AUDIO_WAV cannot be supplied by a variant; use --capture-audio")
-        performance_collection = args.performance or (len(variants) > 1 and any(
+        performance_collection = args.performance or bool(args.compiler_comparison) or (
+            len(variants) > 1 and any(
                 key.upper() in PERFORMANCE_SWITCHES for _, env in variants for key in env))
         if performance_collection:
-            validate_performance_variants(variants, args)
+            validate_performance_variants(variants, args, args.compiler_comparison)
         audio_modes = {name: "on" if bench_control.audio_enabled(env) else "off"
                        for name, env in variants}
         mixed_audio = len(set(audio_modes.values())) > 1
@@ -1451,6 +1485,7 @@ def main(argv=None):
         results = []
         generation = None
         executable_identity = None
+        compiler_identities = {}
         sequence = [v for _ in range(args.runs) for v in variants]
         if mixed_audio:
             print("[bench] audio-on/off runs are collection only; do not compare rates until "
@@ -1468,7 +1503,8 @@ def main(argv=None):
                                   args.dump, args.trace_frame, args.capture, args.capture_movement,
                                   args.trace_after, args.readiness, args.ready_timeout,
                                   args.ready_state, args.no_auto_panels, args.capture_audio,
-                                  args.phase_timeout, args.capture_world, args.profile_callers)
+                                  args.phase_timeout, args.capture_world, args.profile_callers,
+                                  name if args.compiler_comparison else "default")
                 run_generation = result.get("generation")
                 if not result.get("error") and run_generation:
                     if generation is not None and run_generation != generation:
@@ -1480,6 +1516,13 @@ def main(argv=None):
                                             result.get("executable", {}).get("sha256"))
                         if not all(current_identity):
                             result["error"] = "toolkit tree or executable hash missing"
+                        elif args.compiler_comparison:
+                            previous = compiler_identities.get(name)
+                            if previous is not None and current_identity != previous:
+                                result["error"] = (
+                                    f"{name} toolkit tree or executable changed during the campaign")
+                            else:
+                                compiler_identities[name] = current_identity
                         elif executable_identity is not None and current_identity != executable_identity:
                             result["error"] = "toolkit tree or executable changed during the benchmark campaign"
                         else:
@@ -1525,6 +1568,11 @@ def main(argv=None):
                 "generation": generation, "audio_modes": audio_modes,
                 "options": result.get("options"),
                 "variant_options": {name: env for name, env in variants},
+                "compiler_comparison": args.compiler_comparison,
+                "compiler_identities": {
+                    name: {"toolkit_tree": identity[0], "executable_sha256": identity[1]}
+                    for name, identity in compiler_identities.items()
+                } if args.compiler_comparison else None,
                 "metric_definitions": {
                     "stationary_fps": "flip rate",
                     "movement_fps": "flip rate, not world FPS",

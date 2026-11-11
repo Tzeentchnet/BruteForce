@@ -160,6 +160,42 @@ def test_reviewed_pairs_and_all_gates(performance_manifest):
     assert "flips are not world FPS" in result["scope"]
 
 
+def test_reviewed_compiler_profile_comparison(performance_manifest):
+    manifest = json.loads(performance_manifest.read_text(encoding="utf-8"))
+    campaign = performance_manifest.parent
+    for pair in manifest["pairs"]:
+        for role, profile, executable in (
+                ("baseline", "default", "b" * 64),
+                ("candidate", "ltcg", "c" * 64)):
+            path = campaign / pair[f"{role}_result"]
+            result = json.loads(path.read_text(encoding="utf-8"))
+            result["options"]["compiler_profile"] = profile
+            result["executable"]["sha256"] = executable
+            result["runtime_options"]["RECOMP_PFB_FLUSH_WAIT"] = None
+            result["runtime_environment"].pop("RECOMP_PFB_FLUSH_WAIT", None)
+            save_json(path, result)
+    candidate_results = [
+        campaign / "cpu" / "result.json",
+        campaign / "gpu" / "result.json",
+        *(campaign / f"scaled{index}" / "result.json" for index in range(3)),
+    ]
+    for path in candidate_results:
+        result = json.loads(path.read_text(encoding="utf-8"))
+        result["options"]["compiler_profile"] = "ltcg"
+        result["executable"]["sha256"] = "c" * 64
+        result["runtime_options"]["RECOMP_PFB_FLUSH_WAIT"] = None
+        result["runtime_environment"].pop("RECOMP_PFB_FLUSH_WAIT", None)
+        save_json(path, result)
+    comparison = bench_performance.compare_manifest(performance_manifest, bench.MOVEMENT_INPUT)
+    assert comparison["status"] == "pass", comparison
+    assert comparison["compiler_comparison"] == "ltcg"
+    assert comparison["baseline_compiler_profile"] == "default"
+    assert comparison["candidate_compiler_profile"] == "ltcg"
+    assert comparison["baseline_executable_sha256"] == "b" * 64
+    assert comparison["candidate_executable_sha256"] == "c" * 64
+    assert not any(comparison["candidate_switches"].values())
+
+
 @pytest.mark.parametrize("defect", [
     "unreviewed", "bad-order", "hash", "option", "input", "few-frames",
     "missing-profile", "bad-profile", "g4-difference", "g5-rate", "no-native",
@@ -256,6 +292,10 @@ def test_owned_controls_and_performance_collection_requirements(tmp_path):
                        "--variant", "base:", "--variant", "test:RECOMP_NV2A_IDLE_WAIT=1",
                        "--out", str(tmp_path / "never-created")]) == 1
     assert not (tmp_path / "never-created").exists()
+    assert bench.main([
+        "--compiler-comparison", "ltcg", "--out", str(tmp_path / "no-compiler-run"),
+    ]) == 1
+    assert not (tmp_path / "no-compiler-run").exists()
     args = SimpleNamespace(runs=3, scene="movement", readiness="manual",
                            no_auto_panels=True, capture_world=True,
                            no_profile=False, profile_callers=True)
@@ -270,6 +310,17 @@ def test_owned_controls_and_performance_collection_requirements(tmp_path):
             "BRUTEFORCE_PERF_COUNTERS": "1", "RECOMP_GPU_TEX_INDEX": "1",
         }),
     ], args)
+    bench.validate_performance_variants([
+        ("default", {"BRUTEFORCE_PERF_COUNTERS": "1"}),
+        ("ltcg", {"BRUTEFORCE_PERF_COUNTERS": "1"}),
+    ], args, "ltcg")
+    with pytest.raises(bench.BenchError, match="runtime performance switches off"):
+        bench.validate_performance_variants([
+            ("default", {"BRUTEFORCE_PERF_COUNTERS": "1"}),
+            ("ltcg", {
+                "BRUTEFORCE_PERF_COUNTERS": "1", "RECOMP_PB_INDEX_RUNS": "1",
+            }),
+        ], args, "ltcg")
     bench.validate_performance_variants([
         ("base", {
             "BRUTEFORCE_PERF_COUNTERS": "1", "RECOMP_PB_INDEX_RUNS": "0",

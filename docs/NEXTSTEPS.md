@@ -449,8 +449,8 @@ produce exact/box/Catmull-Rom shared output. Patch 0028 lets the existing
 keyed-mutex presenter accept source dimensions independent of the guest
 framebuffer while preserving flip IDs, pinned/PVIDEO fallback and capture
 refusal. Scale 1 remains the launcher default. The main executable and
-fixtures build, the complete D3D11 matrix passed 190 cases with hardware
-coverage enabled, and launcher and shared-presenter fixtures passed. Bounded
+fixtures build. The synthetic D3D11 matrix passed 234 cases with hardware
+coverage enabled, and 22 launcher and three presenter cases passed. Bounded
 scale-1 and 4.5x runs retained CPU-decoded opening movies, including the intro
 montage. No matched retail gameplay or native-4K-display campaign has been
 run, so G4/G5 and the reported default 6 fps remain open.
@@ -489,20 +489,27 @@ run, so G4/G5 and the reported default 6 fps remain open.
    packed alias is still an unvalidated experimental path (A3).
 5. **Partly implemented: quantities measured in pixels.** Z-pass visibility counts scale with the
    pixel count, so normalise them or the title's thresholds will misfire
-   and are now normalized per query by the physical/logical pixel-area
-   ratio in both sync and async paths. Confirm the title's thresholds.
+   and are now normalized per query segment using its starting
+   physical/logical pixel-area ratio in both sync and async paths, including
+   target and scale changes. Confirm the title's thresholds.
    Check point size and line width, which the title may specify in pixels,
    and the half-texel offsets in screen-space draws.
 6. **Implemented controls and handoff.** The existing resizable window and
    swap chain fit a 4:3 picture. The renderer queries that live picture for
-   Native mode; fixed 720p, 1080p, 1440p and 4K presets are in the launcher.
+   Native mode; fixed diagnostic output dimensions are also fitted to the
+   4:3 picture, rather than treated as the picture itself. Fixed 720p,
+   1080p, 1440p and 4K presets are in the launcher.
    Workstream E owns true widescreen; 480p 4:3 remains the default here.
 7. **Partly implemented: memory and robustness.** Budget VRAM for scaled targets and reject
    unsupported scales or allocation failures with a clear error; do not
-   silently reduce the scale. Numeric values and D3D11 dimensions are
-   validated, allocation errors are explicit, and native window changes use
-   the scale epoch without a restart. A VRAM budget and device recovery
-   remain open in D; fixed launcher preset changes require a restart.
+   silently reduce the scale. Initialization and live native changes now
+   prepare required resources before committing the configuration or epoch;
+   ordinary allocation failures retain prior resources and can be retried.
+   Busy shared frames defer replacement without skipping the mutex handshake;
+   non-timeout mutex errors disable shared presentation. Colour
+   contents migrate, but changed-size depth/stencil contents do not; guest
+   reinitialization after resize is not yet verified. A VRAM budget and device
+   recovery remain open in D; fixed launcher preset changes require a restart.
 8. **Synthetic hardware implemented; retail gameplay pending.** Synthetic WARP and hardware fixtures: scale 1 matches the
    current output exactly; scale 2 downsampled matches scale 1 within a
    stated tolerance on a fixture with draws, partial clears, window clips
@@ -511,9 +518,14 @@ run, so G4/G5 and the reported default 6 fps remain open.
    reference, so G4 comparisons are made at scale 1. WARP now covers scale
    two with draws, render-to-texture, partial clears, window clips,
    guest-sized readback, CPU-written movie frames and normalized sync/async
-   visibility. The complete matrix passes 190 hardware cases and 123 WARP
-   cases with 67 hardware skips. Bounded 4.5x hardware captures show all
-   three opening movie stages. Add a controlled retail gameplay campaign.
+   visibility. Focused transactional fixtures cover injected initialization,
+   colour, depth, shared-frame, readback and staging failures; retries;
+   output-only changes; and mixed-AA query segments on WARP and hardware as
+   applicable. Hardware also exercises a hidden live presenter resize and its
+   flip-only fallback. These are synthetic, not a title run. Bounded earlier
+   4.5x hardware captures show all three opening movie stages. Add a
+   controlled retail gameplay and live-resize campaign, including evidence
+   that depth/stencil is reinitialized.
 9. **Recast G5.** "G1 holds at 2× internal resolution" becomes a measurement
    at 1080p and 4K presets, A/B/A against scale 1, reporting distinct world
    frames and the GPU, driver and scale used. Record results in FINDINGS.

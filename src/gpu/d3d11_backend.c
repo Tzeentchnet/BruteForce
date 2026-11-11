@@ -78,6 +78,30 @@ static int s_depth_texture;
 static int s_stencil_alias;
 static int s_direct_present;
 static volatile LONG s_device_thread;
+static GpuScaleConfig s_pending_scale;
+static int s_scale_pending;
+
+#ifdef BRUTEFORCE_D3D11_TESTING
+static const char *s_test_fail_stage;
+static unsigned s_test_fail_occurrence;
+
+void bruteforce_d3d11_test_fail(const char *stage, unsigned occurrence)
+{
+    s_test_fail_stage = stage;
+    s_test_fail_occurrence = occurrence;
+}
+
+static int scale_test_failure(const char *stage)
+{
+    if (!s_test_fail_stage || strcmp(stage, s_test_fail_stage) != 0 ||
+        !s_test_fail_occurrence || --s_test_fail_occurrence)
+        return 0;
+    s_test_fail_stage = NULL;
+    return 1;
+}
+#else
+static int scale_test_failure(const char *stage) { (void)stage; return 0; }
+#endif
 
 void gpu_d3d11_check_device(ID3D11Device *device, HRESULT result, const char *operation)
 {
@@ -459,7 +483,7 @@ static ID3D11PixelShader *get_rc_shader(const GpuRcKey *k)
 
 /* ---- device -------------------------------------------------------------- */
 
-static int ensure_device(void)
+static int ensure_device_for_scale(int scale_requested)
 {
     static const D3D11_INPUT_ELEMENT_DESC base_il[3] = {
         { "POSITION", 0, DXGI_FORMAT_R32G32B32A32_FLOAT, 0, 0,  D3D11_INPUT_PER_VERTEX_DATA, 0 },
@@ -488,7 +512,7 @@ static int ensure_device(void)
     if (s_failed)
         return 0;
     if (s_dev)
-        return 1;
+        return !scale_requested || gpu_scale_gpu_init(s_dev, s_ctx);
     s_failed = 1;               /* until everything below has worked */
     hr = D3D11CreateDevice(NULL, s_warp ? D3D_DRIVER_TYPE_WARP : D3D_DRIVER_TYPE_HARDWARE,
                            NULL, D3D11_CREATE_DEVICE_SINGLETHREADED, &fl, 1,
@@ -496,16 +520,14 @@ static int ensure_device(void)
     if (FAILED(hr)) {
         gpu_d3d11_check_device(NULL, hr, "creating D3D11 device");
         fprintf(stderr, "[GPU-D3D11] D3D11CreateDevice failed 0x%08lX\n", (unsigned long)hr);
-        return 0;
+        goto failed;
     }
     InterlockedExchange(&s_device_thread, (LONG)GetCurrentThreadId());
     report_device_identity(got);
     if (!compile(s_base_hlsl, sizeof s_base_hlsl - 1, "base", "vs_main", "vs_5_0", &vsb)
         || !compile(s_base_hlsl, sizeof s_base_hlsl - 1, "base", "ps_main", "ps_5_0", &psb)
         || !compile(s_xvs_hlsl, sizeof s_xvs_hlsl - 1, "xvs", "vs_main", "vs_5_0", &xvsb)) {
-        if (vsb) ID3D10Blob_Release(vsb);
-        if (psb) ID3D10Blob_Release(psb);
-        return 0;
+        goto failed;
     }
     gpu_call_failed(ID3D11Device_CreateVertexShader(s_dev, ID3D10Blob_GetBufferPointer(vsb),
                                                     ID3D10Blob_GetBufferSize(vsb), NULL, &s_base_vs),
@@ -525,6 +547,7 @@ static int ensure_device(void)
     ID3D10Blob_Release(vsb);
     ID3D10Blob_Release(psb);
     ID3D10Blob_Release(xvsb);
+    vsb = psb = xvsb = NULL;
 
     memset(&bd, 0, sizeof bd);
     bd.Usage = D3D11_USAGE_DYNAMIC;
@@ -563,15 +586,81 @@ static int ensure_device(void)
 
     s_ps = (PsEntry *)calloc(MAX_PS, sizeof *s_ps);
     if (!s_base_vs || !s_base_ps || !s_base_layout || !s_xvs || !s_xlayout || !s_base_cb
-        || !s_xcb || !s_window_cb || !s_rs || !s_ps)
-        return 0;
-    if (gpu_scale_requested() && !gpu_scale_gpu_init(s_dev, s_ctx))
-        return 0;
+        || !s_xcb || !s_window_cb || !s_rs || !s_rs_cull[0][0] || !s_rs_cull[0][1]
+        || !s_rs_cull[1][0] || !s_rs_cull[1][1] || !s_ps)
+        goto failed;
+    if (scale_requested &&
+        (scale_test_failure("resolve-init") || !gpu_scale_gpu_init(s_dev, s_ctx))) {
+        gpu_d3d11_check_device(s_dev, S_OK, "initializing scaled resolve");
+        fprintf(stderr, "[GPU-SCALE] resolve initialization failed; configuration not committed\n");
+        goto failed;
+    }
     s_failed = 0;
     fprintf(stderr, "[GPU-D3D11] %s device ready (feature level 0x%x)\n",
             s_warp ? "WARP" : "hardware", (unsigned)got);
     return 1;
+
+failed:
+    if (vsb) ID3D10Blob_Release(vsb);
+    if (psb) ID3D10Blob_Release(psb);
+    if (xvsb) ID3D10Blob_Release(xvsb);
+    free(s_ps); s_ps = NULL;
+    {
+        int back, ccw;
+        for (back = 0; back < 2; ++back)
+            for (ccw = 0; ccw < 2; ++ccw) {
+                if (s_rs_cull[back][ccw]) ID3D11RasterizerState_Release(s_rs_cull[back][ccw]);
+                s_rs_cull[back][ccw] = NULL;
+            }
+    }
+    if (s_rs) ID3D11RasterizerState_Release(s_rs);
+    if (s_window_cb) ID3D11Buffer_Release(s_window_cb);
+    if (s_xcb) ID3D11Buffer_Release(s_xcb);
+    if (s_base_cb) ID3D11Buffer_Release(s_base_cb);
+    if (s_xlayout) ID3D11InputLayout_Release(s_xlayout);
+    if (s_base_layout) ID3D11InputLayout_Release(s_base_layout);
+    if (s_xvs) ID3D11VertexShader_Release(s_xvs);
+    if (s_base_ps) ID3D11PixelShader_Release(s_base_ps);
+    if (s_base_vs) ID3D11VertexShader_Release(s_base_vs);
+    s_rs = NULL;
+    s_window_cb = s_xcb = s_base_cb = NULL;
+    s_xlayout = s_base_layout = NULL;
+    s_xvs = s_base_vs = NULL;
+    s_base_ps = NULL;
+    if (s_ctx) ID3D11DeviceContext_Release(s_ctx);
+    if (s_dev) ID3D11Device_Release(s_dev);
+    s_ctx = NULL;
+    s_dev = NULL;
+    s_failed = 0;
+    InterlockedExchange(&s_device_thread, 0);
+    return 0;
 }
+
+static int ensure_device(void)
+{
+    if (s_scale_pending) {
+        if (!ensure_device_for_scale(s_pending_scale.requested)) {
+            fprintf(stderr, "[GPU-SCALE] D3D11 initialization failed;"
+                            " retaining prior configuration\n");
+            return 0;
+        }
+        if (!gpu_scale_commit_config(&s_pending_scale)) {
+            fprintf(stderr, "[GPU-SCALE] cannot commit D3D11 configuration\n");
+            return 0;
+        }
+        s_scale_pending = 0;
+        return 1;
+    }
+    return ensure_device_for_scale(gpu_scale_requested());
+}
+
+#ifdef BRUTEFORCE_D3D11_TESTING
+int bruteforce_d3d11_test_initialize_device(void) { return ensure_device(); }
+uint32_t bruteforce_d3d11_test_device_thread(void)
+{
+    return (uint32_t)InterlockedCompareExchange(&s_device_thread, 0, 0);
+}
+#endif
 
 /* ---- surfaces ------------------------------------------------------------ */
 
@@ -592,6 +681,7 @@ typedef struct {
 
 typedef struct {
     uint32_t va, w, h, pitch, format, surface_type, initialized, recreated;
+    uint32_t logical_w[2], logical_h[2];
     unsigned scale_epoch;
     uint64_t revision, packed_revision;
     int packed_valid;
@@ -608,8 +698,21 @@ static int s_nsurf;
 static Depth s_depth[MAX_SURF];
 static int s_ndepth;
 static Surf *s_cur;
+static Surf *s_last_presented; /* Last readback surface for flip-only resize preflight. */
 static Depth *s_cur_depth;
 static uint32_t s_gen = 1;          /* frame number */
+
+static int query_suspend_clear(void);
+static void query_resume_clear(int counting);
+static void bind_targets(Surf *s, Depth *d);
+
+static void restore_targets(void)
+{
+    if (s_cur)
+        bind_targets(s_cur, s_cur_depth);
+    else
+        ID3D11DeviceContext_OMSetRenderTargets(s_ctx, 0, NULL, NULL);
+}
 
 static int depth_views_enabled(void)
 {
@@ -739,27 +842,35 @@ static int create_surf(Surf *s, ID3D11ShaderResourceView *gpu_seed,
         init.SysMemSlicePitch = 0;
         pinit = &init;
     }
-    if (gpu_call_failed(ID3D11Device_CreateTexture2D(s_dev, &td, pinit, &s->tex),
-                        "creating color surface"))
+    hr = scale_test_failure("color-texture") ? E_OUTOFMEMORY :
+         ID3D11Device_CreateTexture2D(s_dev, &td, pinit, &s->tex);
+    if (gpu_call_failed(hr, "creating color surface"))
         return 0;
-    if (gpu_call_failed(ID3D11Device_CreateRenderTargetView(s_dev, (ID3D11Resource *)s->tex,
-                                                            NULL, &s->rtv),
-                        "creating color render-target view")) {
+    hr = scale_test_failure("color-rtv") ? E_OUTOFMEMORY :
+         ID3D11Device_CreateRenderTargetView(s_dev, (ID3D11Resource *)s->tex, NULL, &s->rtv);
+    if (gpu_call_failed(hr, "creating color render-target view")) {
         release_surf(s);
         return 0;
     }
-    if (gpu_call_failed(ID3D11Device_CreateShaderResourceView(s_dev, (ID3D11Resource *)s->tex,
-                                                              NULL, &s->srv),
-                        "creating color shader-resource view")) {
+    hr = scale_test_failure("color-srv") ? E_OUTOFMEMORY :
+         ID3D11Device_CreateShaderResourceView(s_dev, (ID3D11Resource *)s->tex, NULL, &s->srv);
+    if (gpu_call_failed(hr, "creating color shader-resource view")) {
         release_surf(s);
         return 0;
     }
     if (gpu_seed) {
+        int counting, ok;
         enum GpuScaleBlitMode mode =
             gpu_seed_width > s->pw || gpu_seed_height > s->ph ? GPU_SCALE_BLIT_BOX
                                                                : GPU_SCALE_BLIT_BILINEAR;
-        if (!gpu_scale_blit(gpu_seed, gpu_seed_width, gpu_seed_height,
-                            s->rtv, s->pw, s->ph, mode)) {
+        counting = query_suspend_clear();
+        ok = !scale_test_failure("color-migrate") &&
+             gpu_scale_blit(gpu_seed, gpu_seed_width, gpu_seed_height,
+                            s->rtv, s->pw, s->ph, mode);
+        restore_targets();
+        query_resume_clear(counting);
+        if (!ok) {
+            gpu_d3d11_check_device(s_dev, S_OK, "migrating scaled color surface");
             fprintf(stderr, "[GPU-SCALE] migrating scaled color surface %08X failed\n", s->va);
             release_surf(s);
             return 0;
@@ -775,8 +886,16 @@ static int create_surf(Surf *s, ID3D11ShaderResourceView *gpu_seed,
         if (SUCCEEDED(hr))
             hr = ID3D11Device_CreateShaderResourceView(s_dev, (ID3D11Resource *)seed,
                                                        NULL, &seed_srv);
-        if (FAILED(hr) || !gpu_scale_blit(seed_srv, s->w, s->h, s->rtv, s->pw, s->ph,
-                                          GPU_SCALE_BLIT_BILINEAR)) {
+        if (SUCCEEDED(hr)) {
+            int counting = query_suspend_clear();
+            int ok = gpu_scale_blit(seed_srv, s->w, s->h, s->rtv, s->pw, s->ph,
+                                    GPU_SCALE_BLIT_BILINEAR);
+            restore_targets();
+            query_resume_clear(counting);
+            if (!ok)
+                hr = E_FAIL;
+        }
+        if (FAILED(hr)) {
             gpu_d3d11_check_device(s_dev, hr, "seeding scaled color surface");
             fprintf(stderr, "[GPU-SCALE] scaled color seed for %08X failed 0x%08lX\n",
                     s->va, (unsigned long)hr);
@@ -814,6 +933,11 @@ static Surf *get_surf(const Nv2aSurface *in)
     Surf *s = NULL;
     int i;
 
+    if (aa_sx > 2 || aa_sy > 2) {
+        fprintf(stderr, "[GPU-SCALE] unsupported guest anti-aliasing factors %ux%u\n",
+                aa_sx, aa_sy);
+        return NULL;
+    }
     for (i = 0; i < s_nsurf; i++)
         if (s_surf[i].va == in->color_va) { s = &s_surf[i]; break; }
     if (s) {
@@ -853,6 +977,7 @@ static Surf *get_surf(const Nv2aSurface *in)
             release_surf(&replacement);
             if (guest_layout_changed)
                 release_surf_guest(&replacement);
+            fprintf(stderr, "[GPU-D3D11] retaining prior color resources for %08X\n", s->va);
             return NULL;
         }
         if (s_cur == s)
@@ -868,8 +993,10 @@ static Surf *get_surf(const Nv2aSurface *in)
         s->scale_epoch = gpu_scale_epoch();
     }
     if (!s) {
-        if (s_nsurf == MAX_SURF)
+        if (s_nsurf == MAX_SURF) {
+            fprintf(stderr, "[GPU-D3D11] color surface limit reached for %08X\n", in->color_va);
             return NULL;
+        }
         s = &s_surf[s_nsurf++];
         memset(s, 0, sizeof *s);
         s->va = in->color_va;
@@ -976,52 +1103,47 @@ static uint32_t *depth_seed(uint32_t va, uint32_t w, uint32_t h, uint32_t pitch,
     return seed;
 }
 
-static Depth *get_depth(uint32_t va, uint32_t w, uint32_t h)
+static void depth_record_use(Depth *d, const Surf *surf)
+{
+    unsigned x = surf->aa_sx > 1, y = surf->aa_sy > 1;
+    if (d->logical_w[x] < surf->w) d->logical_w[x] = surf->w;
+    if (d->logical_h[y] < surf->h) d->logical_h[y] = surf->h;
+}
+
+static int depth_size_for(const Depth *d, float scale, uint32_t *width, uint32_t *height)
+{
+    uint32_t w = 0, h = 0;
+    unsigned x, y;
+    for (x = 0; x < 2; ++x)
+        for (y = 0; y < 2; ++y) {
+            uint32_t pw, ph;
+            if (!d->logical_w[x] || !d->logical_h[y])
+                continue;
+            if (!gpu_scale_surface_size_for(scale, d->logical_w[x], d->logical_h[y],
+                                            x + 1, y + 1, &pw, &ph))
+                return 0;
+            if (w < pw) w = pw;
+            if (h < ph) h = ph;
+        }
+    if (!w || !h)
+        return 0;
+    *width = w;
+    *height = h;
+    return 1;
+}
+
+static int create_depth_resource(Depth *d, int existing)
 {
     D3D11_TEXTURE2D_DESC td;
     D3D11_SUBRESOURCE_DATA init;
     D3D11_DEPTH_STENCIL_VIEW_DESC dv;
     D3D11_SHADER_RESOURCE_VIEW_DESC sv;
-    Depth *d = NULL;
     uint32_t *seed = NULL;
-    uint32_t pitch = nv2a_backend_reg(0x020C) >> 16;
-    uint32_t surface_format = nv2a_backend_reg(0x0208);
-    uint32_t format = (surface_format >> 4) & 0xF;
-    uint32_t surface_type = (surface_format >> 8) & 0xF;
-    int existing;
+    int seeded = 0;
     HRESULT hr;
-    int i;
 
-    if (!va)
-        return NULL;
-    for (i = 0; i < s_ndepth; i++)
-        if (s_depth[i].va == va) { d = &s_depth[i]; break; }
-    existing = d != NULL;
-    if (d && d->scale_epoch == gpu_scale_epoch() && d->w >= w && d->h >= h &&
-        (!depth_views_enabled() || (d->pitch == pitch && d->format == format &&
-                                   d->surface_type == surface_type)))
-        return d;
-    if (d) {
-        if (s_cur_depth == d)
-            s_cur_depth = NULL;
-        if (d->scale_epoch == gpu_scale_epoch() &&
-            (!depth_views_enabled() || (d->pitch == pitch && d->format == format &&
-                                       d->surface_type == surface_type))) {
-            w = w > d->w ? w : d->w;
-            h = h > d->h ? h : d->h;
-        }
-        release_depth(d);
-    } else {
-        if (s_ndepth == MAX_SURF)
-            return NULL;
-        d = &s_depth[s_ndepth++];
-    }
-    memset(d, 0, sizeof *d);
-    d->va = va; d->w = w; d->h = h; d->pitch = pitch; d->format = format;
-    d->surface_type = surface_type; d->recreated = existing;
-    d->scale_epoch = gpu_scale_epoch();
     memset(&td, 0, sizeof td);
-    td.Width = w; td.Height = h; td.MipLevels = 1; td.ArraySize = 1;
+    td.Width = d->w; td.Height = d->h; td.MipLevels = 1; td.ArraySize = 1;
     td.Format = depth_views_enabled() ? DXGI_FORMAT_R24G8_TYPELESS
                                       : DXGI_FORMAT_D24_UNORM_S8_UINT;
     td.SampleDesc.Count = 1;
@@ -1029,15 +1151,16 @@ static Depth *get_depth(uint32_t va, uint32_t w, uint32_t h)
     td.BindFlags = D3D11_BIND_DEPTH_STENCIL |
                    (depth_views_enabled() ? D3D11_BIND_SHADER_RESOURCE : 0);
     if (depth_views_enabled() && !existing)
-        seed = depth_seed(va, w, h, pitch, format, surface_type);
+        seed = depth_seed(d->va, d->w, d->h, d->pitch, d->format, d->surface_type);
     memset(&init, 0, sizeof init);
     init.pSysMem = seed;
-    init.SysMemPitch = w * 4;
-    hr = ID3D11Device_CreateTexture2D(s_dev, &td, seed ? &init : NULL, &d->tex);
+    init.SysMemPitch = d->w * 4;
+    hr = scale_test_failure("depth-texture") ? E_OUTOFMEMORY :
+         ID3D11Device_CreateTexture2D(s_dev, &td, seed ? &init : NULL, &d->tex);
     if (FAILED(hr) && seed) {
         gpu_d3d11_check_device(s_dev, hr, "uploading depth seed");
         fprintf(stderr, "[GPU-D3D11] depth seed upload for %08X failed 0x%08lX;"
-                        " sampling will require a GPU depth clear\n", va, (unsigned long)hr);
+                        " sampling will require a GPU depth clear\n", d->va, (unsigned long)hr);
         free(seed);
         seed = NULL;
         hr = ID3D11Device_CreateTexture2D(s_dev, &td, NULL, &d->tex);
@@ -1046,14 +1169,15 @@ static Depth *get_depth(uint32_t va, uint32_t w, uint32_t h)
         goto failed;
     if (seed) {
         d->initialized = 3;
-        s_st.depth_seeds++;
+        seeded = 1;
         free(seed);
         seed = NULL;
     }
     memset(&dv, 0, sizeof dv);
     dv.Format = DXGI_FORMAT_D24_UNORM_S8_UINT;
     dv.ViewDimension = D3D11_DSV_DIMENSION_TEXTURE2D;
-    hr = ID3D11Device_CreateDepthStencilView(s_dev, (ID3D11Resource *)d->tex, &dv, &d->dsv);
+    hr = scale_test_failure("depth-view") ? E_OUTOFMEMORY :
+         ID3D11Device_CreateDepthStencilView(s_dev, (ID3D11Resource *)d->tex, &dv, &d->dsv);
     if (FAILED(hr))
         goto failed;
     if (depth_views_enabled()) {
@@ -1061,11 +1185,14 @@ static Depth *get_depth(uint32_t va, uint32_t w, uint32_t h)
         sv.Format = DXGI_FORMAT_R24_UNORM_X8_TYPELESS;
         sv.ViewDimension = D3D11_SRV_DIMENSION_TEXTURE2D;
         sv.Texture2D.MipLevels = 1;
-        hr = ID3D11Device_CreateShaderResourceView(s_dev, (ID3D11Resource *)d->tex, &sv, &d->srv);
+        hr = scale_test_failure("depth-srv") ? E_OUTOFMEMORY :
+             ID3D11Device_CreateShaderResourceView(s_dev, (ID3D11Resource *)d->tex, &sv, &d->srv);
         if (FAILED(hr))
             goto failed;
     }
-    return d;
+    if (seeded)
+        s_st.depth_seeds++;
+    return 1;
 
 failed:
     gpu_d3d11_check_device(s_dev, hr, "creating depth resources");
@@ -1073,7 +1200,63 @@ failed:
     fprintf(stderr, "[GPU-D3D11] depth surface creation failed 0x%08lX\n", (unsigned long)hr);
     release_depth(d);
     memset(d, 0, sizeof *d);
-    return NULL;
+    return 0;
+}
+
+static Depth *get_depth(uint32_t va, const Surf *surf)
+{
+    uint32_t w = surf->pw, h = surf->ph;
+    uint32_t pitch = nv2a_backend_reg(0x020C) >> 16;
+    uint32_t surface_format = nv2a_backend_reg(0x0208);
+    uint32_t format = (surface_format >> 4) & 0xF;
+    uint32_t surface_type = (surface_format >> 8) & 0xF;
+    Depth *d = NULL, replacement;
+    int existing, same_layout, i;
+
+    if (!va)
+        return NULL;
+    for (i = 0; i < s_ndepth; i++)
+        if (s_depth[i].va == va) { d = &s_depth[i]; break; }
+    existing = d != NULL;
+    same_layout = d && (!depth_views_enabled() ||
+                        (d->pitch == pitch && d->format == format &&
+                         d->surface_type == surface_type));
+    if (d && d->scale_epoch == gpu_scale_epoch() && d->w >= w && d->h >= h && same_layout) {
+        depth_record_use(d, surf);
+        return d;
+    }
+    if (!d && s_ndepth == MAX_SURF) {
+        fprintf(stderr, "[GPU-D3D11] depth surface limit reached for %08X\n", va);
+        return NULL;
+    }
+    memset(&replacement, 0, sizeof replacement);
+    if (same_layout) {
+        memcpy(replacement.logical_w, d->logical_w, sizeof replacement.logical_w);
+        memcpy(replacement.logical_h, d->logical_h, sizeof replacement.logical_h);
+        if (d->scale_epoch == gpu_scale_epoch()) {
+            if (w < d->w) w = d->w;
+            if (h < d->h) h = d->h;
+        }
+    }
+    replacement.va = va; replacement.w = w; replacement.h = h; replacement.pitch = pitch;
+    replacement.format = format; replacement.surface_type = surface_type;
+    replacement.recreated = existing;
+    replacement.scale_epoch = gpu_scale_epoch();
+    depth_record_use(&replacement, surf);
+    if (!create_depth_resource(&replacement, existing)) {
+        if (d)
+            fprintf(stderr, "[GPU-D3D11] retaining prior depth resources for %08X\n", va);
+        return NULL;
+    }
+    if (d) {
+        if (s_cur_depth == d)
+            s_cur_depth = NULL;
+        release_depth(d);
+    } else {
+        d = &s_depth[s_ndepth++];
+    }
+    *d = replacement;
+    return d;
 }
 
 static Depth *check_depth_texture(const Nv2aTexture *t, int cube, unsigned levels,
@@ -1364,9 +1547,14 @@ static int begin(const Nv2aSurface *s, const Nv2aRenderState *rs)
     surf = get_surf(s);
     if (!surf)
         return 0;
-    d = rs ? get_depth(rs->zeta_va, surf->pw, surf->ph) : NULL;
-    if (surf != s_cur || d != s_cur_depth)
+    d = rs ? get_depth(rs->zeta_va, surf) : NULL;
+    if (rs && rs->zeta_va && !d)
+        return 0;
+    if (surf != s_cur || d != s_cur_depth) {
+        int counting = surf != s_cur ? query_suspend_clear() : 0;
         bind_targets(surf, d);
+        query_resume_clear(counting);
+    }
     apply_scissor(s);
     return 1;
 }
@@ -1408,6 +1596,7 @@ static int upload_guest_surface(Surf *s)
 {
     Surf *restore = s_cur;
     Depth *restore_depth = s_cur_depth;
+    int counting, ok;
 
     if (s->pw == s->w && s->ph == s->h) {
         ID3D11DeviceContext_UpdateSubresource(s_ctx, (ID3D11Resource *)s->tex, 0, NULL,
@@ -1418,15 +1607,23 @@ static int upload_guest_surface(Surf *s)
         return 0;
     ID3D11DeviceContext_UpdateSubresource(s_ctx, (ID3D11Resource *)s->guest_tex, 0, NULL,
                                          GUEST(s->va), s->pitch, 0);
-    if (!gpu_scale_blit(s->guest_srv, s->w, s->h, s->rtv, s->pw, s->ph,
-                        GPU_SCALE_BLIT_BILINEAR)) {
+    counting = query_suspend_clear();
+    ok = gpu_scale_blit(s->guest_srv, s->w, s->h, s->rtv, s->pw, s->ph,
+                        GPU_SCALE_BLIT_BILINEAR);
+    if (!ok) {
         fprintf(stderr, "[GPU-D3D11] guest color upload for %08X failed\n", s->va);
         if (restore)
             bind_targets(restore, restore_depth);
+        else
+            ID3D11DeviceContext_OMSetRenderTargets(s_ctx, 0, NULL, NULL);
+        query_resume_clear(counting);
         return 0;
     }
     if (restore)
         bind_targets(restore, restore_depth);
+    else
+        ID3D11DeviceContext_OMSetRenderTargets(s_ctx, 0, NULL, NULL);
+    query_resume_clear(counting);
     return 1;
 }
 
@@ -2305,9 +2502,6 @@ static ID3D11PixelShader *s_clear_ps;
 static ID3D11Buffer *s_clear_cb;
 static ID3D11BlendState *s_clear_blend[16];
 static ID3D11DepthStencilState *s_clear_ds[4];
-
-static int query_suspend_clear(void);
-static void query_resume_clear(int counting);
 
 static void clear_error(const char *operation, HRESULT hr)
 {
@@ -3436,6 +3630,7 @@ static ID3D11Query *s_q_pending[MAX_QUERIES];
 static double s_q_pending_divisor[MAX_QUERIES];
 static int s_q_npending;
 static ID3D11Query *s_q_active;
+static double s_q_active_divisor;
 static uint64_t s_q_total;
 static ID3D11Query *s_event_pool[MAX_REPORTS];
 static int s_event_free;
@@ -3508,6 +3703,13 @@ static uint64_t normalize_query_count(UINT64 count, double divisor)
                : count;
 }
 
+static void query_begin(void)
+{
+    s_q_active = query_get();
+    s_q_active_divisor = query_divisor();
+    ID3D11DeviceContext_Begin(s_ctx, (ID3D11Asynchronous *)s_q_active);
+}
+
 /* Wait for every ended query and add its count. */
 static void query_drain(void)
 {
@@ -3539,7 +3741,7 @@ static void query_end(void)
     if (s_q_npending == MAX_QUERIES)
         query_drain();
     s_q_pending[s_q_npending] = s_q_active;
-    s_q_pending_divisor[s_q_npending++] = query_divisor();
+    s_q_pending_divisor[s_q_npending++] = s_q_active_divisor;
     s_q_active = NULL;
 }
 
@@ -3553,10 +3755,8 @@ static int query_suspend_clear(void)
 
 static void query_resume_clear(int counting)
 {
-    if (counting) {
-        s_q_active = query_get();
-        ID3D11DeviceContext_Begin(s_ctx, (ID3D11Asynchronous *)s_q_active);
-    }
+    if (counting)
+        query_begin();
 }
 
 /* RECOMP_GPU_ZPASS=async: a report is written into guest memory when its
@@ -3682,10 +3882,8 @@ static int d3d_zpass_report(uint32_t report_va, uint64_t stamp)
     s_q_total = 0;
     s_rep_reset_next = 0;
     s_rep_tail++;
-    if (counting) {
-        s_q_active = query_get();
-        ID3D11DeviceContext_Begin(s_ctx, (ID3D11Asynchronous *)s_q_active);
-    }
+    if (counting)
+        query_begin();
     d3d_poll();
     return 1;
 }
@@ -3703,16 +3901,13 @@ static void d3d_zpass(int op)
         s_q_npending = 0;
         s_q_total = 0;
         s_rep_reset_next = 1;
-        if (counting) {
-            s_q_active = query_get();
-            ID3D11DeviceContext_Begin(s_ctx, (ID3D11Asynchronous *)s_q_active);
-        }
+        if (counting)
+            query_begin();
         return;
     }
     if (op == NV2A_ZPASS_BEGIN) {
         query_end();
-        s_q_active = query_get();
-        ID3D11DeviceContext_Begin(s_ctx, (ID3D11Asynchronous *)s_q_active);
+        query_begin();
     } else if (op == NV2A_ZPASS_END) {
         query_end();
     } else {                                /* CLEAR_REPORT_VALUE */
@@ -3720,10 +3915,8 @@ static void d3d_zpass(int op)
         query_end();
         query_drain();
         s_q_total = 0;
-        if (counting) {
-            s_q_active = query_get();
-            ID3D11DeviceContext_Begin(s_ctx, (ID3D11Asynchronous *)s_q_active);
-        }
+        if (counting)
+            query_begin();
     }
 }
 
@@ -3735,10 +3928,8 @@ static uint32_t d3d_zpass_count(void)
     gpu_d3d11_check_device(s_dev, S_OK, "reading visibility count");
     query_end();
     query_drain();
-    if (counting) {
-        s_q_active = query_get();
-        ID3D11DeviceContext_Begin(s_ctx, (ID3D11Asynchronous *)s_q_active);
-    }
+    if (counting)
+        query_begin();
     s_q_reads++;
     return s_q_total > 0xFFFFFFFFull ? 0xFFFFFFFFu : (uint32_t)s_q_total;
 }
@@ -3757,6 +3948,22 @@ static HANDLE s_present_handle;
 static uint32_t s_present_w, s_present_h;
 static int s_present_unsubmitted, s_present_failed;
 
+typedef struct {
+    ID3D11Texture2D *texture;
+    ID3D11RenderTargetView *rtv;
+    IDXGIKeyedMutex *mutex;
+    HANDLE handle;
+    uint32_t width, height;
+} SharedPresent;
+
+static void release_shared_candidate(SharedPresent *present)
+{
+    if (present->mutex) IDXGIKeyedMutex_Release(present->mutex);
+    if (present->rtv) ID3D11RenderTargetView_Release(present->rtv);
+    if (present->texture) ID3D11Texture2D_Release(present->texture);
+    memset(present, 0, sizeof *present);
+}
+
 static void release_shared_present(void)
 {
     if (s_present_mutex) IDXGIKeyedMutex_Release(s_present_mutex);
@@ -3769,12 +3976,13 @@ static void release_shared_present(void)
     s_present_w = s_present_h = 0;
 }
 
-static int create_shared_present(uint32_t width, uint32_t height)
+static int create_shared_present(uint32_t width, uint32_t height, SharedPresent *present)
 {
     D3D11_TEXTURE2D_DESC td;
     IDXGIResource *resource = NULL;
     HRESULT hr;
 
+    memset(present, 0, sizeof *present);
     memset(&td, 0, sizeof td);
     td.Width = width;
     td.Height = height;
@@ -3785,81 +3993,152 @@ static int create_shared_present(uint32_t width, uint32_t height)
     td.Usage = D3D11_USAGE_DEFAULT;
     td.BindFlags = D3D11_BIND_SHADER_RESOURCE | D3D11_BIND_RENDER_TARGET;
     td.MiscFlags = D3D11_RESOURCE_MISC_SHARED_KEYEDMUTEX;
-    hr = ID3D11Device_CreateTexture2D(s_dev, &td, NULL, &s_present_shared);
+    hr = scale_test_failure("shared-texture") ? E_OUTOFMEMORY :
+         ID3D11Device_CreateTexture2D(s_dev, &td, NULL, &present->texture);
     if (SUCCEEDED(hr))
-        hr = ID3D11Device_CreateRenderTargetView(s_dev, (ID3D11Resource *)s_present_shared,
-                                                 NULL, &s_present_rtv);
+        hr = scale_test_failure("shared-rtv") ? E_OUTOFMEMORY :
+             ID3D11Device_CreateRenderTargetView(s_dev, (ID3D11Resource *)present->texture,
+                                                 NULL, &present->rtv);
     if (SUCCEEDED(hr))
-        hr = ID3D11Texture2D_QueryInterface(s_present_shared, &IID_IDXGIResource,
+        hr = ID3D11Texture2D_QueryInterface(present->texture, &IID_IDXGIResource,
                                             (void **)&resource);
     if (SUCCEEDED(hr))
-        hr = IDXGIResource_GetSharedHandle(resource, &s_present_handle);
+        hr = scale_test_failure("shared-handle") ? E_OUTOFMEMORY :
+             IDXGIResource_GetSharedHandle(resource, &present->handle);
     if (SUCCEEDED(hr))
-        hr = ID3D11Texture2D_QueryInterface(s_present_shared, &IID_IDXGIKeyedMutex,
-                                            (void **)&s_present_mutex);
+        hr = scale_test_failure("shared-mutex") ? E_OUTOFMEMORY :
+             ID3D11Texture2D_QueryInterface(present->texture, &IID_IDXGIKeyedMutex,
+                                            (void **)&present->mutex);
     if (resource)
         IDXGIResource_Release(resource);
-    if (FAILED(hr) || !s_present_handle) {
+    if (FAILED(hr) || !present->handle) {
         gpu_d3d11_check_device(s_dev, hr, "creating shared presentation texture");
         fprintf(stderr, "[GPU-D3D11] shared presentation texture failed 0x%08lX;"
-                        " retaining CPU presentation\n", (unsigned long)hr);
-        release_shared_present();
+                        " retaining prior shared resources and CPU presentation\n",
+                (unsigned long)hr);
+        release_shared_candidate(present);
+        return 0;
+    }
+    present->width = width;
+    present->height = height;
+    return 1;
+}
+
+static void install_shared_present(SharedPresent *present)
+{
+    release_shared_present();
+    s_present_shared = present->texture;
+    s_present_rtv = present->rtv;
+    s_present_mutex = present->mutex;
+    s_present_handle = present->handle;
+    s_present_w = present->width;
+    s_present_h = present->height;
+    memset(present, 0, sizeof *present);
+}
+
+static int reclaim_unsubmitted_present(void)
+{
+    HRESULT hr;
+    if (!s_present_unsubmitted)
+        return 1;
+    hr = IDXGIKeyedMutex_AcquireSync(s_present_mutex, 1, 0);
+    if (hr == WAIT_TIMEOUT) {
+        gpu_d3d11_check_device(s_dev, hr, "reclaiming shared frame");
+        return 0;
+    }
+    if (hr == S_OK)
+        hr = IDXGIKeyedMutex_ReleaseSync(s_present_mutex, 0);
+    if (hr != S_OK) {
+        gpu_d3d11_check_device(s_dev, hr, "reclaiming shared frame");
+        fprintf(stderr, "[GPU-D3D11] cannot reclaim an unsubmitted shared frame 0x%08lX\n",
+                (unsigned long)hr);
         s_present_failed = 1;
         return 0;
     }
-    s_present_w = width;
-    s_present_h = height;
+    s_present_unsubmitted = 0;
     return 1;
+}
+
+static int prepare_shared_present(uint32_t width, uint32_t height,
+                                  SharedPresent *candidate, int *old_locked)
+{
+    HRESULT hr;
+    memset(candidate, 0, sizeof *candidate);
+    *old_locked = 0;
+    if (s_present_failed)
+        return 0;
+    if (s_present_shared && s_present_w == width && s_present_h == height)
+        return 1;
+    if (!reclaim_unsubmitted_present())
+        return 0;
+    if (s_present_shared) {
+        hr = IDXGIKeyedMutex_AcquireSync(s_present_mutex, 0, 0);
+        if (hr == WAIT_TIMEOUT) {
+            gpu_d3d11_check_device(s_dev, hr, "waiting to resize shared frame");
+            s_st.present_busy++;
+            fprintf(stderr, "[GPU-D3D11] shared frame resize deferred: prior frame"
+                            " is pending or busy\n");
+            return 0;
+        }
+        if (hr != S_OK) {
+            gpu_d3d11_check_device(s_dev, hr, "resizing shared frame");
+            fprintf(stderr, "[GPU-D3D11] shared frame resize acquire failed 0x%08lX;"
+                            " retaining prior resources\n", (unsigned long)hr);
+            s_present_failed = 1;
+            return 0;
+        }
+        *old_locked = 1;
+    }
+    return create_shared_present(width, height, candidate);
+}
+
+static int release_shared_resize_lock(int *old_locked)
+{
+    HRESULT hr;
+    if (!*old_locked)
+        return 1;
+    *old_locked = 0;
+    hr = IDXGIKeyedMutex_ReleaseSync(s_present_mutex, 0);
+    if (hr == S_OK)
+        return 1;
+    gpu_d3d11_check_device(s_dev, hr, "releasing shared frame resize lock");
+    fprintf(stderr, "[GPU-D3D11] shared frame resize release failed 0x%08lX;"
+                    " retaining prior resources\n", (unsigned long)hr);
+    s_present_failed = 1;
+    return 0;
 }
 
 static void publish_shared_present(Surf *sf)
 {
     uint32_t width = sf->pw, height = sf->ph;
+    SharedPresent candidate;
+    int old_locked = 0;
     HRESULT hr;
 
     if (!s_direct_present || s_present_failed)
         return;
-    if (s_present_unsubmitted) {
-        hr = IDXGIKeyedMutex_AcquireSync(s_present_mutex, 1, 0);
-        if (hr == WAIT_TIMEOUT) {
-            gpu_d3d11_check_device(s_dev, hr, "reclaiming shared frame");
-            return;
-        }
-        if (hr == S_OK)
-            hr = IDXGIKeyedMutex_ReleaseSync(s_present_mutex, 0);
-        if (hr != S_OK) {
-            gpu_d3d11_check_device(s_dev, hr, "reclaiming shared frame");
-            fprintf(stderr, "[GPU-D3D11] cannot reclaim an unsubmitted shared frame 0x%08lX\n",
-                    (unsigned long)hr);
-            s_present_failed = 1;
-            return;
-        }
-        s_present_unsubmitted = 0;
-    }
+    if (!reclaim_unsubmitted_present())
+        return;
     if (sf->bpp != 4 || sf->pitch != sf->w * 4)
         return;
-    if (gpu_scale_requested())
-        gpu_present_output_size(&width, &height);
+    if (gpu_scale_requested()) {
+        if (gpu_scale_native() && !gpu_scale_fixed_output(NULL, NULL))
+            gpu_scale_output_size(&width, &height);
+        else
+            gpu_present_output_size(&width, &height);
+    }
     if (!gpu_present_shared_ready(width, height))
         return;
-    if (s_present_shared && (s_present_w != width || s_present_h != height)) {
-        hr = IDXGIKeyedMutex_AcquireSync(s_present_mutex, 0, 0);
-        if (hr == WAIT_TIMEOUT) {
-            s_st.present_busy++;
-            return;
-        }
-        if (hr != S_OK) {
-            gpu_d3d11_check_device(s_dev, hr, "resizing shared frame");
-            fprintf(stderr, "[GPU-D3D11] shared frame resize acquire failed 0x%08lX;"
-                            " retaining CPU presentation\n", (unsigned long)hr);
-            s_present_failed = 1;
-            return;
-        }
-        IDXGIKeyedMutex_ReleaseSync(s_present_mutex, 0);
-        release_shared_present();
-    }
-    if (!s_present_shared && !create_shared_present(width, height))
+    if (!prepare_shared_present(width, height, &candidate, &old_locked)) {
+        release_shared_resize_lock(&old_locked);
         return;
+    }
+    if (!release_shared_resize_lock(&old_locked)) {
+        release_shared_candidate(&candidate);
+        return;
+    }
+    if (candidate.texture)
+        install_shared_present(&candidate);
     hr = IDXGIKeyedMutex_AcquireSync(s_present_mutex, 0, 0);
     if (hr == WAIT_TIMEOUT) {
         gpu_d3d11_check_device(s_dev, hr, "acquiring shared frame");
@@ -3904,49 +4183,106 @@ static void publish_shared_present(Surf *sf)
         s_present_unsubmitted = 1;
 }
 
-static ID3D11Texture2D *readback_source(Surf *sf)
+typedef struct {
+    ID3D11Texture2D *texture;
+    ID3D11RenderTargetView *rtv;
+    uint32_t width, height, bpp;
+} ReadbackResolve;
+
+static void release_readback_candidate(ReadbackResolve *resolve)
+{
+    if (resolve->rtv) ID3D11RenderTargetView_Release(resolve->rtv);
+    if (resolve->texture) ID3D11Texture2D_Release(resolve->texture);
+    memset(resolve, 0, sizeof *resolve);
+}
+
+static int create_readback_resolve(const Surf *sf, ReadbackResolve *resolve)
 {
     D3D11_TEXTURE2D_DESC td;
     HRESULT hr;
 
+    memset(resolve, 0, sizeof *resolve);
+    memset(&td, 0, sizeof td);
+    td.Width = sf->w;
+    td.Height = sf->h;
+    td.MipLevels = 1;
+    td.ArraySize = 1;
+    td.Format = surf_format(sf->bpp);
+    td.SampleDesc.Count = 1;
+    td.Usage = D3D11_USAGE_DEFAULT;
+    td.BindFlags = D3D11_BIND_RENDER_TARGET;
+    hr = scale_test_failure("readback-texture") ? E_OUTOFMEMORY :
+         ID3D11Device_CreateTexture2D(s_dev, &td, NULL, &resolve->texture);
+    if (SUCCEEDED(hr))
+        hr = scale_test_failure("readback-rtv") ? E_OUTOFMEMORY :
+             ID3D11Device_CreateRenderTargetView(
+                 s_dev, (ID3D11Resource *)resolve->texture, NULL, &resolve->rtv);
+    if (FAILED(hr)) {
+        gpu_d3d11_check_device(s_dev, hr, "creating scaled readback resolve");
+        fprintf(stderr, "[GPU-SCALE] readback resolve creation failed 0x%08lX;"
+                        " retaining prior readback resources\n", (unsigned long)hr);
+        release_readback_candidate(resolve);
+        return 0;
+    }
+    resolve->width = sf->w;
+    resolve->height = sf->h;
+    resolve->bpp = sf->bpp;
+    return 1;
+}
+
+static void install_readback_resolve(ReadbackResolve *resolve)
+{
+    if (s_readback_resolve_rtv) ID3D11RenderTargetView_Release(s_readback_resolve_rtv);
+    if (s_readback_resolve) ID3D11Texture2D_Release(s_readback_resolve);
+    s_readback_resolve = resolve->texture;
+    s_readback_resolve_rtv = resolve->rtv;
+    s_readback_resolve_w = resolve->width;
+    s_readback_resolve_h = resolve->height;
+    s_readback_resolve_bpp = resolve->bpp;
+    memset(resolve, 0, sizeof *resolve);
+}
+
+static int create_staging_texture(const Surf *sf, ID3D11Texture2D **texture)
+{
+    D3D11_TEXTURE2D_DESC td;
+    HRESULT hr;
+    *texture = NULL;
+    memset(&td, 0, sizeof td);
+    td.Width = sf->w; td.Height = sf->h; td.MipLevels = 1; td.ArraySize = 1;
+    td.Format = surf_format(sf->bpp);
+    td.SampleDesc.Count = 1;
+    td.Usage = D3D11_USAGE_STAGING;
+    td.CPUAccessFlags = D3D11_CPU_ACCESS_READ;
+    hr = scale_test_failure("staging-texture") ? E_OUTOFMEMORY :
+         ID3D11Device_CreateTexture2D(s_dev, &td, NULL, texture);
+    if (FAILED(hr)) {
+        gpu_d3d11_check_device(s_dev, hr, "creating readback texture");
+        fprintf(stderr, "[GPU-D3D11] readback texture creation failed 0x%08lX;"
+                        " retaining prior readback resources\n", (unsigned long)hr);
+        return 0;
+    }
+    return 1;
+}
+
+static void install_staging_texture(ID3D11Texture2D *texture, const Surf *sf)
+{
+    if (s_staging) ID3D11Texture2D_Release(s_staging);
+    s_staging = texture;
+    s_staging_w = sf->w;
+    s_staging_h = sf->h;
+    s_staging_bpp = sf->bpp;
+}
+
+static ID3D11Texture2D *readback_source(Surf *sf)
+{
     if (sf->pw == sf->w && sf->ph == sf->h)
         return sf->tex;
     if (!s_readback_resolve || s_readback_resolve_w != sf->w ||
         s_readback_resolve_h != sf->h || s_readback_resolve_bpp != sf->bpp) {
-        if (s_readback_resolve_rtv)
-            ID3D11RenderTargetView_Release(s_readback_resolve_rtv);
-        if (s_readback_resolve)
-            ID3D11Texture2D_Release(s_readback_resolve);
-        s_readback_resolve_rtv = NULL;
-        s_readback_resolve = NULL;
-        memset(&td, 0, sizeof td);
-        td.Width = sf->w;
-        td.Height = sf->h;
-        td.MipLevels = 1;
-        td.ArraySize = 1;
-        td.Format = surf_format(sf->bpp);
-        td.SampleDesc.Count = 1;
-        td.Usage = D3D11_USAGE_DEFAULT;
-        td.BindFlags = D3D11_BIND_RENDER_TARGET;
-        hr = ID3D11Device_CreateTexture2D(s_dev, &td, NULL, &s_readback_resolve);
-        if (SUCCEEDED(hr))
-            hr = ID3D11Device_CreateRenderTargetView(
-                s_dev, (ID3D11Resource *)s_readback_resolve, NULL, &s_readback_resolve_rtv);
-        if (FAILED(hr)) {
-            gpu_d3d11_check_device(s_dev, hr, "creating scaled readback resolve");
-            fprintf(stderr, "[GPU-SCALE] readback resolve creation failed 0x%08lX\n",
-                    (unsigned long)hr);
-            if (s_readback_resolve_rtv)
-                ID3D11RenderTargetView_Release(s_readback_resolve_rtv);
-            if (s_readback_resolve)
-                ID3D11Texture2D_Release(s_readback_resolve);
-            s_readback_resolve_rtv = NULL;
-            s_readback_resolve = NULL;
+        ReadbackResolve candidate;
+        if (!create_readback_resolve(sf, &candidate))
             return NULL;
-        }
-        s_readback_resolve_w = sf->w;
-        s_readback_resolve_h = sf->h;
-        s_readback_resolve_bpp = sf->bpp;
+        install_readback_resolve(&candidate);
     }
     if (!gpu_scale_blit(sf->srv, sf->pw, sf->ph, s_readback_resolve_rtv,
                         sf->w, sf->h,
@@ -3958,6 +4294,164 @@ static ID3D11Texture2D *readback_source(Surf *sf)
     return s_readback_resolve;
 }
 
+static int apply_native_output(uint32_t width, uint32_t height, Surf *presented,
+                               int require_shared)
+{
+    GpuScaleUpdate update;
+    Surf colors[MAX_SURF];
+    Depth depths[MAX_SURF];
+    int replace_color[MAX_SURF] = {0}, replace_depth[MAX_SURF] = {0};
+    SharedPresent shared = {0};
+    ReadbackResolve resolve = {0};
+    ID3D11Texture2D *staging = NULL;
+    Surf *readback = presented;
+    int old_locked = 0, counting, recreated_depths = 0, i;
+
+    if (!gpu_scale_prepare_output(width, height, &update))
+        return 0;
+    if (!update.changed)
+        return 1;
+    if (!s_dev) {
+        fprintf(stderr, "[GPU-SCALE] output change requires an initialized D3D11 device;"
+                        " retaining prior configuration\n");
+        return 0;
+    }
+    memset(colors, 0, sizeof colors);
+    memset(depths, 0, sizeof depths);
+    counting = query_suspend_clear();
+    if (require_shared &&
+        !prepare_shared_present(width, height, &shared, &old_locked))
+        goto failed;
+    if (update.scale_changed) {
+        for (i = 0; i < s_nsurf; ++i) {
+            Surf *old = &s_surf[i];
+            uint32_t pw, ph;
+            if (!gpu_scale_surface_size_for(update.scale, old->w, old->h,
+                                            old->aa_sx, old->aa_sy, &pw, &ph))
+                goto failed;
+            if (old->pw == pw && old->ph == ph)
+                continue;
+            colors[i] = *old;
+            colors[i].pw = pw;
+            colors[i].ph = ph;
+            colors[i].scale_epoch = update.epoch;
+            colors[i].tex = NULL;
+            colors[i].rtv = NULL;
+            colors[i].srv = NULL;
+            if (!create_surf(&colors[i], old->srv, old->pw, old->ph))
+                goto failed;
+            replace_color[i] = 1;
+            if (presented == old)
+                readback = &colors[i];
+        }
+        for (i = 0; i < s_ndepth; ++i) {
+            Depth *old = &s_depth[i], *next = &depths[i];
+            uint32_t w, h;
+            if (!depth_size_for(old, update.scale, &w, &h))
+                goto failed;
+            if (old->w == w && old->h == h)
+                continue;
+            next->va = old->va;
+            next->w = w;
+            next->h = h;
+            next->pitch = old->pitch;
+            next->format = old->format;
+            next->surface_type = old->surface_type;
+            next->recreated = 1;
+            next->scale_epoch = update.epoch;
+            memcpy(next->logical_w, old->logical_w, sizeof next->logical_w);
+            memcpy(next->logical_h, old->logical_h, sizeof next->logical_h);
+            if (!create_depth_resource(next, 1))
+                goto failed;
+            replace_depth[i] = 1;
+        }
+    }
+    if (readback) {
+        if ((readback->pw != readback->w || readback->ph != readback->h) &&
+            (!s_readback_resolve || s_readback_resolve_w != readback->w ||
+             s_readback_resolve_h != readback->h || s_readback_resolve_bpp != readback->bpp) &&
+            !create_readback_resolve(readback, &resolve))
+            goto failed;
+        if ((!s_staging || s_staging_w != readback->w || s_staging_h != readback->h ||
+             s_staging_bpp != readback->bpp) && !create_staging_texture(readback, &staging))
+            goto failed;
+    }
+    if (!release_shared_resize_lock(&old_locked) || !gpu_scale_commit_output(&update))
+        goto failed;
+    for (i = 0; i < s_nsurf; ++i) {
+        if (replace_color[i]) {
+            release_surf(&s_surf[i]);
+            s_surf[i] = colors[i];
+        }
+        s_surf[i].scale_epoch = update.epoch;
+    }
+    for (i = 0; i < s_ndepth; ++i) {
+        if (replace_depth[i]) {
+            release_depth(&s_depth[i]);
+            s_depth[i] = depths[i];
+            ++recreated_depths;
+        }
+        s_depth[i].scale_epoch = update.epoch;
+    }
+    if (shared.texture)
+        install_shared_present(&shared);
+    if (resolve.texture)
+        install_readback_resolve(&resolve);
+    if (staging)
+        install_staging_texture(staging, presented);
+    if (recreated_depths)
+        fprintf(stderr, "[GPU-SCALE] %d resized depth/stencil surface(s) require guest"
+                        " reinitialization; depth/stencil migration is not implemented\n",
+                recreated_depths);
+    if (s_cur)
+        bind_targets(s_cur, s_cur_depth);
+    else
+        ID3D11DeviceContext_OMSetRenderTargets(s_ctx, 0, NULL, NULL);
+    query_resume_clear(counting);
+    return 1;
+
+failed:
+    for (i = 0; i < s_nsurf; ++i)
+        if (replace_color[i])
+            release_surf(&colors[i]);
+    for (i = 0; i < s_ndepth; ++i)
+        if (replace_depth[i])
+            release_depth(&depths[i]);
+    if (staging) ID3D11Texture2D_Release(staging);
+    release_readback_candidate(&resolve);
+    release_shared_candidate(&shared);
+    release_shared_resize_lock(&old_locked);
+    if (s_cur)
+        bind_targets(s_cur, s_cur_depth);
+    else
+        ID3D11DeviceContext_OMSetRenderTargets(s_ctx, 0, NULL, NULL);
+    query_resume_clear(counting);
+    fprintf(stderr, "[GPU-SCALE] output picture %ux%u not committed;"
+                    " retaining scale %.3f, epoch %u and prior resources\n",
+            width, height, gpu_scale_value(), gpu_scale_epoch());
+    return 0;
+}
+
+static void update_native_output(Surf *presented)
+{
+    uint32_t width, height;
+    if (gpu_scale_native() && !gpu_scale_fixed_output(NULL, NULL) &&
+        gpu_present_output_size(&width, &height))
+        apply_native_output(width, height, presented,
+                            s_direct_present && gpu_present_shared_ready(width, height));
+}
+
+#ifdef BRUTEFORCE_D3D11_TESTING
+int bruteforce_d3d11_test_native_output(uint32_t width, uint32_t height,
+                                        uint32_t color_va, int require_shared)
+{
+    Surf *presented = color_va ? find_surf(color_va) : NULL;
+    if (color_va && !presented)
+        return 0;
+    return apply_native_output(width, height, presented, require_shared);
+}
+#endif
+
 static int d3d_readback(uint32_t color_va)
 {
     Surf *sf = find_surf(color_va);
@@ -3966,12 +4460,15 @@ static int d3d_readback(uint32_t color_va)
     uint32_t y, row;
     double t0 = qpc_ms();
     HRESULT hr;
-    int ok = 0;
+    int ok = 0, counting;
 
     if (s_dev)
         gpu_d3d11_check_device(s_dev, S_OK, "starting surface readback");
     if (!sf || !s_dev)
         return 0;
+    s_last_presented = sf;
+    update_native_output(sf);
+    counting = query_suspend_clear();
     if (!sync_guest_surface(sf, 1))
         goto done;
     publish_shared_present(sf);
@@ -3979,24 +4476,10 @@ static int d3d_readback(uint32_t color_va)
     if (!source)
         goto done;
     if (!s_staging || s_staging_w != sf->w || s_staging_h != sf->h || s_staging_bpp != sf->bpp) {
-        D3D11_TEXTURE2D_DESC td;
-        if (s_staging)
-            ID3D11Texture2D_Release(s_staging);
-        s_staging = NULL;
-        memset(&td, 0, sizeof td);
-        td.Width = sf->w; td.Height = sf->h; td.MipLevels = 1; td.ArraySize = 1;
-        td.Format = surf_format(sf->bpp);
-        td.SampleDesc.Count = 1;
-        td.Usage = D3D11_USAGE_STAGING;
-        td.CPUAccessFlags = D3D11_CPU_ACCESS_READ;
-        hr = ID3D11Device_CreateTexture2D(s_dev, &td, NULL, &s_staging);
-        if (FAILED(hr)) {
-            gpu_d3d11_check_device(s_dev, hr, "creating readback texture");
-            fprintf(stderr, "[GPU-D3D11] readback texture creation failed 0x%08lX\n",
-                    (unsigned long)hr);
+        ID3D11Texture2D *candidate;
+        if (!create_staging_texture(sf, &candidate))
             goto done;
-        }
-        s_staging_w = sf->w; s_staging_h = sf->h; s_staging_bpp = sf->bpp;
+        install_staging_texture(candidate, sf);
     }
     ID3D11DeviceContext_CopyResource(s_ctx, (ID3D11Resource *)s_staging,
                                      (ID3D11Resource *)source);
@@ -4024,19 +4507,81 @@ static int d3d_readback(uint32_t color_va)
 done:
     if (s_cur)
         bind_targets(s_cur, s_cur_depth);
+    query_resume_clear(counting);
     return ok;
 }
 
+#ifdef BRUTEFORCE_D3D11_TESTING
+int bruteforce_d3d11_test_snapshot(uint32_t color_va, uint32_t depth_va,
+                                   BruteforceD3D11TestSnapshot *snapshot)
+{
+    Surf *color = find_surf(color_va);
+    Depth *depth = NULL;
+    int i;
+    if (!snapshot || !color)
+        return 0;
+    for (i = 0; i < s_ndepth; ++i)
+        if (s_depth[i].va == depth_va) { depth = &s_depth[i]; break; }
+    if (depth_va && !depth)
+        return 0;
+    memset(snapshot, 0, sizeof *snapshot);
+    snapshot->color = (uintptr_t)color->tex;
+    snapshot->color_rtv = (uintptr_t)color->rtv;
+    snapshot->color_srv = (uintptr_t)color->srv;
+    snapshot->color_width = color->pw;
+    snapshot->color_height = color->ph;
+    if (depth) {
+        snapshot->depth = (uintptr_t)depth->tex;
+        snapshot->depth_dsv = (uintptr_t)depth->dsv;
+        snapshot->depth_width = depth->w;
+        snapshot->depth_height = depth->h;
+    }
+    snapshot->shared = (uintptr_t)s_present_shared;
+    snapshot->shared_rtv = (uintptr_t)s_present_rtv;
+    snapshot->shared_mutex = (uintptr_t)s_present_mutex;
+    snapshot->shared_width = s_present_w;
+    snapshot->shared_height = s_present_h;
+    snapshot->resolve = (uintptr_t)s_readback_resolve;
+    snapshot->resolve_rtv = (uintptr_t)s_readback_resolve_rtv;
+    snapshot->resolve_width = s_readback_resolve_w;
+    snapshot->resolve_height = s_readback_resolve_h;
+    snapshot->staging = (uintptr_t)s_staging;
+    snapshot->bound_color = (uintptr_t)(s_cur ? s_cur->tex : NULL);
+    snapshot->bound_depth = (uintptr_t)(s_cur_depth ? s_cur_depth->tex : NULL);
+    snapshot->scale = gpu_scale_value();
+    snapshot->epoch = gpu_scale_epoch();
+    return 1;
+}
+
+int bruteforce_d3d11_test_shared_busy(int busy)
+{
+    HRESULT hr;
+    if (!s_present_mutex)
+        return 0;
+    hr = IDXGIKeyedMutex_AcquireSync(s_present_mutex, busy ? 0 : 1, 0);
+    if (hr == S_OK)
+        hr = IDXGIKeyedMutex_ReleaseSync(s_present_mutex, busy ? 1 : 0);
+    return hr == S_OK;
+}
+
+int bruteforce_d3d11_test_readback(uint32_t color_va)
+{
+    return d3d_readback(color_va);
+}
+#endif
+
 static void d3d_flip(void)
 {
-    uint32_t width, height;
     if (s_dev)
         gpu_d3d11_check_device(s_dev, S_OK, "completing flip");
-    if (gpu_scale_native() && gpu_present_output_size(&width, &height))
-        gpu_scale_set_output(width, height);
+    update_native_output(s_last_presented ? s_last_presented : s_cur);
     s_gen++;
     stats_flip();
 }
+
+#ifdef BRUTEFORCE_D3D11_TESTING
+void bruteforce_d3d11_test_flip(void) { d3d_flip(); }
+#endif
 
 static const Nv2aBackend s_backend = { d3d_clear, d3d_draw, d3d_flip };
 static const Nv2aBackendExt s_backend_ext = { d3d_xdraw, d3d_xdraw_vsh, d3d_vsh_readback,
@@ -4046,6 +4591,7 @@ static const Nv2aBackendExt s_backend_ext = { d3d_xdraw, d3d_xdraw_vsh, d3d_vsh_
 
 int bruteforce_d3d11_install(void)
 {
+    static int installed;
     const char *warp = getenv("RECOMP_D3D11_WARP");
     const char *mulzero = getenv("RECOMP_GPU_VSH_MULZERO");
     const char *tex_gpu = getenv("RECOMP_GPU_TEX_DECODE");
@@ -4054,6 +4600,11 @@ int bruteforce_d3d11_install(void)
     const char *depth_texture = getenv("RECOMP_GPU_DEPTH_TEXTURE");
     const char *stencil_alias = getenv("RECOMP_GPU_STENCIL_ALIAS");
     const char *direct_present = getenv("RECOMP_GPU_DIRECT_PRESENT");
+    GpuScaleConfig scale;
+    Tex *tex;
+
+    if (installed)
+        return 1;
 
     if (depth_texture && *depth_texture && strcmp(depth_texture, "0") != 0 &&
         strcmp(depth_texture, "1") != 0) {
@@ -4075,25 +4626,43 @@ int bruteforce_d3d11_install(void)
         fprintf(stderr, "[GPU-D3D11] RECOMP_GPU_TEX_CACHE_APPROX must be 0 or 1\n");
         return 0;
     }
-    if (!gpu_scale_configure())
+    if (!gpu_scale_prepare_config(&scale))
         return 0;
-    if (!gpu_pscache_init())
-        return 0;
-    s_warp = warp && strcmp(warp, "1") == 0;
-    s_depth_texture = depth_texture && strcmp(depth_texture, "1") == 0;
-    s_stencil_alias = stencil_alias && strcmp(stencil_alias, "1") == 0;
-    s_direct_present = (direct_present && strcmp(direct_present, "1") == 0) ||
-                       (gpu_scale_requested() && (!direct_present || !*direct_present));
-    if (gpu_scale_requested() && direct_present && strcmp(direct_present, "0") == 0) {
+    if (scale.requested && direct_present && strcmp(direct_present, "0") == 0) {
         fprintf(stderr, "[GPU-SCALE] scaled rendering requires shared GPU presentation;"
                         " RECOMP_GPU_DIRECT_PRESENT cannot be 0\n");
         return 0;
     }
-    if (gpu_scale_requested() && (s_depth_texture || s_stencil_alias)) {
+    if (scale.requested &&
+        ((depth_texture && strcmp(depth_texture, "1") == 0) ||
+         (stencil_alias && strcmp(stencil_alias, "1") == 0))) {
         fprintf(stderr, "[GPU-SCALE] scaled depth/stencil texture aliases are not supported;"
                         " disable RECOMP_GPU_DEPTH_TEXTURE and RECOMP_GPU_STENCIL_ALIAS\n");
         return 0;
     }
+    if (!gpu_pscache_init())
+        return 0;
+    tex = (Tex *)calloc(MAX_TEX, sizeof *tex);
+    if (!tex) {
+        fprintf(stderr, "[GPU-D3D11] cannot allocate the D3D11 texture cache;"
+                        " configuration not committed\n");
+        return 0;
+    }
+    if (!scale.requested && !gpu_scale_commit_config(&scale)) {
+        fprintf(stderr, "[GPU-SCALE] cannot commit D3D11 configuration\n");
+        free(tex);
+        return 0;
+    }
+    if (scale.requested) {
+        s_pending_scale = scale;
+        s_scale_pending = 1;
+    }
+    s_warp = warp && strcmp(warp, "1") == 0;
+    s_tex = tex;
+    s_depth_texture = depth_texture && strcmp(depth_texture, "1") == 0;
+    s_stencil_alias = stencil_alias && strcmp(stencil_alias, "1") == 0;
+    s_direct_present = (direct_present && strcmp(direct_present, "1") == 0) ||
+                       (scale.requested && (!direct_present || !*direct_present));
     s_tex_gpu = !tex_gpu || strcmp(tex_gpu, "0") != 0;
     s_tex_log = tex_log && strcmp(tex_log, "1") == 0;
     s_tex_approx = tex_approx && strcmp(tex_approx, "1") == 0;
@@ -4103,13 +4672,9 @@ int bruteforce_d3d11_install(void)
     s_vsh_flags = mulzero && strcmp(mulzero, "1") == 0 ? GPU_VSH_MULZERO : 0;
     s_vsh_sync = getenv("RECOMP_GPU_VSH_SYNC") && strcmp(getenv("RECOMP_GPU_VSH_SYNC"), "1") == 0;
     s_zpass_async = getenv("RECOMP_GPU_ZPASS") && strcmp(getenv("RECOMP_GPU_ZPASS"), "async") == 0;
-    s_tex = (Tex *)calloc(MAX_TEX, sizeof *s_tex);
-    if (!s_tex) {
-        fprintf(stderr, "Cannot allocate the D3D11 texture cache\n");
-        return 0;
-    }
     nv2a_backend_ext_register(&s_backend_ext);
     nv2a_backend_register(&s_backend);
+    installed = 1;
     fprintf(stderr, "[GPU] Direct3D 11 back end registered (RECOMP_GPU=d3d11%s)\n",
             s_warp ? ", WARP" : "");
     if (s_depth_texture)

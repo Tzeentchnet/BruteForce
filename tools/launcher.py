@@ -208,6 +208,10 @@ def game_environment(values, base_env=None):
             "1" if settings["resolution"] != "1" else settings["direct_present"]
         ),
     })
+    if settings["resolution"] != "native":
+        for key in tuple(env):
+            if key.upper() == "RECOMP_GPU_OUTPUT":
+                del env[key]
     if settings["program_near_zero"] != "inherit":
         if settings["program_near_zero"] in ("1", "hud") and env.get(
             "RECOMP_CLIP_NEAR_Z", ""

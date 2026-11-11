@@ -23,7 +23,9 @@ This is an experimental release.
 
 Direct3D 11 is the default renderer for new launcher settings. The CPU
 reference renderer remains available from the launcher for comparison and
-troubleshooting.
+troubleshooting. Native-resolution resize rollback has synthetic coverage;
+retail gameplay and depth/stencil reinitialization after resize remain
+unvalidated.
 
 The pinned framework has been updated to xboxrecomp v0.17.0 plus selected
 post-release fixes. Fresh Release generation `20261111-002138-a9dbc18a`

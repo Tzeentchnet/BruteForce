@@ -84,6 +84,28 @@ python -m pytest -q tests
 For hardware-device coverage as well as WARP, set
 `BRUTEFORCE_TEST_D3D11_HARDWARE=1` before the pytest command.
 The host fixture does not contain game code and cannot run the game.
+
+For the focused render-scale transaction and launcher checks, use the
+configured synthetic build above:
+
+```powershell
+cmake --build build\smoke --config Release --target bruteforce_d3d11_test
+$env:BRUTEFORCE_TEST_D3D11 = "$PWD\build\smoke\Release\bruteforce_d3d11_test.exe"
+# Set to 1 to include the default hardware adapter and live presenter window.
+$env:BRUTEFORCE_TEST_D3D11_HARDWARE = "1"
+python -m pytest -q --basetemp build\smoke\pytest-scale tests\test_d3d11.py `
+  -k "scale_configuration_is_transactional or native_resize or native_output_only or visibility_query_spanning"
+python -m pytest -q --basetemp build\smoke\pytest-launcher tests\test_launcher.py `
+  -k "fixed_resolution_clears_inherited_native_output"
+```
+
+These fixtures inject initialization and replacement failures and exercise
+rollback, retry, busy shared frames, output-only changes, and query-start
+normalization. The hidden live-window test requires a hardware device.
+Fault-injection hooks exist only in the native test target. They do not prove
+retail gameplay, depth/stencil reinitialization, device recovery, a VRAM
+budget or performance.
+
 Project-owned source is MIT-licensed. The linked executable includes xemu's
 GPL-2.0-or-later DSP interpreter and is distributed, if at all, under
 GPL-2.0-or-later as a combined work. Some DSP DMA and framework APU files use

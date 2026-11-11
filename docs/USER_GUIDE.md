@@ -422,8 +422,24 @@ inside the output window. A numeric value selects physical pixels per
 resources fit D3D11's 16384-pixel dimension limit.
 `RECOMP_GPU_OUTPUT=WxH` can provide a fixed diagnostic output only with
 `RECOMP_GPU_SCALE=native`; otherwise native mode follows window and
-fullscreen changes through a scale epoch. Its 4:3 picture must produce a
-scale from 0.5 through 10.
+fullscreen changes through a scale epoch. Use decimal dimensions with a
+lowercase `x`, such as `3840x2160`; the largest 4:3 picture *inside* those
+dimensions must produce a scale from 0.5 through 10. Thus `3840x2160`
+selects a 2880x2160 picture at 4.5x, and a portrait `1080x1920` selects
+1080x810 at 1.6875x. The launcher removes an inherited
+`RECOMP_GPU_OUTPUT` for its non-Native presets so that a fixed preset does
+not conflict with a diagnostic Native setting.
+
+If a native resize cannot allocate its resources, the `[GPU-SCALE]` or
+`[GPU-D3D11]` diagnostics identify the failure; the last working scale and
+resources remain active and a later frame can retry. A busy shared frame
+also defers the change until it is safely released. A non-timeout mutex
+error disables shared presentation, while device loss stops execution;
+neither is automatically recovered. This does not silently lower the
+requested scale. Resized colour targets retain their contents, but
+changed-size depth/stencil targets are recreated with undefined contents
+until the guest clears or regenerates them. Native resizing during retail
+gameplay has not been validated for that requirement.
 
 Scaled colour and depth targets retain guest-logical dimensions separately
 from their physical resources. Clear rectangles, scissors and window clips
@@ -449,12 +465,14 @@ error because a guest-sized CPU frame cannot carry the higher-resolution
 result. Experimental depth and packed-stencil aliases are also rejected in
 scaled modes; their guest-layout seed and sampling semantics have not been
 defined at physical resolution. The CPU renderer remains at guest resolution.
-The complete synthetic D3D11 matrix passes 190 cases with hardware enabled
-(123 pass and 67 hardware cases skip in WARP-only mode), including CPU-written
-frames with and without a GPU overlay at scale 1 and scale 2. A bounded retail
-4.5x run captured visible Microsoft, Digital Anvil, and intro-montage frames
-with zero guest/GPU conflicts. No matched gameplay, performance, VRAM,
-native-4K-display or original-hardware validation has been completed.
+The synthetic D3D11 matrix passes 234 cases with hardware enabled, including
+CPU-written frames with and without a GPU overlay at scale 1 and scale 2.
+Focused synthetic WARP and hardware fixtures also exercise native resize
+failures, retry and visibility normalization; a hardware fixture resizes a
+hidden presenter window. An earlier bounded retail 4.5x run captured visible
+Microsoft, Digital Anvil, and intro-montage frames with zero guest/GPU
+conflicts. No matched gameplay, performance, VRAM, native-4K-display or
+original-hardware validation has been completed.
 
 `RECOMP_GPU_PSCACHE=1` enables the optional persistent combiner pixel-shader
 cache (also available in the launcher). It is off by default. After a shader

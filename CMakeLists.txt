@@ -191,7 +191,7 @@ add_executable(bruteforce_d3d11_test EXCLUDE_FROM_ALL tests/d3d11_test.c
     tests/d3d11_texture_test.c tests/shader_cache_test.c src/perf_counters.c
     src/gpu/null_backend.c ${BRUTEFORCE_GPU_SOURCES})
 target_compile_definitions(bruteforce_d3d11_test PRIVATE
-    WIN32_LEAN_AND_MEAN NOMINMAX _CRT_SECURE_NO_WARNINGS)
+    WIN32_LEAN_AND_MEAN NOMINMAX _CRT_SECURE_NO_WARNINGS BRUTEFORCE_D3D11_TESTING)
 target_include_directories(bruteforce_d3d11_test PRIVATE
     "${CMAKE_CURRENT_SOURCE_DIR}/src"
     "${XBOXRECOMP_DIR}/src"

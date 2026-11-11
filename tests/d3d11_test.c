@@ -13,6 +13,7 @@
  * every batch verified against the interpreter.
  */
 #include <windows.h>
+#include <math.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -25,7 +26,9 @@
 #include "gpu/d3d11_backend.h"
 #include "gpu/d3d11_device_status.h"
 #include "gpu/null_backend.h"
+#include "gpu/render_scale.h"
 #include "perf_counters.h"
+#include "video/gpu_present.h"
 
 typedef void (*recomp_func_t)(void);
 recomp_func_t recomp_lookup(uint32_t va) { (void)va; return NULL; }
@@ -1945,6 +1948,479 @@ static int scene_bc(const char *out_path)
     return 1;
 }
 
+static int test_scale_config(void)
+{
+    static const char *const invalid_outputs[] = {
+        "+1920x1080", "-1x1080", "4294969216x1080", "16385x1080",
+        "0x1080", "1920x1080x", " 1920x1080", "1920x 1080", "1x16384",
+        "100x100"
+    };
+    static const char *const invalid_scales[] = {"nan", "inf", "0.499", "10.01", "2x"};
+    GpuScaleConfig config, invalid;
+    GpuScaleUpdate update;
+    uint32_t w, h;
+    unsigned i;
+
+    REQUIRE(_putenv_s("RECOMP_GPU_SCALE", "native") == 0, "set native scale");
+    for (i = 0; i < sizeof invalid_outputs / sizeof invalid_outputs[0]; ++i) {
+        REQUIRE(_putenv_s("RECOMP_GPU_OUTPUT", invalid_outputs[i]) == 0, "set invalid output");
+        REQUIRE(!gpu_scale_prepare_config(&config), "reject malformed or unsupported output");
+        REQUIRE(!gpu_scale_commit_config(&config), "reject an unsuccessful configuration plan");
+        REQUIRE(!gpu_scale_requested() && gpu_scale_value() == 1.0f && gpu_scale_epoch() == 0,
+                "invalid output leaves configuration uncommitted");
+    }
+    REQUIRE(_putenv_s("RECOMP_GPU_OUTPUT", "3840x2160") == 0 &&
+            gpu_scale_prepare_config(&config), "prepare landscape output");
+    REQUIRE(config.width == 2880 && config.height == 2160 && config.scale == 4.5f,
+            "landscape output uses the 4:3 picture, not the client");
+    REQUIRE(_putenv_s("RECOMP_GPU_OUTPUT", "1080x1920") == 0 &&
+            gpu_scale_prepare_config(&config), "prepare portrait output");
+    REQUIRE(config.width == 1080 && config.height == 810 && config.scale == 1.6875f,
+            "portrait output uses its letterboxed picture height");
+    REQUIRE(!gpu_scale_requested() && gpu_scale_value() == 1.0f,
+            "preparing valid configuration does not commit it");
+    REQUIRE(_putenv_s("RECOMP_GPU_SCALE", "1") == 0 &&
+            !gpu_scale_prepare_config(&config), "reject output with numeric scale");
+    REQUIRE(_putenv_s("RECOMP_GPU_OUTPUT", "") == 0, "clear fixed output");
+    for (i = 0; i < sizeof invalid_scales / sizeof invalid_scales[0]; ++i) {
+        REQUIRE(_putenv_s("RECOMP_GPU_SCALE", invalid_scales[i]) == 0, "set invalid scale");
+        REQUIRE(!gpu_scale_prepare_config(&config), "reject invalid scale");
+    }
+    w = h = 123;
+    REQUIRE(gpu_scale_surface_size_for(2.0f, 1280, 960, 2, 2, &w, &h) &&
+            w == 1280 && h == 960, "scaled AA dimensions");
+    w = h = 123;
+    REQUIRE(!gpu_scale_surface_size_for(2.0f, 9000, 480, 1, 1, &w, &h) &&
+            w == 123 && h == 123, "out-of-range surface leaves dimensions unchanged");
+    REQUIRE(!gpu_scale_surface_size_for(1.0f, 16385, 480, 1, 1, &w, &h),
+            "unscaled surface obeys D3D11 limits");
+    REQUIRE(_putenv_s("RECOMP_GPU_SCALE", "native") == 0 &&
+            _putenv_s("RECOMP_GPU_OUTPUT", "1080x1920") == 0 &&
+            gpu_scale_prepare_config(&config), "prepare fixed native output");
+    invalid = config;
+    invalid.scale = 4.5f;
+    REQUIRE(!gpu_scale_commit_config(&invalid) && !gpu_scale_requested(),
+            "reject a mutated configuration plan");
+    REQUIRE(gpu_scale_commit_config(&config), "commit fixed native output");
+    REQUIRE(gpu_scale_fixed_output(&w, &h) && w == 1080 && h == 810,
+            "fixed picture committed");
+    REQUIRE(gpu_scale_prepare_output(1920, 1080, &update) && !update.changed &&
+            gpu_scale_commit_output(&update) && gpu_scale_value() == 1.6875f,
+            "live output cannot override fixed native output");
+    puts("scale configuration verified");
+    return 1;
+}
+
+static int test_scale_stale_update(void)
+{
+    GpuScaleConfig config;
+    GpuScaleUpdate first, stale, invalid;
+    uint32_t w, h;
+    REQUIRE(_putenv_s("RECOMP_GPU_SCALE", "native") == 0 &&
+            _putenv_s("RECOMP_GPU_OUTPUT", "") == 0 &&
+            gpu_scale_prepare_config(&config) && gpu_scale_commit_config(&config),
+            "commit live native configuration");
+    REQUIRE(gpu_scale_prepare_output(640, 480, &first) &&
+            gpu_scale_prepare_output(1280, 960, &stale), "prepare competing output updates");
+    REQUIRE(gpu_scale_value() == 2.0f && gpu_scale_epoch() == 0,
+            "prepared output leaves state unchanged");
+    invalid = first;
+    invalid.scale = 9.0f;
+    REQUIRE(!gpu_scale_commit_output(&invalid) && gpu_scale_value() == 2.0f,
+            "reject a mutated output plan");
+    invalid = first;
+    invalid.width = 0;
+    REQUIRE(!gpu_scale_commit_output(&invalid) && gpu_scale_epoch() == 0,
+            "reject invalid dimensions in an output plan");
+    invalid = first;
+    invalid.changed = 2;
+    REQUIRE(!gpu_scale_commit_output(&invalid) && gpu_scale_epoch() == 0,
+            "reject a non-boolean output change flag");
+    REQUIRE(gpu_scale_commit_output(&first) && !gpu_scale_commit_output(&stale),
+            "reject stale output update");
+    REQUIRE(gpu_scale_value() == 1.0f && gpu_scale_epoch() == 1 &&
+            gpu_scale_output_size(&w, &h) && w == 640 && h == 480,
+            "stale update does not overwrite committed output");
+    REQUIRE(gpu_scale_prepare_output(640, 480, &first) && !first.changed,
+            "prepare an unchanged output plan");
+    invalid = first;
+    ++invalid.width;
+    REQUIRE(!gpu_scale_commit_output(&invalid) && gpu_scale_output_size(&w, &h) &&
+            w == 640 && h == 480, "reject a mutated unchanged-output plan");
+    REQUIRE(gpu_scale_commit_output(&first), "accept an unchanged output plan");
+    REQUIRE(!gpu_scale_prepare_output(320, 239, &first) &&
+            gpu_scale_value() == 1.0f && gpu_scale_epoch() == 1,
+            "unsupported live output leaves state unchanged");
+    puts("stale scale update rejected");
+    return 1;
+}
+
+static int scale_init_on_worker(void)
+{
+    REQUIRE(!bruteforce_d3d11_test_initialize_device(),
+            "resolve allocation failure rejects device initialization");
+    REQUIRE(!gpu_scale_requested() && gpu_scale_value() == 1.0f && gpu_scale_epoch() == 0 &&
+            bruteforce_d3d11_test_device_thread() == 0,
+            "failed initialization leaves scale and device owner uncommitted");
+    REQUIRE(bruteforce_d3d11_test_initialize_device(), "retry initialization");
+    REQUIRE(gpu_scale_requested() && gpu_scale_value() == 2.0f &&
+            bruteforce_d3d11_test_device_thread() == GetCurrentThreadId(),
+            "retry commits the prepared scale on the GPU owner thread");
+    return 1;
+}
+
+static DWORD WINAPI scale_init_worker(void *unused)
+{
+    (void)unused;
+    return scale_init_on_worker() ? 0 : 1;
+}
+
+static int test_scale_init_retry(const char *mode)
+{
+    const char *stage = mode + strlen("scale-init-retry-");
+    HANDLE worker;
+    DWORD result;
+    REQUIRE(_putenv_s("RECOMP_D3D11_WARP", "1") == 0 &&
+            _putenv_s("RECOMP_GPU_SCALE", "2") == 0, "set initial scale");
+    REQUIRE(bruteforce_d3d11_install() && !gpu_scale_requested() &&
+            gpu_scale_value() == 1.0f && bruteforce_d3d11_test_device_thread() == 0,
+            "installation prepares scale without creating a device on the installer thread");
+    REQUIRE(_putenv_s("RECOMP_GPU_SCALE", "1.5") == 0,
+            "change the environment after preparing the configuration");
+    if (strcmp(stage, "preflight") == 0)
+        bruteforce_d3d11_test_fail("resolve-init", 1);
+    else
+        gpu_scale_test_fail_init(stage);
+    worker = CreateThread(NULL, 0, scale_init_worker, NULL, 0, NULL);
+    REQUIRE(worker != NULL, "start synthetic GPU owner thread");
+    REQUIRE(WaitForSingleObject(worker, 30000) == WAIT_OBJECT_0 &&
+            GetExitCodeThread(worker, &result) && result == 0,
+            "GPU owner thread initializes and retries");
+    CloseHandle(worker);
+    puts("scale initialization retried");
+    return 1;
+}
+
+typedef struct ScaleFixture {
+    uint32_t a, b, az, bz, vb, report;
+} ScaleFixture;
+
+static int prepare_scale_fixture(ScaleFixture *f)
+{
+    memset(f, 0, sizeof *f);
+    f->a = xbox_ContiguousAlloc(64 * 64 * 4, 4096);
+    f->b = xbox_ContiguousAlloc(64 * 64 * 4, 4096);
+    f->az = xbox_ContiguousAlloc(64 * 64 * 4, 4096);
+    f->bz = xbox_ContiguousAlloc(64 * 64 * 4, 4096);
+    f->vb = xbox_ContiguousAlloc(0x1000, 4096);
+    f->report = xbox_ContiguousAlloc(0x1000, 4096);
+    REQUIRE(f->a && f->b && f->az && f->bz && f->vb && f->report,
+            "allocate scale fixture guest surfaces");
+    identity_matrix();
+    surface(f->a, 64, f->az);
+    clear(0xF3, 0xFFFF0000u, 0xFFFFFF00u);
+    surface(f->b, 32, f->bz);
+    clear(0xF3, 0xFF00FF00u, 0xFFFFFF00u);
+    REQUIRE(bruteforce_d3d11_test_native_output(640, 480, f->a, 1),
+            "establish native scale-one resources");
+    surface(f->a, 64, f->az);
+    clear(0xF3, 0xFFFF0000u, 0xFFFFFF00u);
+    surface(f->b, 32, f->bz);
+    clear(0xF3, 0xFF00FF00u, 0xFFFFFF00u);
+    return 1;
+}
+
+static int test_scale_transaction(const char *mode)
+{
+    ScaleFixture f;
+    BruteforceD3D11TestSnapshot a, b, after_a, after_b;
+    const char *stage = strstr(mode, "scale-txn-") + strlen("scale-txn-");
+    unsigned occurrence = 1;
+    int busy = strcmp(stage, "busy") == 0;
+
+    REQUIRE(prepare_scale_fixture(&f), "prepare transaction fixture");
+    REQUIRE(bruteforce_d3d11_test_snapshot(f.a, f.az, &a) &&
+            bruteforce_d3d11_test_snapshot(f.b, f.bz, &b),
+            "capture original scale resources");
+    REQUIRE(a.scale == 1.0f && a.epoch == 1 && a.color_width == 64 &&
+            a.depth_width == 64 && b.color_width == 32 && b.depth_width == 32 &&
+            a.shared && a.shared_width == 640 && a.shared_height == 480 &&
+            !a.resolve && a.staging, "baseline contains all expected resources");
+    if (busy) {
+        REQUIRE(bruteforce_d3d11_test_shared_busy(1), "make shared frame consumer-owned");
+    } else {
+        if (strcmp(stage, "color-second") == 0) {
+            stage = "color-texture";
+            occurrence = 2;
+        } else if (strcmp(stage, "migration-second") == 0) {
+            stage = "color-migrate";
+            occurrence = 2;
+        }
+        bruteforce_d3d11_test_fail(stage, occurrence);
+    }
+    REQUIRE(!bruteforce_d3d11_test_native_output(1280, 960, f.b, 1),
+            "failed allocation or busy consumer rejects entire update");
+    REQUIRE(bruteforce_d3d11_test_snapshot(f.a, f.az, &after_a) &&
+            bruteforce_d3d11_test_snapshot(f.b, f.bz, &after_b) &&
+            memcmp(&a, &after_a, sizeof a) == 0 && memcmp(&b, &after_b, sizeof b) == 0,
+            "failure retains scale, bindings, color, depth, shared and readback resources");
+    if (busy)
+        REQUIRE(bruteforce_d3d11_test_shared_busy(0), "complete the real keyed-mutex handoff");
+    REQUIRE(bruteforce_d3d11_test_readback(f.a) &&
+            ((uint32_t *)guest(f.a))[0] == 0xFFFF0000u,
+            "retained color remains usable after rollback");
+    REQUIRE(bruteforce_d3d11_test_native_output(1280, 960, f.b, 1),
+            "retry commits all resources");
+    REQUIRE(bruteforce_d3d11_test_snapshot(f.a, f.az, &after_a) &&
+            bruteforce_d3d11_test_snapshot(f.b, f.bz, &after_b),
+            "capture committed resources");
+    REQUIRE(after_a.scale == 2.0f && after_a.epoch == 2 &&
+            after_a.color != a.color && after_b.color != b.color &&
+            after_a.depth != a.depth && after_b.depth != b.depth &&
+            after_a.color_width == 128 && after_a.depth_width == 128 &&
+            after_b.color_width == 64 && after_b.depth_width == 64 &&
+            after_a.shared != a.shared && after_a.shared_width == 1280 &&
+            after_a.shared_height == 960 && after_a.resolve &&
+            after_a.staging != a.staging,
+            "retry commits every replacement and the new epoch together");
+    REQUIRE(bruteforce_d3d11_test_readback(f.a) &&
+            ((uint32_t *)guest(f.a))[0] == 0xFFFF0000u &&
+            bruteforce_d3d11_test_readback(f.b) &&
+            ((uint32_t *)guest(f.b))[0] == 0xFF00FF00u,
+            "GPU-authoritative colors survive successful migration");
+    puts("scale transaction rolled back and retried");
+    return 1;
+}
+
+static int test_scale_small_change(void)
+{
+    ScaleFixture f;
+    BruteforceD3D11TestSnapshot original, after;
+    uint32_t w, h;
+
+    REQUIRE(prepare_scale_fixture(&f) &&
+            bruteforce_d3d11_test_snapshot(f.a, f.az, &original),
+            "prepare small native resize");
+    bruteforce_d3d11_test_fail("shared-texture", 1);
+    REQUIRE(!bruteforce_d3d11_test_native_output(641, 480, f.a, 1) &&
+            bruteforce_d3d11_test_snapshot(f.a, f.az, &after) &&
+            memcmp(&original, &after, sizeof original) == 0 &&
+            gpu_scale_output_size(&w, &h) && w == 640 && h == 480,
+            "failed output-only resize keeps prior output and resources");
+    REQUIRE(bruteforce_d3d11_test_native_output(641, 480, f.a, 1) &&
+            bruteforce_d3d11_test_snapshot(f.a, f.az, &after),
+            "commit output-only resize");
+    REQUIRE(after.epoch == original.epoch && after.scale == 1.0f &&
+            after.color == original.color && after.depth == original.depth &&
+            after.shared != original.shared && after.shared_width == 641 &&
+            gpu_scale_output_size(&w, &h) && w == 641 && h == 480,
+            "output-only resize retains scale resources and epoch");
+    original = after;
+    REQUIRE(bruteforce_d3d11_test_native_output(641, 481, f.a, 1) &&
+            bruteforce_d3d11_test_snapshot(f.a, f.az, &after),
+            "commit scale change rounded to the same surface dimensions");
+    REQUIRE(after.epoch == original.epoch + 1 &&
+            fabsf(after.scale - 481.0f / 480.0f) < 0.00001f &&
+            after.color == original.color && after.depth == original.depth &&
+            after.shared != original.shared && after.shared_height == 481,
+            "unchanged physical sizes retain color and depth across an epoch");
+    original = after;
+    REQUIRE(!bruteforce_d3d11_test_native_output(320, 239, f.a, 1) &&
+            !bruteforce_d3d11_test_native_output(16385, 480, f.a, 1) &&
+            bruteforce_d3d11_test_snapshot(f.a, f.az, &after) &&
+            memcmp(&original, &after, sizeof original) == 0,
+            "invalid live pictures leave the committed resources untouched");
+    puts("small native changes verified");
+    return 1;
+}
+
+static int consume_scale_window_frame(uint32_t color)
+{
+    GpuPresentTrace trace;
+    gpu_present_frame_capture((const uint32_t *)guest(color), 1,
+                              xbox_FramebufferWindowNextFrameId(), &trace);
+    REQUIRE(trace.route == GPU_PRESENT_SHARED_REJECTED && trace.shared_release == S_OK,
+            "presenter acquires and releases the matching shared frame");
+    return 1;
+}
+
+static int test_scale_window(void)
+{
+    BruteforceD3D11TestSnapshot before, after;
+    uint32_t color = xbox_ContiguousAlloc(64 * 64 * 4, 4096);
+    uint32_t depth = xbox_ContiguousAlloc(64 * 64 * 4, 4096);
+    HWND window;
+
+    REQUIRE(color && depth && _putenv_s("RECOMP_PRESENT_VSYNC", "0") == 0,
+            "prepare window fixture");
+    window = CreateWindowExA(0, "STATIC", "scale fixture", WS_POPUP,
+                             0, 0, 800, 600, NULL, NULL, GetModuleHandleA(NULL), NULL);
+    REQUIRE(window != NULL && gpu_present_init(window, 64, 64),
+            "initialize synthetic hidden D3D11 presenter");
+    surface(color, 64, depth);
+    clear(0xF3, 0xFF336699u, 0xFFFFFF00u);
+    REQUIRE(bruteforce_d3d11_test_readback(color) &&
+            bruteforce_d3d11_test_snapshot(color, depth, &before) &&
+            before.scale == 1.25f && before.epoch == 1 &&
+            before.color_width == 80 && before.shared_width == 800 &&
+            before.shared_height == 600, "live wide window commits its 4:3 picture");
+    REQUIRE(SetWindowPos(window, NULL, 0, 0, 600, 800,
+                         SWP_NOMOVE | SWP_NOZORDER | SWP_NOACTIVATE),
+            "resize to portrait client");
+    REQUIRE(bruteforce_d3d11_test_readback(color) &&
+            bruteforce_d3d11_test_snapshot(color, depth, &after) &&
+            memcmp(&before, &after, sizeof before) == 0,
+            "a pending presenter frame defers the live resize");
+    REQUIRE(consume_scale_window_frame(color), "consume the pending shared frame");
+    bruteforce_d3d11_test_fail("color-rtv", 1);
+    REQUIRE(bruteforce_d3d11_test_readback(color) &&
+            bruteforce_d3d11_test_snapshot(color, depth, &after) &&
+            memcmp(&before, &after, sizeof before) == 0,
+            "failed live resize keeps old output and all resources");
+    REQUIRE(consume_scale_window_frame(color), "old output remains publishable after failure");
+    REQUIRE(bruteforce_d3d11_test_readback(color) &&
+            bruteforce_d3d11_test_snapshot(color, depth, &after) &&
+            after.scale == 0.9375f && after.epoch == 2 &&
+            after.color_width == 60 && after.shared_width == 600 &&
+            after.shared_height == 450 && after.shared != before.shared,
+            "retry uses the portrait window's letterboxed 600x450 picture");
+    REQUIRE(consume_scale_window_frame(color), "consume resized shared frame");
+    gpu_present_shutdown();
+    DestroyWindow(window);
+    puts("live native window resize verified");
+    return 1;
+}
+
+static int test_scale_window_fallback(void)
+{
+    BruteforceD3D11TestSnapshot before, after;
+    uint32_t color = xbox_ContiguousAlloc(64 * 64 * 4, 4096);
+    uint32_t depth = xbox_ContiguousAlloc(64 * 64 * 4, 4096);
+    uint32_t other_color = xbox_ContiguousAlloc(32 * 32 * 4, 4096);
+    uint32_t other_depth = xbox_ContiguousAlloc(32 * 32 * 4, 4096);
+    HWND window;
+
+    REQUIRE(color && depth && other_color && other_depth &&
+            _putenv_s("RECOMP_PRESENT_VSYNC", "0") == 0,
+            "prepare flip fallback fixture");
+    window = CreateWindowExA(0, "STATIC", "scale fallback fixture", WS_POPUP,
+                             0, 0, 640, 480, NULL, NULL, GetModuleHandleA(NULL), NULL);
+    REQUIRE(window != NULL && gpu_present_init(window, 64, 64),
+            "initialize synthetic hidden D3D11 presenter");
+    surface(color, 64, depth);
+    clear(0xF3, 0xFF336699u, 0xFFFFFF00u);
+    REQUIRE(bruteforce_d3d11_test_snapshot(color, depth, &before) &&
+            before.scale == 2.0f && before.epoch == 0 &&
+            !before.shared && !before.resolve && !before.staging,
+            "first flip starts before any readback resources exist");
+    bruteforce_d3d11_test_fail("staging-texture", 1);
+    bruteforce_d3d11_test_flip();
+    REQUIRE(bruteforce_d3d11_test_snapshot(color, depth, &after) &&
+            memcmp(&before, &after, sizeof before) == 0,
+            "first flip fallback retains resources when staging allocation fails");
+    bruteforce_d3d11_test_flip();
+    REQUIRE(bruteforce_d3d11_test_snapshot(color, depth, &after) &&
+            after.scale == 1.0f && after.epoch == 1 &&
+            after.shared && !after.resolve && after.staging,
+            "first flip fallback preflights the current target");
+    REQUIRE(bruteforce_d3d11_test_readback(color) &&
+            bruteforce_d3d11_test_snapshot(color, depth, &before) &&
+            before.scale == 1.0f && before.epoch == 1 &&
+            before.shared_width == 640 && before.shared_height == 480 &&
+            !before.resolve && before.staging,
+            "baseline readback needs staging but no scaled resolve");
+    REQUIRE(consume_scale_window_frame(color), "consume baseline shared frame");
+    surface(other_color, 32, other_depth);
+    clear(0xF3, 0xFF112233u, 0xFFFFFF00u);
+    REQUIRE(bruteforce_d3d11_test_snapshot(color, depth, &before) &&
+            before.bound_color != before.color,
+            "leave a different-sized target bound after the last readback");
+    REQUIRE(SetWindowPos(window, NULL, 0, 0, 800, 600,
+                         SWP_NOMOVE | SWP_NOZORDER | SWP_NOACTIVATE),
+            "resize before the flip fallback");
+    bruteforce_d3d11_test_fail("readback-texture", 1);
+    bruteforce_d3d11_test_flip();
+    REQUIRE(bruteforce_d3d11_test_snapshot(color, depth, &after) &&
+            memcmp(&before, &after, sizeof before) == 0,
+            "flip fallback retains all resources when readback resolve allocation fails");
+    bruteforce_d3d11_test_flip();
+    REQUIRE(bruteforce_d3d11_test_snapshot(color, depth, &after) &&
+            after.scale == 1.25f && after.epoch == 2 &&
+            after.color_width == 80 && after.depth_width == 80 &&
+            after.shared_width == 800 && after.shared_height == 600 &&
+            after.resolve && after.resolve_width == 64 && after.resolve_height == 64 &&
+            after.staging == before.staging,
+            "flip fallback retry commits the readback resolve with the output");
+    REQUIRE(bruteforce_d3d11_test_readback(color) &&
+            ((uint32_t *)guest(color))[0] == 0xFF336699u &&
+            consume_scale_window_frame(color),
+            "the migrated frame remains readable and presentable");
+    gpu_present_shutdown();
+    DestroyWindow(window);
+    puts("flip fallback transaction verified");
+    return 1;
+}
+
+static int test_scale_query(void)
+{
+    static const Pos p[4] = {{4, 4, 0, 1}, {8, 4, 0, 1},
+                             {8, 8, 0, 1}, {4, 8, 0, 1}};
+    static const uint32_t c[4] = {0xFFFFFFFFu, 0xFFFFFFFFu, 0xFFFFFFFFu, 0xFFFFFFFFu};
+    static const float uv[4][2] = {{0, 0}, {0, 0}, {0, 0}, {0, 0}};
+    ScaleFixture f;
+    unsigned i;
+
+    REQUIRE(prepare_scale_fixture(&f), "prepare scale query fixture");
+    surface(f.a, 64, f.az);
+    method(0x030C, 0);
+    combiners(0);
+    method(0x17C8, 0);
+    method(0x17CC, 1);
+    draw(8, p, c, uv, 4, f.vb);
+    bruteforce_d3d11_test_fail("depth-view", 1);
+    REQUIRE(!bruteforce_d3d11_test_native_output(1280, 960, f.a, 1),
+            "active query survives a failed scale update");
+    draw(8, p, c, uv, 4, f.vb);
+    REQUIRE(bruteforce_d3d11_test_native_output(1280, 960, f.a, 1),
+            "active query survives a committed scale update");
+    draw(8, p, c, uv, 4, f.vb);
+    method(0x17CC, 0);
+    report_at(f.report, 0);
+    for (i = 0; i < 100000 && ((volatile uint32_t *)guest(f.report))[3] != 0; ++i) {
+        nv2a_pb_exec_poll();
+        Sleep(0);
+    }
+    REQUIRE(i < 100000, "scale visibility report completes");
+    if (((uint32_t *)guest(f.report))[2] != 48) {
+        fprintf(stderr, "FAIL: scale visibility expected 48, got %u\n",
+                ((uint32_t *)guest(f.report))[2]);
+        return 0;
+    }
+    puts("scale query count 48");
+    method(0x17C8, 0);
+    surface(f.a, 64, f.az);
+    method(0x17CC, 1);
+    draw(8, p, c, uv, 4, f.vb);
+    surface(f.b, 32, f.bz);
+    method(0x0208, 0x1128);                         /* 2x1 guest anti-aliasing */
+    method(0x020C, (64 * 4) | (64 * 4) << 16);
+    draw(8, p, c, uv, 4, f.vb);
+    method(0x17CC, 0);
+    report_at(f.report, 1);
+    for (i = 0; i < 100000 && ((volatile uint32_t *)guest(f.report + 16))[3] != 0; ++i) {
+        nv2a_pb_exec_poll();
+        Sleep(0);
+    }
+    REQUIRE(i < 100000, "mixed-AA visibility report completes");
+    if (((uint32_t *)guest(f.report + 16))[2] != 48) {
+        fprintf(stderr, "FAIL: mixed-AA visibility expected 48, got %u\n",
+                ((uint32_t *)guest(f.report + 16))[2]);
+        return 0;
+    }
+    puts("mixed-AA target query count 48");
+    return 1;
+}
+
 int main(int argc, char **argv)
 {
     int perf_mode;
@@ -1961,6 +2437,12 @@ int main(int argc, char **argv)
         return 1;
     if (!initialize(argv[1]))
         return 1;
+    if (strcmp(argv[2], "scale-api-config") == 0)
+        return test_scale_config() ? 0 : 1;
+    if (strcmp(argv[2], "scale-api-stale") == 0)
+        return test_scale_stale_update() ? 0 : 1;
+    if (strncmp(argv[2], "scale-init-retry-", strlen("scale-init-retry-")) == 0)
+        return test_scale_init_retry(argv[2]) ? 0 : 1;
     if (strncmp(argv[2], "device-", 7) == 0)
         return test_device_status(argv[2], argv[3]) ? 0 : 1;
     if (strncmp(argv[2], "textures-", 9) == 0)
@@ -1980,13 +2462,16 @@ int main(int argc, char **argv)
              _putenv_s("RECOMP_GPU_SCALE", "invalid") != 0) ||
             (strstr(argv[2], "scale2") &&
              _putenv_s("RECOMP_GPU_SCALE", "2") != 0) ||
+            ((strstr(argv[2], "scale-txn-") || strstr(argv[2], "scale-query") ||
+              strstr(argv[2], "scale-small") || strstr(argv[2], "scale-window")) &&
+             _putenv_s("RECOMP_GPU_SCALE", "native") != 0) ||
             (strstr(argv[2], "scale-output-invalid") &&
              (_putenv_s("RECOMP_GPU_SCALE", "native") != 0 ||
               _putenv_s("RECOMP_GPU_OUTPUT", "100x100") != 0)) ||
             _putenv_s("RECOMP_GPU_VSH", strstr(argv[2], "cpuvsh") ? "0" : "1") != 0 ||
             _putenv_s("RECOMP_GPU_ZPASS", strstr(argv[2], "async") ? "async" : "sync") != 0 ||
             _putenv_s("RECOMP_GPU_TEX_DECODE", strstr(argv[2], "software-texture") ? "0" : "1") != 0 ||
-            (strstr(argv[2], "depth") &&
+            (strstr(argv[2], "depth") && !strstr(argv[2], "scale-txn-") &&
              _putenv_s("RECOMP_GPU_DEPTH_TEXTURE", strstr(argv[2], "invalid") ? "invalid" : "1") != 0) ||
             (strstr(argv[2], "stencil") &&
              _putenv_s("RECOMP_GPU_STENCIL_ALIAS", strstr(argv[2], "invalid") ? "invalid" : "1") != 0) ||
@@ -2001,6 +2486,16 @@ int main(int argc, char **argv)
     } else if (strncmp(argv[2], "cpu", 3) != 0) {
         return 2;
     }
+    if (strstr(argv[2], "scale-txn-"))
+        return test_scale_transaction(argv[2]) ? 0 : 1;
+    if (strstr(argv[2], "scale-small"))
+        return test_scale_small_change() ? 0 : 1;
+    if (strstr(argv[2], "scale-window-fallback"))
+        return test_scale_window_fallback() ? 0 : 1;
+    if (strstr(argv[2], "scale-window"))
+        return test_scale_window() ? 0 : 1;
+    if (strstr(argv[2], "scale-query"))
+        return test_scale_query() ? 0 : 1;
     if (strcmp(argv[2], "gpu-cache-keys") == 0)
         return bruteforce_test_shader_cache_keys() ? 0 : 1;
     if (strncmp(argv[2], "gpu-cache-temp-", 15) == 0)

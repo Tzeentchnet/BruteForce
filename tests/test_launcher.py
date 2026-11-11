@@ -146,6 +146,23 @@ def test_launcher_maps_every_setting_and_preserves_unrelated_environment():
         launcher.game_environment({"resolution": "2.25", "depth_texture": "1"}, {})
 
 
+@pytest.mark.parametrize("resolution", ["1", "1.5", "2.25", "3", "4.5"])
+def test_fixed_resolution_clears_inherited_native_output(resolution):
+    original = {
+        "RECOMP_GPU_OUTPUT": "3840x2160",
+        "recomp_gpu_output": "1920x1080",
+        "UNRELATED": "keep",
+    }
+    env = launcher.game_environment({"resolution": resolution}, original)
+    assert not any(key.upper() == "RECOMP_GPU_OUTPUT" for key in env)
+    assert env["UNRELATED"] == "keep"
+    assert original["RECOMP_GPU_OUTPUT"] == "3840x2160"
+    assert original["recomp_gpu_output"] == "1920x1080"
+    assert launcher.game_environment(
+        {"resolution": "native"}, original
+    )["RECOMP_GPU_OUTPUT"] == "3840x2160"
+
+
 def test_program_near_plane_defaults_to_hud_safe_and_can_inherit_or_override():
     original = {"RECOMP_PROGRAM_NEAR_ZERO": "1"}
     assert launcher.game_environment({}, original)["RECOMP_PROGRAM_NEAR_ZERO"] == "hud"

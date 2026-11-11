@@ -149,8 +149,9 @@ physical pixels per 640x480 guest-screen pixel:
 - Numeric values select a fixed scale. Launcher presets are 480p = `1`,
   720p = `1.5`, 1080p = `2.25`, 1440p = `3`, and 2160p = `4.5`.
 - `RECOMP_GPU_OUTPUT=WxH` supplies a diagnostic output bound only in native
-  mode. Its 4:3 picture must produce a scale from 0.5 through 10. Scale 1
-  remains the default.
+  mode. Its fitted 4:3 picture must produce a scale from 0.5 through 10.
+  For example, 3840x2160 yields 2880x2160 at 4.5x; 1080x1920 yields
+  1080x810 at 1.6875x. Scale 1 remains the default.
 
 Each tracked colour surface keeps logical `w/h` and physical `pw/ph`.
 Physical colour and depth resources follow the selected scale. Guest
@@ -161,13 +162,34 @@ from the old GPU view instead of being reseeded from stale guest memory.
 Render-target aliases sample the physical resource while texture coordinates
 remain in guest-logical units.
 
+On the NV2A owner thread, initial scaled-device resources are prepared
+before the configuration commits. For a live native resize, the backend
+prepares replacement tracked colour and depth targets, shared-output texture,
+and existing readback resources as needed, and commits the dimensions and
+epoch only after preparation succeeds. The flip-only fallback preflights the
+last readback surface, or the current target before the first readback, so
+it does not bypass known readback allocations. Output-only changes can
+replace the shared texture without changing the epoch. An allocation, view
+or migration failure is diagnosed and retains the prior scale and resources
+for retry.
+A pending shared frame defers the transition until the normal keyed-mutex
+handoff permits it. A non-timeout mutex error instead disables shared
+presentation; device loss stops execution, and neither is automatically
+recovered.
+
+Changed-size depth/stencil targets are recreated, **not migrated**: their
+contents are undefined until the guest clears or regenerates them. Whether
+the title does so at each native resize remains a retail validation gate.
+
 Guest vertices and shader constants remain logical. The D3D11 viewport uses
 physical dimensions, so rasterization gains resolution without changing
 guest geometry. Surface scissors, partial clears and inclusive window-clip
-rectangles are rounded into physical pixels explicitly. Occlusion-query
-samples are divided by each query's physical-to-logical area ratio before
-they become guest visibility reports. Point size, line width and title-wide
-visual equivalence at scaled resolutions still need gameplay validation.
+rectangles are rounded into physical pixels explicitly. The backend ends and
+restarts an occlusion query at target changes and internal blits, retaining
+each segment's starting physical-to-logical pixel-area ratio. Synchronous and
+asynchronous reports normalize each segment using that saved ratio before
+summing it. Point size, line width and title-wide visual equivalence at
+scaled resolutions still need gameplay validation.
 
 GPU full-screen passes seed a new physical target with bilinear scaling,
 box-average a completed target back to guest size for readback, and choose an

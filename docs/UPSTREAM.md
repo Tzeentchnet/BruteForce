@@ -659,7 +659,14 @@ own GPU back end, an extended interface for it, and its own pacing fixes.
     *Problem:* the presenter copies or converts the flipped guest frame on
     the CPU, and a GPU back end must read its surface back into guest memory
     every flip to feed it. Blood Wake measured about 4 ms per flip for that
-    wait.
+    wait. The framework contract also does not define a transaction for
+    changing the producer's scaled resources together with a shared output
+    while a prior frame can still be owned by the presenter.
+    *Evidence:* source inspection found that the previous local native-scale
+    path could commit a new output and epoch before all replacement
+    allocations had succeeded. Synthetic failures and a held keyed mutex
+    reproduce the relevant failure and busy boundaries; this is not an
+    observed retail allocation failure.
     *Change:* the opt-in project back end publishes a 32-bit D3D11 shared
     texture to the existing window device through
     [0024-gpu-shared-presentation.patch](../patches/xboxrecomp/0024-gpu-shared-presentation.patch).
@@ -675,18 +682,31 @@ own GPU back end, an extended interface for it, and its own pacing fixes.
     and the renderer can query the current 4:3 client picture. The project
     backend still owns the exact/box/Catmull-Rom final resolve; this patch
     does not import Blood Wake's direct swap-chain ownership.
+    The project backend now prepares replacements before committing native
+    output changes, migrates colour, and retains prior resources on failure.
+    It defers a busy handoff rather than skipping the keyed-mutex protocol.
+    Changed-size depth/stencil is not migrated. This hardening changes no
+    framework patch; a generic lifecycle contract remains to be designed.
     *Tests:* WARP and hardware fixtures check exact shared pixels, busy,
     future and stale slots, arbitrary valid source dimensions, dimension
     propagation, pinned and overlay fallback, and snapshot consistency.
-    Existing guest readback fixtures still pass.
+    Project fixtures inject failures across scaled initialization, target,
+    migration, shared-output and readback allocations; they check rollback,
+    retry, an actual hidden-window resize and its flip-only fallback with a
+    different target bound. The focused cases passed on
+    WARP and the default NVIDIA GeForce RTX 5070 hardware adapter as
+    applicable. They do not prove retail resize, depth preservation, device
+    recovery or multi-driver behavior.
     *Overlap:* #285 covers ordering the readback against snapshots;
     [#215](https://github.com/sp00nznet/xboxrecomp/pull/215) (merged) added
-    the D3D11 presenter and #220 covers PVIDEO work (checked 2026-10-31).
+    the D3D11 presenter, #220 covers PVIDEO work, and #306 discusses the
+    backend contract (checked with the #184 tracking index on 2026-11-11).
     *Before filing:* separate the generic arbitrary-source contract from the
-    project-specific output-size policy; investigate the variable combined title performance
-    and frequent busy slots; test device loss, other drivers and window
-    lifecycles; establish guest readers before eliminating readback; and
-    reconcile the presentation interface with #184 and #285.
+    project-specific output-size policy; define transactional resource and
+    depth-content behavior across backends; investigate the variable combined
+    title performance and frequent busy slots; test device loss, other
+    drivers and window lifecycles; establish guest readers before eliminating
+    readback; and reconcile the presentation interface with #184 and #285.
     *Status:* experimental local framework patch and project back end.
 
 16. **Let the NV2A thread sleep when idle.**
@@ -821,7 +841,10 @@ own GPU back end, an extended interface for it, and its own pacing fixes.
     The D3D11 implementation now polls only on its device-owning thread,
     retires discarded in-flight queries instead of reusing them, and puts
     an event query after each report's preceding GPU work. Query failures
-    stop explicitly rather than writing fabricated successful results.
+    stop explicitly rather than writing fabricated successful results. The
+    project backend also snapshots the physical/logical area divisor at each
+    query start and splits queries around target changes and internal blits;
+    this avoids normalizing earlier samples with a later scale or AA layout.
     *Evidence:* the old fixture let the framework's ack thread poll the
     single-threaded D3D device while the fixture's main thread drew. That is
     an API violation and a plausible contributor to the WARP device loss;
@@ -836,10 +859,13 @@ own GPU back end, an extended interface for it, and its own pacing fixes.
     default or correctness claim.
     *Tests:* the [D3D11 fixture](../tests/d3d11_test.c) checks ordered
     reports, active counting, clears, empty intervals, and more than 64
-    counting intervals on WARP and hardware. CPU and D3D counts differ on
-    the shared triangle edge, as expected from their rasterization rules.
-    *Overlap:* #184's GPU series; no matching visibility-report PR was found
-    in the upstream PR listing checked 2026-10-31.
+    counting intervals on WARP and hardware. New sync and async synthetic
+    cases span failed and successful native resizes and mixed-AA targets.
+    CPU and D3D counts differ on the shared triangle edge, as expected from
+    their rasterization rules.
+    *Overlap:* #184's GPU series and #306's backend contract discussion; no
+    matching visibility-report PR was found in the PR listing checked
+    2026-11-11.
     *Before filing:* add broader title-scene and driver coverage, verify
     report lifetime and actual device reset, and obtain matched CPU-reference
     evidence. Keep async default-off while the 1%-low and G3 gates fail.
@@ -1418,8 +1444,12 @@ own GPU back end, an extended interface for it, and its own pacing fixes.
     4:3 query for Brute Force internal scaling. The proposed widescreen path
     can submit a wide source, but using that query to size it would retain
     the 4:3 bound. Blood Wake computes one requested picture aspect and uses
-    it consistently for target sizing and presentation.
-    *Change:* no patch yet. Add an aspect-aware output-size query or
+    it consistently for target sizing and presentation. The local fixed
+    diagnostic-output path also previously treated the whole client as the
+    4:3 picture, producing an incorrect native scale for letterboxed output.
+    *Change:* the project backend now fits fixed diagnostic dimensions to
+    4:3, matching the existing live 4:3 query; no framework patch changed.
+    For widescreen, add an aspect-aware output-size query or
     presenter contract, keeping 4:3 as the default. The backend supplies its
     requested picture aspect; window fitting, resize and dimension limits are
     framework-owned. Guest readback dimensions remain a separate backend
@@ -1427,8 +1457,10 @@ own GPU back end, an extended interface for it, and its own pacing fixes.
     *Tests:* synthetic client rectangles at 4:3, 16:9, 64:27, portrait and
     zero/minimized sizes; resize transitions; invalid aspects; submitted
     source dimensions; exact regression coverage for the existing 4:3
-    output and CPU fallback.
-    *Overlap:* checked 2026-10-31.
+    output and CPU fallback. Local synthetic tests now cover 3840x2160 and
+    portrait fixed bounds, plus a hidden 600x800 live presenter resize;
+    they do not implement or validate widescreen.
+    *Overlap:* checked 2026-11-11.
     [#215](https://github.com/sp00nznet/xboxrecomp/pull/215) supplies the
     merged scalable D3D11 presenter, while tracking
     [#184](https://github.com/sp00nznet/xboxrecomp/pull/184) now includes

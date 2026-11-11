@@ -1053,6 +1053,98 @@ def test_invalid_native_output_scale_is_rejected(tmp_path):
     assert "RECOMP_GPU_OUTPUT produces a native scale outside" in result.stderr
 
 
+@pytest.mark.parametrize("mode", [
+    "scale-api-config", "scale-api-stale", "scale-init-retry-preflight",
+    "scale-init-retry-vertex", "scale-init-retry-pixel", "scale-init-retry-sampler",
+    "scale-init-retry-buffer",
+])
+def test_scale_configuration_is_transactional(tmp_path, mode):
+    result = render_compatibility_fixture(mode, tmp_path / "unused.raw")
+    assert result.returncode == 0, result.stderr
+    if mode.startswith("scale-init-retry-"):
+        assert "configuration not committed" in result.stderr
+        assert "scale initialization retried" in result.stdout
+
+
+@pytest.mark.parametrize("stage", [
+    "shared-texture", "shared-rtv", "shared-handle", "shared-mutex",
+    "color-second", "color-rtv", "color-srv", "migration-second",
+    "depth-texture", "depth-view", "readback-texture", "readback-rtv",
+    "staging-texture", "busy",
+])
+@pytest.mark.parametrize("device", [
+    "warp",
+    pytest.param("hardware", marks=pytest.mark.skipif(
+        not HARDWARE, reason="set BRUTEFORCE_TEST_D3D11_HARDWARE=1 for a hardware device")),
+])
+def test_native_resize_retains_every_resource_on_failure_and_retries(tmp_path, stage, device):
+    result = render_compatibility_fixture(
+        f"gpu-{device}-scale-txn-{stage}", tmp_path / "unused.raw"
+    )
+    assert result.returncode == 0, result.stderr
+    assert "not committed; retaining scale 1.000, epoch 1 and prior resources" in result.stderr
+    if stage == "busy":
+        assert "shared frame resize deferred: prior frame is pending or busy" in result.stderr
+    assert "scale transaction rolled back and retried" in result.stdout
+
+
+@pytest.mark.parametrize("device", [
+    "warp",
+    pytest.param("hardware", marks=pytest.mark.skipif(
+        not HARDWARE, reason="set BRUTEFORCE_TEST_D3D11_HARDWARE=1 for a hardware device")),
+])
+def test_native_output_only_and_rounded_size_changes(tmp_path, device):
+    result = render_compatibility_fixture(
+        f"gpu-{device}-scale-small", tmp_path / "unused.raw"
+    )
+    assert result.returncode == 0, result.stderr
+    assert "small native changes verified" in result.stdout
+
+
+@pytest.mark.skipif(
+    not HARDWARE, reason="set BRUTEFORCE_TEST_D3D11_HARDWARE=1 for a hardware device"
+)
+def test_native_resize_tracks_the_live_letterboxed_presenter(tmp_path):
+    result = render_compatibility_fixture(
+        "gpu-hardware-scale-window", tmp_path / "unused.raw"
+    )
+    assert result.returncode == 0, result.stderr
+    assert "live native window resize verified" in result.stdout
+    assert "output picture 600x450 not committed" in result.stderr
+    assert "shared frame resize deferred: prior frame is pending or busy" in result.stderr
+
+
+@pytest.mark.skipif(
+    not HARDWARE, reason="set BRUTEFORCE_TEST_D3D11_HARDWARE=1 for a hardware device"
+)
+def test_native_resize_flip_fallback_prepares_readback_before_commit(tmp_path):
+    result = render_compatibility_fixture(
+        "gpu-hardware-scale-window-fallback", tmp_path / "unused.raw"
+    )
+    assert result.returncode == 0, result.stderr
+    assert "readback texture creation failed" in result.stderr
+    assert "output picture 640x480 not committed" in result.stderr
+    assert "readback resolve creation failed" in result.stderr
+    assert "output picture 800x600 not committed" in result.stderr
+    assert "flip fallback transaction verified" in result.stdout
+
+
+@pytest.mark.parametrize("query_mode", ["sync", "async"])
+@pytest.mark.parametrize("device", [
+    "warp",
+    pytest.param("hardware", marks=pytest.mark.skipif(
+        not HARDWARE, reason="set BRUTEFORCE_TEST_D3D11_HARDWARE=1 for a hardware device")),
+])
+def test_visibility_query_spanning_failed_and_successful_resize(tmp_path, query_mode, device):
+    result = render_compatibility_fixture(
+        f"gpu-{device}-scale-query-{query_mode}", tmp_path / "unused.raw"
+    )
+    assert result.returncode == 0, result.stderr
+    assert "scale query count 48" in result.stdout
+    assert "mixed-AA target query count 48" in result.stdout
+    assert "not committed; retaining scale" in result.stderr
+
+
 def test_scaled_rendering_rejects_disabled_shared_presentation(tmp_path):
     env = {key: value for key, value in os.environ.items() if not key.startswith("RECOMP_")}
     result = subprocess.run(

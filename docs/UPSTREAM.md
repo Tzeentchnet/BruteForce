@@ -110,7 +110,7 @@ runtime-only fix without regenerating unchanged title code. Integrated
 validation also corrected patch 0039's
 presenter script so each direct `fb_present.c` consumer links
 `display_awake.c`. The framework tools report 995 passed, 2 skipped and 134
-subtests passed on the fixed tree; the project suite reports 966 passed with
+subtests passed on the fixed tree; the project suite reports 969 passed with
 WARP and the available hardware adapter; nine focused framework groups report
 41 CTests passed; and the presenter suite reports 19 passed. The Phase 4
 subset comprises 22 CTests, generated-store coverage reports 3 passed, and 67
@@ -736,8 +736,10 @@ own GPU back end, an extended interface for it, and its own pacing fixes.
     The texture descriptor index has separate synthetic coverage for every
     key field, deliberate hash collisions, rewrite/rekey, compacting discard
     relocation and full 2,048-entry LRU replacement. The complete WARP-capable
-    D3D11 Python matrix reported 392 passed with WARP and the available
-    hardware adapter enabled.
+    D3D11 Python matrix reported 394 passed with WARP and the available
+    hardware adapter enabled. A same-binary diagnostic path retains the exact
+    former linear lookup for measurement, and its rewrite output matches the
+    indexed WARP fixture byte for byte.
     *Overlap:* #184's D3D11 back end, and
     [#274](https://github.com/sp00nznet/xboxrecomp/pull/274) (compile once
     per HLSL text), which applies the same keying idea to the D3D8 layer;

@@ -16,7 +16,10 @@ import statistics
 import bench_match
 import bench_world
 
-SWITCHES = ("RECOMP_PFB_FLUSH_WAIT", "RECOMP_NV2A_IDLE_WAIT", "RECOMP_NV2A_SEGMENTS")
+REQUIRED_SWITCHES = (
+    "RECOMP_PFB_FLUSH_WAIT", "RECOMP_NV2A_IDLE_WAIT", "RECOMP_NV2A_SEGMENTS",
+)
+SWITCHES = REQUIRED_SWITCHES + ("RECOMP_GPU_TEX_INDEX",)
 MIN_INTERVALS = 100
 MIN_SECONDS = 10
 
@@ -71,11 +74,13 @@ def _run(path, state):
 def _switches(run):
     options, environment = run["runtime_options"], run["runtime_environment"]
     for key in SWITCHES:
-        if key not in options or options[key] not in (None, "0", "1"):
+        if key in REQUIRED_SWITCHES and key not in options:
             raise bench_match.MatchError(f"missing or invalid {key}")
-        if options[key] != environment.get(key):
+        if options.get(key) not in (None, "0", "1"):
+            raise bench_match.MatchError(f"missing or invalid {key}")
+        if options.get(key) != environment.get(key):
             raise bench_match.MatchError(f"effective {key} metadata disagrees")
-    return tuple(options[key] == "1" for key in SWITCHES)
+    return tuple(options.get(key) == "1" for key in SWITCHES)
 
 
 def _environment(run):

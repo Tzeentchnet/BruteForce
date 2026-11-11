@@ -255,7 +255,9 @@ bound-target copy, CPU/GPU parity and shader diagnostics. The fixture also
 checks that a guarded write respects executable read-only protection. The
 texture-descriptor-index case covers exact key fields, deliberate hash
 collisions, rewrite/rekey, compacting discard, moved-entry relocation, and
-full-cache LRU eviction without allocating GPU resources.
+full-cache LRU eviction without allocating GPU resources. The linear-reference
+case runs the same exact rewrite fixture with `RECOMP_GPU_TEX_INDEX=0` and
+`1`, requires byte-identical output, and rejects invalid values.
 `memory_regressions` separately
 checks logical-range registration/reuse and mapping reset; `nv2a_ffp_backend`
 checks checked CPU decoding, input/output overlap and bounded verification

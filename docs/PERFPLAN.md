@@ -146,8 +146,12 @@ The former linear descriptor scan is now a 4,096-bucket exact index for the
 2,048-entry cache. Synthetic coverage exercises collisions, all key fields,
 rewrite/rekey, failed-upload discard relocation, full-cache LRU replacement,
 cube levels and mip levels. Exact source and palette comparison is unchanged.
-The recorded roughly 76 probes per lookup predates this index; no title A/B/A
-or performance result has been collected for it.
+`RECOMP_GPU_TEX_INDEX=0` disables index maintenance and selects the former
+exact linear lookup for measurement; unset or `1` selects the index. This
+same-executable reference keeps generated code, framework identity and exact
+byte validation fixed across a comparison. The recorded roughly 76 probes
+per lookup predates this index; no title A/B/A or performance result has been
+collected for it.
 The current texture and colour-shadow paths instead use checked copies,
 rechecking mapping and allocation identities, with optional explicit
 suballocation bounds. Guard, reprotection, lifecycle, colour-alias and
@@ -618,9 +622,10 @@ phases when it is on the critical path:
   and palette comparisons until tracked guest writes establish safe
   invalidation. Existing rewrite fixtures show that sparse checks can miss
   same-frame and unsampled changes, so sparse hashing remains diagnostic.
-  Use the opt-in interval counters to separate linear key probes, exact source
-  and palette comparison spans, snapshot copies, rewrites and evictions before
-  selecting the first cache change.
+  Use the opt-in interval counters and the same-binary
+  `RECOMP_GPU_TEX_INDEX=0/1` comparison to separate descriptor probes, exact
+  source and palette comparison spans, snapshot copies, rewrites and evictions
+  before selecting the next cache change.
   Any run API must preserve scalar CPU-reference behavior, packet boundaries,
   audit counts, overflow handling and backend output.
 - **Generated code:** `/O2` is already active. Measure `/GL` with LTCG and an

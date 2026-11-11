@@ -9,9 +9,11 @@ Current stop point: all three default-off Phase 4 mechanisms have synthetic
 coverage, and the corrected segment-only and all-three smokes reached reviewed
 movement. Their 24-run comparison is explicitly deferred. The exact
 texture-descriptor index is now synthetic-tested without weakening exact
-source or palette comparison. The next active performance gate is the
-Milestone 2 matched A/B/A comparison; do not promote the shader cache or any
-Phase 4 switch without its separate correctness and measurement gates.
+source or palette comparison. A default-on index and diagnostic linear
+reference are now available in the same executable. The next active
+performance gate is the Milestone 2 matched A/B/A comparison; do not promote
+the shader cache or any Phase 4 switch without its separate correctness and
+measurement gates.
 
 ## Milestone 0: trustworthy baseline
 
@@ -55,6 +57,8 @@ Phase 4 switch without its separate correctness and measurement gates.
 - [x] Cover descriptor-index collisions and lifecycle, same-frame and
   unsampled rewrites, palette rewrites, protected P8 ranges, exact colour
   aliases, and failed uploads synthetically.
+- [x] Provide a same-executable exact linear reference behind
+  `RECOMP_GPU_TEX_INDEX=0` for an attributable comparison.
 - [ ] Run a matched A/B/A campaign and record whether G2, G3, or NV2A busy time
   improves.
 

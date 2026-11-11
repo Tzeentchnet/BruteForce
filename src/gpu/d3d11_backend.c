@@ -2570,7 +2570,7 @@ static uint8_t *s_tex_probe;
 static size_t s_tex_probe_cap;
 static size_t s_tex_snapshot_bytes;
 static GpuTextureDecoder s_texture_decoder;
-static int s_tex_gpu = 1, s_tex_log, s_tex_approx, s_tex_aniso;
+static int s_tex_gpu = 1, s_tex_log, s_tex_approx, s_tex_aniso, s_tex_index_enabled = 1;
 
 static uint64_t hash_bytes(const uint8_t *p, size_t n)
 {
@@ -2654,10 +2654,29 @@ static Tex *tex_index_find(const Nv2aTexture *t, int cube, unsigned palette_entr
     return NULL;
 }
 
+static Tex *tex_descriptor_find(const Nv2aTexture *t, int cube, unsigned palette_entries,
+                                unsigned uploaded_levels, unsigned *probes)
+{
+    int i;
+    if (s_tex_index_enabled)
+        return tex_index_find(t, cube, palette_entries, uploaded_levels, probes);
+    if (probes)
+        *probes = 0;
+    for (i = 0; i < s_ntex; ++i) {
+        if (probes)
+            ++*probes;
+        if (tex_key_matches(&s_tex[i], t, cube, palette_entries, uploaded_levels))
+            return &s_tex[i];
+    }
+    return NULL;
+}
+
 static void tex_index_insert(Tex *e)
 {
     int index = (int)(e - s_tex);
     unsigned bucket;
+    if (!s_tex_index_enabled)
+        return;
     if (index < 0 || index >= s_ntex)
         tex_index_corrupt("insert", index);
     bucket = tex_entry_bucket(e);
@@ -2669,6 +2688,8 @@ static void tex_index_remove(Tex *e)
 {
     int index = (int)(e - s_tex);
     int *link;
+    if (!s_tex_index_enabled)
+        return;
     if (index < 0 || index >= s_ntex)
         tex_index_corrupt("remove", index);
     link = &s_tex_index[tex_entry_bucket(e)];
@@ -3233,7 +3254,7 @@ static ID3D11ShaderResourceView *get_texture(const Nv2aTexture *t, int cube, uns
         current.allocation = guest_allocation_identity(t->offset, &remaining);
         if (s_tex_strict_bounds)
             current.bounds = xbox_GuestBoundsIdentity(t->offset, &remaining);
-        Tex *negative = tex_index_find(t, cube, 0, layout.levels, NULL);
+        Tex *negative = tex_descriptor_find(t, cube, 0, layout.levels, NULL);
         if (negative && negative->unsupported &&
             (!s_tex_strict_bounds || (current.bounds && layout.span <= remaining)) &&
             same_guest_identity(&negative->source_identity, &current)) {
@@ -3317,8 +3338,8 @@ static ID3D11ShaderResourceView *get_texture(const Nv2aTexture *t, int cube, uns
     }
     if (perf)
         perf_start = bruteforce_perf_clock();
-    e = tex_index_find(t, cube, palette_entries, layout.levels,
-                       perf ? &perf_probes : NULL);
+    e = tex_descriptor_find(t, cube, palette_entries, layout.levels,
+                            perf ? &perf_probes : NULL);
     if (perf)
         bruteforce_perf_record_texture_lookup(perf_probes, e != NULL,
                                               bruteforce_perf_clock() - perf_start);
@@ -6256,6 +6277,7 @@ int bruteforce_d3d11_test_texture_index(void)
     uint32_t first_offset = 0, second_offset = 0;
     unsigned bucket, i, probes;
     int saved_mips = s_tex_mips;
+    int saved_index_enabled = s_tex_index_enabled;
     int ok = 0;
     Tex *entry;
 
@@ -6264,6 +6286,7 @@ int bruteforce_d3d11_test_texture_index(void)
 } while (0)
 
     INDEX_CHECK(s_tex && s_ntex == 0, "texture index starts empty");
+    s_tex_index_enabled = 1;
     seen = (uint32_t *)malloc(sizeof *seen * TEX_INDEX_BUCKETS);
     INDEX_CHECK(seen != NULL, "allocate texture index collision table");
     for (i = 0; i < TEX_INDEX_BUCKETS; ++i)
@@ -6404,6 +6427,7 @@ done:
     s_ntex = 0;
     s_tex_snapshot_bytes = 0;
     s_tex_mips = saved_mips;
+    s_tex_index_enabled = saved_index_enabled;
 #undef INDEX_CHECK
     return ok;
 }
@@ -6436,6 +6460,7 @@ int bruteforce_d3d11_install(void)
     const char *tex_gpu = getenv("RECOMP_GPU_TEX_DECODE");
     const char *tex_log = getenv("RECOMP_GPU_TEXLOG");
     const char *tex_approx = getenv("RECOMP_GPU_TEX_CACHE_APPROX");
+    const char *tex_index = getenv("RECOMP_GPU_TEX_INDEX");
     const char *tex_bounds = getenv("RECOMP_GPU_TEXTURE_BOUNDS");
     const char *tex_mips = getenv("RECOMP_GPU_MIPS");
     const char *tex_aniso = getenv("RECOMP_GPU_ANISO");
@@ -6473,6 +6498,11 @@ int bruteforce_d3d11_install(void)
     if (tex_approx && *tex_approx && strcmp(tex_approx, "0") != 0 &&
         strcmp(tex_approx, "1") != 0) {
         fprintf(stderr, "[GPU-D3D11] RECOMP_GPU_TEX_CACHE_APPROX must be 0 or 1\n");
+        return 0;
+    }
+    if (tex_index && *tex_index && strcmp(tex_index, "0") != 0 &&
+        strcmp(tex_index, "1") != 0) {
+        fprintf(stderr, "[GPU-D3D11] RECOMP_GPU_TEX_INDEX must be 0 or 1\n");
         return 0;
     }
     if (tex_bounds && *tex_bounds && strcmp(tex_bounds, "0") != 0 &&
@@ -6539,6 +6569,7 @@ int bruteforce_d3d11_install(void)
     s_tex_gpu = !tex_gpu || strcmp(tex_gpu, "0") != 0;
     s_tex_log = tex_log && strcmp(tex_log, "1") == 0;
     s_tex_approx = tex_approx && strcmp(tex_approx, "1") == 0;
+    s_tex_index_enabled = !tex_index || strcmp(tex_index, "0") != 0;
     s_tex_strict_bounds = tex_bounds && strcmp(tex_bounds, "1") == 0;
     s_tex_mips = tex_mips && strcmp(tex_mips, "1") == 0;
     s_tex_aniso = tex_aniso && strcmp(tex_aniso, "1") == 0;
@@ -6546,6 +6577,9 @@ int bruteforce_d3d11_install(void)
     if (s_tex_approx)
         fprintf(stderr, "[GPU-D3D11] experimental approximate texture cache enabled;"
                         " texture rewrites can be missed\n");
+    if (!s_tex_index_enabled)
+        fprintf(stderr, "[GPU-D3D11] exact texture descriptor index disabled;"
+                        " using diagnostic linear reference lookup\n");
     if (s_tex_strict_bounds)
         fprintf(stderr, "[GPU-D3D11] texture spans require registered logical bounds\n");
     if (s_tex_mips)

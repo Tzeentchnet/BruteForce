@@ -316,6 +316,10 @@ entry moves and LRU replacement update the index explicitly; an index
 invariant failure stops instead of falling back to an unverified entry.
 Indexing only selects a candidate and never replaces the checked source,
 palette, allocation-lifetime or exact-byte validation above.
+`RECOMP_GPU_TEX_INDEX=0` is a diagnostic measurement reference that restores
+the complete linear descriptor scan and disables index maintenance; unset or
+`1` uses the index. It does not relax any descriptor, lifetime, snapshot or
+byte comparison, and it is not a compatibility fallback.
 
 P8 binds validate sampled indices against the programmed 32-, 64-, 128- or
 256-entry palette. Framework texture metadata carries this length into both

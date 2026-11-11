@@ -319,6 +319,31 @@ def test_texture_descriptor_index_handles_lifecycle_and_collisions(tmp_path):
     assert "texture descriptor index passed" in result.stdout
 
 
+def test_texture_descriptor_linear_reference_preserves_exact_cache_behavior(tmp_path):
+    images = []
+    for option in ("0", "1"):
+        output = tmp_path / f"texture-index-{option}.raw"
+        result = render_compatibility_fixture(
+            "gpu-cache-rewrite-compute-warp", output, RECOMP_GPU_TEX_INDEX=option
+        )
+        assert result.returncode == 0, result.stderr
+        if option == "0":
+            assert "using diagnostic linear reference lookup" in result.stderr
+        else:
+            assert "using diagnostic linear reference lookup" not in result.stderr
+        images.append(output.read_bytes())
+    assert images[0] == images[1]
+
+
+def test_invalid_texture_descriptor_index_option_is_rejected(tmp_path):
+    result = render_compatibility_fixture(
+        "gpu-cache-rewrite-compute-warp", tmp_path / "unused.raw",
+        RECOMP_GPU_TEX_INDEX="invalid",
+    )
+    assert result.returncode != 0
+    assert "RECOMP_GPU_TEX_INDEX must be 0 or 1" in result.stderr
+
+
 def test_approximate_cache_is_opt_in_and_warns_about_stale_textures(tmp_path):
     output = tmp_path / "approximate-cache.raw"
     result = render_compatibility_fixture(

@@ -405,6 +405,12 @@ bound. `RECOMP_GPU_TEX_CACHE_APPROX=1` restores the old approximate checks
 for diagnostics, but can leave rewritten textures stale. Nonlinear
 multi-level declarations always use exact snapshots, including when a short
 chain falls back to level zero, even when that option is enabled.
+The exact descriptor lookup uses its collision-safe index by default.
+`RECOMP_GPU_TEX_INDEX=0` selects the former complete linear scan and disables
+index maintenance for matched performance diagnostics; `1` explicitly
+selects the index. Both modes retain the same exact descriptor, allocation,
+source and palette checks. Other values reject D3D11 initialization. The
+linear path is not a compatibility fallback or a launcher setting.
 
 Guest mipmaps and anisotropy are separate experimental D3D11 switches; both
 accept only `0` or `1` and default to `0`. They are environment options, not
@@ -540,7 +546,7 @@ error because a guest-sized CPU frame cannot carry the higher-resolution
 result. Experimental depth and packed-stencil aliases are also rejected in
 scaled modes; their guest-layout seed and sampling semantics have not been
 defined at physical resolution. The CPU renderer remains at guest resolution.
-The complete synthetic D3D11 matrix passes 392 cases with WARP and RTX 5070
+The complete synthetic D3D11 matrix passes 394 cases with WARP and RTX 5070
 hardware enabled, including CPU-written frames with and without a GPU overlay
 at scale 1 and scale 2.
 Focused synthetic WARP and hardware fixtures also exercise native resize
@@ -866,6 +872,28 @@ may specify one page-aligned guest address to leave unprotected when
 records the exclusion; reads and writes on that page are not observed.
 Neither a clean report with an excluded page nor this diagnostic's other
 coverage limitations justify skipping guest readback.
+
+## Texture-index performance comparison
+
+The current Milestone 2 gate compares the exact linear reference with the
+default descriptor index in one executable. It is six native recompiled-title
+runs, not an xemu campaign. Every attempt requires an operator to skip the
+cinematics and mission briefing, stop at the same Basic Controls popup, and
+acknowledge the per-run token. The fixed script then dismisses the tutorial
+panels before the measured camera-only interval. Retries are disabled:
+
+```powershell
+python tools\bench.py --performance --scene movement --readiness manual `
+  --ready-state "Basic Controls popup fully visible at the initial tutorial spawn; no cinematic or briefing" `
+  --no-auto-panels --capture-world --profile-callers --runs 3 --retries 0 `
+  --variant "linear:BRUTEFORCE_PERF_COUNTERS=1,RECOMP_GPU_TEX_INDEX=0" `
+  --variant "indexed:BRUTEFORCE_PERF_COUNTERS=1,RECOMP_GPU_TEX_INDEX=1"
+```
+
+The harness alternates linear/indexed attempts, requires one executable and
+framework identity, and records the exact runtime options. Collection remains
+inconclusive until every captured interval, input sequence and presentation
+state is reviewed. Do not infer distinct-world cadence from flips alone.
 
 ## Experimental NV2A wait and segment options
 

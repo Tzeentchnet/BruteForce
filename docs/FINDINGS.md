@@ -15,7 +15,7 @@ The complete 42-patch v0.17 framework stack independently replayed to tree
 `3164795a5ed52658abb41f2630ed8153e6b2cce0` and passed
 `python tools/toolkit.py --verify`. The framework tools reported 995 passed,
 2 skipped and 134 subtests passed. The production-style project suite
-reported 966 passed with WARP and the available hardware adapter. Nine
+reported 969 passed with WARP and the available hardware adapter. Nine
 focused framework fixture groups reported 41 CTests passed, and the Windows
 presenter suite reported 19 passed. The Phase 4 subset comprises 7
 bounded-PFB, 6 idle-wait and 9 guarded-segment CTests; three generated
@@ -180,11 +180,15 @@ promoted into a performance claim.
   pinning the full runtime tree in build metadata. It translated all 22,295
   identified functions with zero failures, six unresolved direct-call
   targets and 11 untranslated instruction sites. After the project-side exact
-  texture-descriptor index was added, the supported workflow rebuilt the same
-  generated title and framework tree into a 37,576,192-byte executable with
-  SHA-256
-  `4635a8522a44ba99e676cdbf1f3db7b64a8b0da0e4b9718cbacd683d5bb427c0`.
+  texture-descriptor index and its exact same-binary linear reference were
+  added, the supported workflow rebuilt the same generated title and
+  framework tree into a 37,577,216-byte executable with SHA-256
+  `1d4da20c37be04347ed4e7f5f01b3752e0813c564ae87dc6c2e128cca87c5527`.
   This current executable has synthetic coverage but no retail run. The
+  preceding index-only 37,576,192-byte executable also had no retail run and
+  had SHA-256
+  `4635a8522a44ba99e676cdbf1f3db7b64a8b0da0e4b9718cbacd683d5bb427c0`.
+  The
   preceding post-deadlock 37,575,168-byte executable, which completed the two
   Phase 4 smokes, had SHA-256
   `132bece507c1773c41eeaa6549687d2c493a121c2c102452a10465d5a584f073`;
@@ -2188,13 +2192,24 @@ entry is an internal invariant failure rather than a silent cache miss.
 Checked source and palette snapshots, allocation identities, exact byte
 comparison and the approximate-cache opt-in are unchanged.
 
+A diagnostic `RECOMP_GPU_TEX_INDEX=0` path uses the former complete linear
+descriptor scan and disables index maintenance; unset or `1` uses the index,
+and other values reject D3D11 initialization. This is a measurement reference,
+not a compatibility fallback. It lets the baseline and candidate retain the
+same executable, generated title, framework tree, exact descriptor semantics
+and byte validation. The benchmark records it as a guarded performance switch
+and still requires manual readiness, fixed input, capture, caller attribution
+and at least three alternating runs per side.
+
 A test-only fixture deliberately finds a bucket collision, checks every key
 field, rewrites an entry, discards a non-final entry, verifies the relocated
 entry, fills all 2,048 slots, and verifies LRU removal/replacement. It also
 checks cube and mip-level identities. The focused texture-index, detailed
 counter, rewrite, unsupported-format and failed-upload selection reported 18
 passed across WARP and the available hardware adapter. The complete D3D11
-Python matrix then reported 392 passed with both device modes enabled. No
+Python matrix then reported 394 passed with both device modes enabled. The
+linear-reference output test is byte-identical to the indexed WARP rewrite
+fixture, and invalid switch values fail initialization. No
 retail run, matched A/B/A comparison, distinct-world measurement, or G2/G3
 result was collected; the old probe counts remain the only title evidence.
 

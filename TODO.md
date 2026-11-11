@@ -78,8 +78,9 @@ measurement gates.
 
 - [ ] Re-arm and complete the diagnostic surface-read investigation, recording
   every excluded range and blind spot.
-- [ ] Inventory guest readers, CPU presentation, PVIDEO, screenshots, captures,
-  and frame-statistics consumers.
+- [x] Inventory known framework surface readers, CPU presentation, PVIDEO,
+  screenshots, captures and frame-statistics consumers, while retaining the
+  unresolved title-reader gate.
 - [ ] Implement on-demand readback without weakening semaphore or flip
   ordering.
 - [x] Bound unfinished GPU frames, initially to two, with event queries.

@@ -524,10 +524,18 @@ gameplay, apart from constant-writing programs. G4 still holds.
    the finished 32-bit target to the existing D3D11 window device, with one
    pending snapshot and CPU fallback for pinned frames or video overlays.
    The frame ID prevents older GPU snapshots replacing newer CPU snapshots.
-   Guest readback and CPU snapshot creation remain; this is not yet a
+   Guest readback and CPU snapshot creation remain even on an eligible shared
+   flip: the executor still publishes a guest-backed CPU snapshot. The static
+   consumer inventory is complete and records CPU/GDI/SDL upload, pinned
+   frames, PVIDEO, dumps, statistics and presenter capture. This is not yet a
    fully GPU-authoritative presentation pipeline.
 2. **Readback only on demand.** Not implemented for GPU-dirty surfaces:
-   guest readers have not been comprehensively identified or intercepted.
+   arbitrary title readers have not been comprehensively identified or
+   intercepted. The completed null-backend guard run still has one unresolved
+   non-NV2A colour read, seven provisionally USB-related depth reads and one
+   excluded page. A metadata-only shared flip and an explicit CPU-snapshot
+   request contract would address known framework consumers, but not those
+   title-side blind spots.
    The separate default-off `RECOMP_GPU_SKIP_CLEAN_READBACK=1` experiment
    removes a copy only when native 32-bit guest bytes are already coherent;
    diagnostics and unsupported formats still copy, and the flip still waits.

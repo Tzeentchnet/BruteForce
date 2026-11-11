@@ -1646,6 +1646,45 @@ Future guard reports include a module-relative offset when symbol lookup
 fails. The run's constant-signature rate is a diagnostic only, not a visual
 FPS result.
 
+#### Surface-read consumer inventory (static plus 2026-10-29 guard evidence)
+
+The completed exclusion run used retail generation
+`20261029-175500-dfadbdd9`, toolkit tree
+`3472bac8e33c1758c801fb1ca65a346a170ad8e5`, the null back end, 12 raster
+threads and the scripted stationary-plus-movement route. Its report covered
+seven exact colour/depth ranges, dropped no sites and excluded page
+`0x80001000`. The raw report records:
+
+- 1,817,197 colour reads on the NV2A thread across four sites;
+- one colour read from another thread at `0x8000078C`, still unsymbolized;
+- seven depth-range reads from another thread at `0x817F0740`, provisionally
+  resolved to `ohci_do_td` as described above; and
+- 54,086 colour writes from other threads across 350 sites.
+
+The large NV2A-thread read class is consistent with the framework's
+flip-publication, dump and statistics flow, but the old report lacks resolved
+symbols, so that classification is a source-backed interpretation rather than
+a recovered call stack. The other-thread writes prove that CPU activity
+touches programmed colour ranges in this run; they do not establish whether
+every range retained render-target ownership at each write. The single
+other-thread colour read is not explained by the USB attribution and remains
+a possible title or framework consumer.
+
+Static inspection identifies the current mandatory framework consumers.
+After a D3D11 flip the back end publishes any eligible shared GPU texture,
+then still stages the completed colour surface into guest memory. The
+executor copies those guest pixels into the window snapshot. CPU-upload/GDI
+presentation, pinned frames, PVIDEO composition, executor flip dumps, frame
+statistics, window BMP dumps and presenter-source capture consume that CPU
+path. PVIDEO also snapshots a separate guest YUY2 source. Render-to-texture
+and D3D11 visibility queries do not require whole-surface readback.
+
+These observations complete the static consumer inventory only. They do not
+close the title-reader investigation: the excluded page, already-unprotected
+pages, kernel-mediated accesses, the unresolved colour read and concurrent
+ownership changes remain blind spots. No new retail or emulator run was made
+for this inventory, and per-flip readback remains required.
+
 The experimental D3D11 depth path uses D24S8/R24 views and a separate GPU
 snapshot when sampling a currently bound depth target. It accepts only exact
 address, format, linear layout, dimensions and pitch matches. A newly tracked

@@ -820,7 +820,15 @@ own GPU back end, an extended interface for it, and its own pacing fixes.
     path could commit a new output and epoch before all replacement
     allocations had succeeded. Synthetic failures and a held keyed mutex
     reproduce the relevant failure and busy boundaries; this is not an
-    observed retail allocation failure.
+    observed retail allocation failure. The completed static consumer
+    inventory also confirms that flip publication always copies guest colour
+    pixels into a CPU snapshot, including on an eligible shared flip.
+    CPU-upload/GDI/SDL presentation, pinned frames, PVIDEO composition,
+    dumps, frame statistics and presenter capture consume that path.
+    Render-to-texture and visibility reports do not need whole-surface
+    readback. A retained null-backend movement report has one unresolved
+    non-NV2A colour read, seven provisionally USB-related depth reads and one
+    excluded page, so it does not prove that title readers are absent.
     *Change:* the opt-in project back end publishes a 32-bit D3D11 shared
     texture to the existing window device through
     [0024-gpu-shared-presentation.patch](../patches/xboxrecomp/0024-gpu-shared-presentation.patch).
@@ -863,8 +871,10 @@ own GPU back end, an extended interface for it, and its own pacing fixes.
     project-specific output-size policy; define transactional resource and
     depth-content behavior across backends; investigate the variable combined
     title performance and frequent busy slots; test real device loss, other
-    drivers and window lifecycles; establish guest readers before eliminating
-    readback; and reconcile the presentation interface with #184 and #285.
+    drivers and window lifecycles; define a metadata-only shared flip plus an
+    explicit CPU-snapshot request for known framework consumers; establish and
+    intercept arbitrary title readers before eliminating readback; and
+    reconcile the presentation interface with #184 and #285.
     *Status:* experimental local framework patch and project back end.
 
 16. **Let the NV2A thread sleep when idle.**

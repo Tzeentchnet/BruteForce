@@ -30,8 +30,13 @@ default-off D3D11 experiments with synthetic coverage; title and xemu
 comparisons remain open. See the [user guide](docs/USER_GUIDE.md#d3d11-renderer-and-benchmark-diagnostics).
 Submitted GPU work is bounded and device-loss paths fail explicitly.
 Default-off clean-surface readback elision has synthetic coverage only; dirty
-frames still read back and tracked-surface flips still wait. Retail correctness and
-performance of this experiment are unverified.
+frames still read back and tracked-surface flips still wait. The static
+consumer inventory confirms that CPU presentation, PVIDEO composition,
+frame dumps, frame statistics and presenter capture currently depend on
+guest-visible colour pixels. A completed null-backend guard run still has one
+unresolved non-NV2A colour read and an excluded page, so it does not justify
+general on-demand readback. Retail correctness and performance of this
+experiment are unverified.
 
 Three independent default-off Phase 4 switches now have synthetic coverage:
 event-driven PFB acknowledgement, NV2A idle waiting and guarded per-PUT

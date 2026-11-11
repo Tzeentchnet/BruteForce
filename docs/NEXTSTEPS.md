@@ -750,9 +750,15 @@ These are synthetic results, not a title comparison.
 
 - Continue the guest surface-read investigation with the null backend and
   `BRUTEFORCE_SURFACE_GUARD`, covering stationary and movement in one
-  scripted run. Account for excluded pages and the diagnostic's other blind
-  spots; a partial run cannot prove that no guest readers exist. Keep output
-  local. This determines how much readback B2 can remove.
+  scripted run. The static framework-consumer inventory is complete: flip
+  publication, CPU/GDI/SDL upload, pinned/PVIDEO composition, dumps,
+  statistics and presenter capture currently consume the CPU path, while
+  render-to-texture and visibility queries do not require whole-surface
+  readback. The retained completed guard report has one unresolved non-NV2A
+  colour read, seven provisionally USB-related depth reads and one excluded
+  page. Account for those and the diagnostic's other blind spots; the run
+  cannot prove that no title readers exist. Keep output local. This determines
+  how much readback B2 can remove.
 - Extend the opt-in shared GPU presenter only after establishing guest
   surface readers and a safe on-demand-readback contract. The bounded
   renderer queue and clean-surface-only copy elision are synthetic-tested;

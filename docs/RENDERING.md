@@ -585,6 +585,25 @@ tracked surface flip, including an elided copy, waits for prior GPU work; this
 does not intercept arbitrary guest readers or prove all concurrent guest-write
 timings.
 
+The current consumer inventory is:
+
+| Consumer | Pixel source and evidence | Readback boundary |
+|---|---|---|
+| Flip publication (`fb_publish`) | The executor calls the back-end readback, then copies the completed guest colour surface into the window's two-slot CPU snapshot on the NV2A thread. This copy still occurs when a shared GPU frame is eligible. | Requires guest-visible colour pixels under the current framework contract. |
+| GDI, SDL and D3D11 CPU-upload presentation | Convert or upload the published CPU snapshot. | Requires a CPU pixel snapshot; today that snapshot comes from guest memory. |
+| Shared D3D11 presentation | The back end publishes the finished GPU texture before staging readback, and a frame ID prevents stale replacement. | The shared route itself does not need guest pixels, but the executor still performs readback and CPU flip publication. |
+| PVIDEO and pinned framebuffers | PVIDEO snapshots a separate guest YUY2 bank and composites it over the CPU base image; pinned frames also follow the CPU path. Both reject shared presentation. | Requires the base colour image to be CPU-visible; PVIDEO's separate source is guest memory too. |
+| Flip dumps and frame statistics | `dump_surface_bmp` and `nv2a_frame_hash` read the completed guest colour surface after the flip readback. | Diagnostic settings force ordinary readback. |
+| Window BMP dumps and presenter-source capture | Window dumps serialize the converted CPU image. Presenter capture rejects direct shared presentation and binds captured pixels to the frame-statistics identity. | Requires the CPU/readback route and, for presenter capture, valid guest pixels and statistics. |
+| Render-to-texture and visibility reports | Colour aliases sample the GPU render target directly; D3D11 visibility reports retire query values into their report records. | Do not require whole-surface guest readback. |
+| Title CPU readers | The completed 2026-10-29 guard run observed one non-NV2A colour read that remains unsymbolized. Seven depth-range reads are provisionally attributed to USB rumble handling, not a title depth consumer. One page was excluded. | Unresolved; general readback removal remains unsafe. |
+
+This closes the static framework-consumer inventory, not the dynamic
+title-reader investigation. A future on-demand contract needs a
+metadata-only shared flip publication, an explicit CPU snapshot request for
+fallback and diagnostics, and a way to synchronize arbitrary guest reads and
+writes. It cannot infer safety merely from shared-presentation eligibility.
+
 The default window path snapshots and converts guest pixels and can compose
 PVIDEO before presentation. The Windows presenter normally uses a separate
 D3D11 swap chain and can fall back to GDI. With

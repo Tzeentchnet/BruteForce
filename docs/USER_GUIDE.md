@@ -872,6 +872,14 @@ may specify one page-aligned guest address to leave unprotected when
 records the exclusion; reads and writes on that page are not observed.
 Neither a clean report with an excluded page nor this diagnostic's other
 coverage limitations justify skipping guest readback.
+The current framework also needs guest-visible colour pixels for its CPU
+flip snapshot, GDI/SDL or D3D11 CPU upload, pinned/PVIDEO fallback, frame
+dumps, frame statistics, window dumps and presenter capture. Shared D3D11
+presentation can consume the GPU texture directly, but the current flip still
+publishes the CPU snapshot. The retained completed guard run has one
+unresolved non-NV2A colour read in addition to its excluded page, so
+`RECOMP_GPU_SKIP_CLEAN_READBACK=1` remains a narrow coherent-surface
+diagnostic rather than general on-demand readback.
 
 ## Texture-index performance comparison
 

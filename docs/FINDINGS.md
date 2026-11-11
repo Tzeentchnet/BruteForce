@@ -31,7 +31,8 @@ results validate reconstruction, compilation and synthetic contracts only.
 They are not native-display, audio-listening, device-loss, Hor+, 4K or
 performance evidence.
 
-The resulting retail generation then completed exactly one audio-off,
+Before the runtime-only Phase 4 fix, the codegen-identical pre-fix executable
+for the resulting retail generation completed exactly one audio-off,
 four-thread CPU attempt and one D3D11 attempt through tutorial stationary and
 movement windows without retry. Representative movement captures were
 reviewed: both show the character, world and HUD without the Basic Controls
@@ -42,14 +43,15 @@ captured flips matched the two known solid-black hashes, but 116 CPU and 1,929
 D3D11 flips remain unclassified. These are bring-up figures, not distinct
 world-frame rates or an A/B/A comparison.
 
-A separate single D3D11 attempt enabled `RECOMP_GPU_SCALE=4.5`,
-`RECOMP_GPU_MIPS=1` and `RECOMP_GPU_ANISO=1`. It reached the same movement
-window without retry, reported the intended 2880x2160 4:3 render size, and
-showed no renderer-device, timeout or fatal diagnostic. Reviewed first/last
-sample captures show gameplay with the character and HUD and no panel,
-cinematic or solid-black frame. The run reported 24.385 stationary flips/s
-and 49.053 whole-picture movement changes/s; 1,963 movement flips remain
-unclassified, so this is not a distinct-world rate or comparison.
+The same pre-fix executable also completed a single D3D11 attempt with
+`RECOMP_GPU_SCALE=4.5`, `RECOMP_GPU_MIPS=1` and `RECOMP_GPU_ANISO=1`. It
+reached the same movement window without retry, reported the intended
+2880x2160 4:3 render size, and showed no renderer-device, timeout or fatal
+diagnostic. Reviewed first/last sample captures show gameplay with the
+character and HUD and no panel, cinematic or solid-black frame. The run
+reported 24.385 stationary flips/s and 49.053 whole-picture movement
+changes/s; 1,963 movement flips remain unclassified, so this is not a
+distinct-world rate or comparison.
 
 The mip diagnostic repeatedly found the observed format-`0x0E` tutorial
 texture declared no additional levels and therefore sampled level zero,
@@ -920,10 +922,11 @@ DSP after the APU frame thread has joined. Patch 0032 lets independent cleanup
 hooks run on window, firmware-return, and shutdown exits. Patch 0033 raises the
 APU frame worker to high priority on Windows. Patch 0034 raises the queue
 refill threshold from one half to three quarters while retaining the same
-maximum. Upstream PR #264, at commit
-`eb7b1f5833205a24fcc0eda6eb4ed2df4f2bc2e3`, supplies the selected 2,048-sample
-SSL restart hold. PRs #266/#270 and #261/#286 were not adopted without
-evidence that their additional behavior is needed.
+maximum. Xboxrecomp v0.17.0 includes former selected PR #264 commit
+`eb7b1f5833205a24fcc0eda6eb4ed2df4f2bc2e3`, which supplies the 2,048-sample
+SSL restart hold, and merged #261 is also current-base behavior. Open #266
+and draft #286 remain unselected; closed #270 was not adopted. Their distinct
+failure modes were not established in the title.
 
 The DSP wrapper mirrors the GP/EP windows against shadow copies, resolves SGE
 pages using recorded physical-translation intent, and writes EP FIFO 0 to the
@@ -2639,7 +2642,8 @@ split-screen support.
 
 The implemented first slice is diagnostic only: the opt-in trace records
 bounded call-site and camera-state candidates without changing matrices.
-It requires regeneration because `recomp_manual.c` participates in the
+The current supported generation contains this trace. Any future change to it
+requires regeneration because `recomp_manual.c` participates in the
 generated-source fingerprint. The remaining classification and rendering
 gates above are not satisfied.
 
@@ -2685,26 +2689,26 @@ generic code from `e631eddd`. No code was copied from `62923407`, so
 revision still requires a corresponding notice update; title code, generated
 C, assets and captures remain local.
 
-## Current validation boundary
+## Earlier v0.17 and reviewed performance baselines
 
-The supported executable is now generation `20261111-002138-a9dbc18a` on the
-v0.17 tree recorded above. One audio-off, four-thread CPU run and one D3D11
-run used the legacy isolated-save movement route. Both reached the scripted
-world, stationary hold and movement window without a retry. The CPU route
-reached the world at 93.61 seconds and reported 1.856 stationary flips/s,
-2.002 movement flips/s and 2.027 whole-frame changes/s. D3D11 reached it at
-93.97 seconds and reported 8.422 stationary flips/s, 11.846 movement flips/s
-and 11.871 whole-frame changes/s. Neither run matched a known black hash.
-Their 81 and 475 movement frames remain unreviewed, so no figure is distinct
-world FPS. The runs used different renderers only once each, omitted profiling
-and captures, and are a bring-up check rather than an A/B/A performance
-comparison.
+Reference generation `20261111-002138-a9dbc18a` was the first supported
+v0.17 executable on the tree recorded above. One audio-off, four-thread CPU
+run and one D3D11 run used the legacy isolated-save movement route. Both
+reached the scripted world, stationary hold and movement window without a
+retry. The CPU route reached the world at 93.61 seconds and reported 1.856
+stationary flips/s, 2.002 movement flips/s and 2.027 whole-frame changes/s.
+D3D11 reached it at 93.97 seconds and reported 8.422 stationary flips/s,
+11.846 movement flips/s and 11.871 whole-frame changes/s. Neither run matched
+a known black hash. Their 81 and 475 movement frames remain unreviewed, so no
+figure is distinct world FPS. The runs used different renderers only once
+each, omitted profiling and captures, and are a bring-up check rather than an
+A/B/A performance comparison.
 
-The two run logs contain no reached generated stub, untranslated-instruction
-hit, ICALL failure, renderer-device error or crash. They do retain expected
-filesystem diagnostics such as the `NtFsControlFile` stub and absent optional
-cache/content files; those did not stop the route. No retail camera trace was
-enabled.
+Those two run logs contain no reached generated stub,
+untranslated-instruction hit, ICALL failure, renderer-device error or crash.
+They do retain expected filesystem diagnostics such as the `NtFsControlFile`
+stub and absent optional cache/content files; those did not stop the route.
+Neither run enabled the retail camera trace.
 
 The supported **reviewed comparison baseline** remains old generation
 `20261103-145850-21e3091e`, built in Release against xboxrecomp base

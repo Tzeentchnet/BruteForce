@@ -66,6 +66,7 @@ and [packed-alias investigation](./FINDINGS.md#packed-depthstencil-aliases-and-s
 | --- | --- |
 | Renderer selection and tutorial startup | [main.c](../src/main.c), [build.py](../tools/build.py), [launcher.py](../tools/launcher.py) |
 | Staged pushbuffer walking and PGRAPH handling | [patch 0008](../patches/xboxrecomp/0008-experimental-pgraph-and-staged-walker.patch), [recomp_manual.c](../src/recomp_manual.c) |
+| Bounded PFB acknowledgement, idle waiting and guarded PUT segments | [patch 0045](../patches/xboxrecomp/0045-bounded-nv2a-segments-and-waits.patch), [recomp_manual.c](../src/recomp_manual.c) |
 | Extended backend interface and vertex-program batches | [patch 0016](../patches/xboxrecomp/0016-extended-render-backend.patch), [patch 0017](../patches/xboxrecomp/0017-gpu-vertex-programs.patch) |
 | D3D11 device, surfaces, state, draws, queries and readback | [d3d11_backend.c](../src/gpu/d3d11_backend.c) |
 | Render-scale authority and GPU seed/readback/final resolves | [render_scale.c](../src/gpu/render_scale.c), [render_scale.h](../src/gpu/render_scale.h) |

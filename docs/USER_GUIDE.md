@@ -869,8 +869,8 @@ coverage limitations justify skipping guest readback.
 
 ## Experimental NV2A wait and segment options
 
-The latest Phase 4 candidate can replace the title's busy poll with a wait on
-the real framework acknowledgement:
+The current default-off Phase 4 implementation can replace the title's busy
+poll with a wait on the real framework acknowledgement:
 
 ```powershell
 $env:RECOMP_PFB_FLUSH_WAIT = "1"

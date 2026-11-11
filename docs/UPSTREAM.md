@@ -39,12 +39,13 @@ PR.
 
 ## Current comparison snapshot
 
-As of 2026-11-10, upstream `main` and release v0.17.0 are at
-`343b6d8901723b37ce568b2418c5df4e1fe1d223`, now the base pinned by this
-project. The refreshed comparison covered pull-request metadata through #321,
-issue status through #306, the v0.17.0 release contents, and every local
-framework patch. It was a targeted semantic review of overlapping and
-potentially applicable work, not a line-by-line review of unrelated changes.
+As of a read-only 2026-11-11 recheck, upstream `main` and release v0.17.0
+remain at `343b6d8901723b37ce568b2418c5df4e1fe1d223`, now the base pinned by
+this project. No PR newer than #321 was listed, and issue #306 remained open.
+The 2026-11-10 semantic comparison covered pull-request metadata through
+#321, issue status through #306, the v0.17.0 release contents, and every local
+framework patch. It was a targeted review of overlapping and potentially
+applicable work, not a line-by-line review of unrelated changes.
 
 v0.17.0 includes all eight commits previously selected on top of v0.16.0.
 It also includes this project's #297, #298, #299 and #300 submissions, so
@@ -72,10 +73,11 @@ A separate prior-art refresh on 2026-11-10 compared Blood Wake v0.2.4 at
 [`e631edd`](https://github.com/minimalice92/bloodwake-recomp/tree/e631edddfe56d22344e9f696923aeb6d78a9e7ba)
 with v0.3.3 at
 [`6292340`](https://github.com/minimalice92/bloodwake-recomp/tree/6292340705d9b863351a45ba160174a346a81688),
-ten public commits later. Current Blood Wake still fingerprints xboxrecomp
-v0.16.0; it is prior art rather than a framework update to select. No code
-was copied from the newer revision. Candidate-specific overlap and validation
-requirements are recorded below.
+ten public commits later. A read-only 2026-11-11 recheck found Blood Wake
+`main` and its latest v0.3.3 release unchanged at `6292340`. Current Blood
+Wake still fingerprints xboxrecomp v0.16.0; it is prior art rather than a
+framework update to select. No code was copied from the newer revision.
+Candidate-specific overlap and validation requirements are recorded below.
 
 The surviving local stack was rebased onto v0.17.0 plus those selections.
 Thirty-three existing patches applied in order with ordinary
@@ -410,8 +412,9 @@ filed or accepted.
     concurrent reset/reinitialization behavior.
     *Overlap:* checked 2026-10-31. Merged #158 supplies the reclaim and
     extended-VMA allocation substrate but leaves `MmQueryStatistics` tied to
-    host RAM. Open #261, #269 and draft #286 change physical-page naming and
-    alias ownership but do not implement guest memory statistics.
+    host RAM. Merged #261, closed #269 and open draft #286 address
+    physical-page naming and alias ownership but do not implement guest
+    memory statistics.
     *Before filing:* first replace the incomplete accounting model so every
     exported allocator is covered or explicitly out of scope. Then port the
     fixture upstream, reconcile the result with those alias changes, add
@@ -1320,8 +1323,9 @@ own GPU back end, an extended interface for it, and its own pacing fixes.
     reviewer-validated captures remain usable.
     *Overlap:* checked 2026-10-31. Merged
     [#156](https://github.com/sp00nznet/xboxrecomp/pull/156) introduced gated
-    flip dumps; open [#285](https://github.com/sp00nznet/xboxrecomp/pull/285)
-    addresses readback before snapshots and coordinates with the separate
+    flip dumps; merged
+    [#285](https://github.com/sp00nznet/xboxrecomp/pull/285) addresses
+    readback before snapshots and coordinates with the separate
     [#184](https://github.com/sp00nznet/xboxrecomp/pull/184) GPU series. A
     title-keyword search did not find an equivalent flip-ID mapping; this was
     not an exhaustive content review.
@@ -1422,11 +1426,12 @@ own GPU back end, an extended interface for it, and its own pacing fixes.
     *Tests:* the `apu_phys` fixture covers RAM/window tags. The project
     lifecycle fixture completed six accurate-DSP init/shutdown cycles with no
     leaked thread handles. Release builds and bounded retail captures passed.
-    *Overlap:* checked 2026-10-31. Upstream #264 is selected separately for
-    the SSL restart gap. Draft #286's mirror-alias page naming supersedes the
-    cached physical-translation intent in 0030 and covers APU, NV2A and OHCI;
-    #261 and #269 are related allocation steps. #266/#270 concern
-    sequencer-off frames and are not substitutes for an external DSP.
+    *Overlap:* checked 2026-10-31 and status-refreshed 2026-11-11. Merged
+    #264 is included in v0.17.0 for the SSL restart gap. Open draft #286's
+    mirror-alias page naming supersedes the cached physical-translation intent
+    in 0030 and covers APU, NV2A and OHCI; merged #261 and closed #269 are
+    related allocation work. Open #266 and closed #270 concern sequencer-off
+    frames and are not substitutes for an external DSP.
     *Before filing:* select #286's physical-identity model if it is accepted
     and remove the superseded local tags. Separate any still-needed generic
     hook and lifecycle API from the GPL project DSP, add non-Windows
@@ -1981,7 +1986,7 @@ own GPU back end, an extended interface for it, and its own pacing fixes.
 ### Open upstream work to select or coordinate with
 
 These existing PRs may help Brute Force directly or own an interface touched
-by a local candidate. The snapshot and statuses were checked on 2026-11-10.
+by a local candidate. The snapshot and statuses were checked on 2026-11-11.
 Measure performance changes with the
 [benchmark protocol](./PERFPLAN.md#phase-0-measurement-and-ceiling-probes)
 before adding them to the selected list. Coordination-only rows should not be
@@ -1993,7 +1998,7 @@ selected as if they were interchangeable implementations.
 | [#222](https://github.com/sp00nznet/xboxrecomp/pull/222) | Re-sent NV2A state, window clip, clear rect and face culling | Fold demonstrated 0009/0010 corrections and fixtures here instead of competing | Open |
 | [#231](https://github.com/sp00nznet/xboxrecomp/pull/231) | Pipeline the CPU rasterizer behind the executor | CPU reference path; overlaps 0008 and 0013 | Open, stacked on merged #228; not measured |
 | [#266](https://github.com/sp00nznet/xboxrecomp/pull/266) | Treat a short sequencer-off interval as active | Audio alternative adjacent to local 0030-0034 | Open; do not select without title A/B/A |
-| [#286](https://github.com/sp00nznet/xboxrecomp/pull/286) | Name APU heap pages by RAM mirror alias | Must be reconciled with 0007 and 0030 | Open |
+| [#286](https://github.com/sp00nznet/xboxrecomp/pull/286) | Name APU heap pages by RAM mirror alias | Must be reconciled with 0007 and 0030 | Open draft |
 | [#308](https://github.com/sp00nznet/xboxrecomp/pull/308) | Kernel crypto, DPC exclusion and shared-read behavior | Adjacent to the software-interrupt ABI candidate but does not fix its calling convention | Open; review independently |
 
 v0.17.0 now includes #249, #251, #253, #258, #261, #272, #273, #274 and
@@ -2127,8 +2132,8 @@ it does not defer a frame until the title releases `VOICE_LOCK`.
   multiple locked voices, pause during the wait, and a missed-wakeup stress
   case. Add default-off wait counters before doing matched title captures.
 - **Overlap:** #217 supplies the complementary per-voice lock and remains the
-  foundation. Open #264 and #266/#270 concern sequencer timing, not this
-  title-owned voice-update interval.
+  foundation. Merged #264, open #266 and closed #270 concern sequencer timing,
+  not this title-owned voice-update interval.
 - **Before filing:** prove the wait cannot deadlock with `d->lock`, shutdown,
   or pause; run fold and external-DSP lifecycle tests; then compare title audio
   and game-thread waits without lowering the host queue.
@@ -2152,8 +2157,8 @@ it does not defer a frame until the title releases `VOICE_LOCK`.
 - **Tests:** adapt the synthetic idle-retirement latency test; also cover
   pause/resume, trapped and held frames, exact sample counts, queue bounds,
   underrun counters, and both fold and external-DSP modes.
-- **Overlap:** selected #264 and open #266/#270 are adjacent APU scheduling
-  work but do not pace individual VP frames.
+- **Overlap:** merged #264, open #266 and closed #270 are adjacent APU
+  scheduling work but do not pace individual VP frames.
 - **Before filing:** profile the supported title first, then run A/B/A with
   unchanged host buffering and record both game-thread waits and audio queue
   health. JSRF's title measurements are not transferable performance results.

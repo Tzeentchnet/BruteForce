@@ -67,16 +67,18 @@ claimed.
 
 The pinned framework has been updated to xboxrecomp v0.17.0 plus selected
 post-release fixes. Integrated Release generation
-`20261111-084222-7bdb6e56` completed one audio-off CPU and one D3D11
-tutorial/movement bring-up without retries. Reviewed sample frames show
-gameplay without the controls panel or a cinematic, but the single pair is
-not an A/B/A performance result. Matched-reference and reviewed performance
-gates remain open, and the published measurements still belong to the
-previous reviewed generation.
+`20261111-084222-7bdb6e56` uses the final runtime tree. Before the
+runtime-only Phase 4 fix, its codegen-identical executable completed one
+audio-off CPU and one D3D11 tutorial/movement bring-up without retries. The
+rebuilt executable completed the two reviewed Phase 4 smokes described
+above. Reviewed sample frames show gameplay without the controls panel or a
+cinematic, but none of these single attempts is an A/B/A performance result.
+Matched-reference and reviewed performance gates remain open, and the
+published measurements still belong to the previous reviewed generation.
 
-One additional integrated D3D11 attempt reached the same movement window at
-the 4K preset with mipmaps and anisotropy enabled. It confirms the 2880x2160
-4:3 render path can run on the available hardware, but the observed tutorial
+The pre-fix executable also completed one additional D3D11 attempt at the 4K
+preset with mipmaps and anisotropy enabled. It confirms the 2880x2160 4:3
+render path can run on the available hardware, but the observed tutorial
 texture declared no lower levels and the 3440x1440 display cannot establish
 native 4K output.
 

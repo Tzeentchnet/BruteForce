@@ -13,26 +13,31 @@ pipeline and system boundaries are summarized in [RENDERING.md](./RENDERING.md).
 
 The worked example is the
 [Blood Wake recompilation](https://github.com/minimalice92/bloodwake-recomp)
-at commit `e631edddfe56d22344e9f696923aeb6d78a9e7ba`. It pins the **same**
-xboxrecomp base as this project (`f0f8a461`, v0.16.0) and reports 205–290 fps
-in gameplay at 3440×1440 with a D3D11 renderer. Its own files are MIT
-licensed, so they can be adapted here with attribution in
-`THIRD_PARTY_NOTICES.md`. Its title-specific hooks, addresses, and Remastered
-features do not apply and must not be copied.
+at commit `e631edddfe56d22344e9f696923aeb6d78a9e7ba`. That recorded checkout
+pins xboxrecomp `f0f8a461` (v0.16.0), while this project now pins v0.17.0 plus
+selected post-release work. Blood Wake reports 205–290 fps in gameplay at
+3440×1440 with a D3D11 renderer and remains implementation prior art, not a
+shared current framework baseline. Its own files are MIT licensed, so they
+can be adapted here with attribution in `THIRD_PARTY_NOTICES.md`. Its
+title-specific hooks, addresses, and Remastered features do not apply and
+must not be copied.
 
 ## Status
 
 Measurements are in [FINDINGS.md](./FINDINGS.md#performance-plan-phase-0-and-the-first-gpu-path-results);
 next steps are in [NEXTSTEPS.md](./NEXTSTEPS.md).
 
-Integrated v0.17 Release generation `20261111-084222-7bdb6e56` completed one
-CPU and one D3D11 scripted movement bring-up without retries. Representative
-captures show gameplay without the controls panel or a cinematic, but the
-116 CPU and 1,929 D3D11 movement flips do not have continuous reviewed world
-labels. The reported 2.919 and 48.231 whole-picture changes/s are therefore
-not distinct-world rates or a performance comparison. All reviewed phase
-measurements below remain tied to their explicitly named older generation
-until a fresh alternating campaign is complete.
+Before the runtime-only Phase 4 fix, integrated v0.17 Release generation
+`20261111-084222-7bdb6e56`'s codegen-identical executable completed one CPU
+and one D3D11 scripted movement bring-up without retries. The current rebuilt
+executable later completed the fixed-tree Phase 4 smokes described below.
+Representative captures show gameplay without the controls panel or a
+cinematic, but the 116 CPU and 1,929 D3D11 movement flips do not have
+continuous reviewed world labels. The reported 2.919 and 48.231
+whole-picture changes/s are therefore not distinct-world rates or a
+performance comparison. All reviewed phase measurements below remain tied to
+their explicitly named older generation until a fresh alternating campaign
+is complete.
 
 A native 640x480 xemu Basic Controls frame is now matched by content to the
 preceding `20261111-002138-a9dbc18a` reference generation. A focused
@@ -72,7 +77,7 @@ cache-enabled hit/compile diagnostics remain separate.
 
 | Phase | Status |
 | --- | --- |
-| 0 | Mostly done. Harness (`tools/bench.py`), frame statistics (patch 0014), census and ceiling probes (0015), profiler (`src/profile.c`), null back end and surface guard (`src/gpu/null_backend.c`) exist and were run. Reviewed movement manifests now report baseline-to-change and change-to-change cadence percentiles and 1% lows. The profile summary separates known guest GPU polls and caller-attributed kernel waits from unrelated kernel waits; `--profile-callers` enables the latter at additional diagnostic cost. `BRUTEFORCE_PERF_COUNTERS=1` adds atomic interval counts and opt-in timing for title pointer validation, `VirtualQuery`, exact texture-cache lookup/comparison, snapshot copies, rewrites and eviction; concurrent validation and exact P8 rewrite fixtures cover the counters. A three-run reviewed camera-pan campaign records G2, G3, readback, visibility, validation and texture-cache work on the final Release generation. A six-leg reviewed sync/async visibility campaign then isolated the existing visibility option: async improved reviewed throughput by 11.7%, but its 15.697/s mean 1% low and 65.467% G3 still fail. Guest-surface captures do not establish displayed-present cadence. Request audit 0025 now has a complete fresh-generation scripted report as well as the older partial diagnostic; neither has operator-reviewed scene identity or a matched xemu frame. The harness gives every enabled attempt and retry an isolated audit report, records its controls and rejects missing/incomplete output. Flip-ID capture mapping 0026 is synthetic-tested. Presenter capture 0027 verified one link per GDI and CPU-upload route in short, unmatched retail probes, but did not validate physical visibility. Matched CPU-reference output, native-rate confirmation and the surface-read answer remain open. The follow-up surface guard completed with one excluded page but retained documented blind spots. Missing: upstream PR measurements (#231, #272, #273). |
+| 0 | Mostly done. Harness (`tools/bench.py`), frame statistics (patch 0014), census and ceiling probes (0015), profiler (`src/profile.c`), null back end and surface guard (`src/gpu/null_backend.c`) exist and were run. Reviewed movement manifests now report baseline-to-change and change-to-change cadence percentiles and 1% lows. The profile summary separates known guest GPU polls and caller-attributed kernel waits from unrelated kernel waits; `--profile-callers` enables the latter at additional diagnostic cost. `BRUTEFORCE_PERF_COUNTERS=1` adds atomic interval counts and opt-in timing for title pointer validation, `VirtualQuery`, exact texture-cache lookup/comparison, snapshot copies, rewrites and eviction; concurrent validation and exact P8 rewrite fixtures cover the counters. A three-run reviewed camera-pan campaign records G2, G3, readback, visibility, validation and texture-cache work on the final Release generation. A six-leg reviewed sync/async visibility campaign then isolated the existing visibility option: async improved reviewed throughput by 11.7%, but its 15.697/s mean 1% low and 65.467% G3 still fail. Guest-surface captures do not establish displayed-present cadence. Request audit 0025 now has a complete fresh-generation scripted report as well as the older partial diagnostic; neither has operator-reviewed scene identity or a matched xemu frame. The harness gives every enabled attempt and retry an isolated audit report, records its controls and rejects missing/incomplete output. Flip-ID capture mapping 0026 is synthetic-tested. Presenter capture 0027 verified one link per GDI and CPU-upload route in short, unmatched retail probes, but did not validate physical visibility. Matched CPU-reference output, native-rate confirmation and the surface-read answer remain open. The follow-up surface guard completed with one excluded page but retained documented blind spots. Missing: measurements for open #231 and current-base behavior from merged #272/#273. |
 | 1 | Implemented, G4 not met. D3D11 back end (`src/gpu/`, `RECOMP_GPU=d3d11`) with the extended interface (0016). Synthetic WARP and hardware fixtures match apart from listed edge pixels. The new GPU-vertex tutorial capture differs from the CPU reference in 0.52% of pixels beyond 8/255; an older CPU-vertex capture differs substantially. |
 | 2 | Implemented (0017, on by default with the D3D11 back end). Stationary hold 3.20 → 30.41 rendered fps (3 runs each, alternating). An unreviewed retail diagnostic sampled 23,400 GPU-program batches without reported vertex differences through its last report. WARP and hardware fixtures cover additional packed formats, relative constants and culling against the CPU interpreter; matched-scene and complete format/hardware verification remain open. |
 | 3 | Partial. Async visibility reports (0018) and shared GPU presentation (0024) are opt-in. Three reviewed alternating runs per visibility mode measured 27.401 versus 30.606 world changes/s, but async still failed the 1%-low and G3 gates and remains opt-in. Submitted renderer work now has a two-event bound, and default-off elision skips copies only for demonstrably coherent, unscaled 32-bit guest surfaces. Tracked-surface flips still wait; dirty surfaces, diagnostics and scaled/16-bit frames still read back. General on-demand guest-reader interception is not implemented. CPU-written Bink frames synchronize before scaled submission. No new retail performance comparison was run. |
@@ -390,18 +395,19 @@ Done before writing renderer code. All evidence stays local.
    If the second probe does not clear the native rate, Phase 4 or 5 work
    moves ahead of the renderer.
 
-6. **Cheap upstream candidates.** Measure the open upstream PRs listed in
+6. **Relevant upstream work.** Measure the upstream work listed in
    [UPSTREAM.md](./UPSTREAM.md#open-upstream-work-to-select-or-coordinate-with)
-   with the harness:
-   - [#273](https://github.com/sp00nznet/xboxrecomp/pull/273), for walk
-     cost on either renderer;
-   - [#272](https://github.com/sp00nznet/xboxrecomp/pull/272), for the
-     vertex-program CPU fallback;
+   with the harness. The current base includes merged #272 and #273, while
+   #231 remains open:
+   - [#273](https://github.com/sp00nznet/xboxrecomp/pull/273), for current-base
+     walk cost on either renderer;
+   - [#272](https://github.com/sp00nznet/xboxrecomp/pull/272), for current-base
+     vertex-program CPU fallback cost;
    - [#231](https://github.com/sp00nznet/xboxrecomp/pull/231), for the CPU
      reference path.
 
-   Select a PR only if it measurably helps and its tree verifies. None of
-   them replaces Phase 1.
+   Select open #231 only if it measurably helps and its tree verifies. None
+   of this work replaces Phase 1.
    The 2026-10-31
    [JSRF-PC review](./UPSTREAM.md#jsrf-pc-prior-art-review) adds one
    non-PR candidate to the same measurement gate: batch non-incrementing
@@ -742,7 +748,7 @@ semaphore, report or flip synchronization.
 
   | Phase | UPSTREAM items |
   | --- | --- |
-  | Phase 0 | 19, 20, 28; also evaluate open PRs #231, #272, #273, and #222 with the benchmark |
+  | Phase 0 | 19, 20, 28; also evaluate open #222/#231 and benchmark current-base behavior from merged #272/#273 |
   | Phase 1 | 12, 14 |
   | Phase 2 | 13 |
   | Phase 3 | 15 |

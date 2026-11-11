@@ -2,11 +2,12 @@
 
 This project downloads [xboxrecomp](https://github.com/sp00nznet/xboxrecomp)
 at a pinned revision and applies the public commits and project-local patches
-listed in the README and `tools/toolkit.py`. The framework and its
-contributions are under the MIT license below. Its checkout also includes
-xemu-derived MCPX APU components under LGPL-2.1-or-later; see the framework's
-`NOTICE`, individual source headers, and `LICENSES` directory for the full
-notices and license terms.
+pinned by [`tools/toolkit.py`](tools/toolkit.py) and documented in
+[`docs/UPSTREAM.md`](docs/UPSTREAM.md). The framework and its contributions
+are under the MIT license below. Its checkout also includes xemu-derived MCPX
+APU components under LGPL-2.1-or-later; see the framework's `NOTICE`,
+individual source headers, and `LICENSES` directory for the full notices and
+license terms.
 
 This repository also vendors the MCPX DSP56300 interpreter from
 [xemu v0.8.139](https://github.com/xemu-project/xemu/tree/v0.8.139/hw/xbox/mcpx/apu/dsp)

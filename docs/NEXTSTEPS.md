@@ -648,10 +648,11 @@ artifacts that the fixtures do not cover, and G5 is recorded.
   shadows, queues, and caches are released.
 - Firmware-return and shutdown routes run full APU cleanup before
   `ExitProcess`; bounded WAVs now receive an exact RIFF header.
-- Upstream PR #264 commit
-  `eb7b1f5833205a24fcc0eda6eb4ed2df4f2bc2e3` is selected for the observed
-  2,048-sample sequencer restart hold. PRs #261/#286 and #266/#270 remain
-  unselected because their distinct failure modes were not observed.
+- Xboxrecomp v0.17.0 includes former selected PR #264 commit
+  `eb7b1f5833205a24fcc0eda6eb4ed2df4f2bc2e3` for the observed 2,048-sample
+  sequencer restart hold, and merged #261 is current-base behavior. Open #266
+  and draft #286 remain unselected; closed #270 was not adopted because its
+  distinct failure mode was not observed.
 - Six repeated native init/shutdown cycles passed without leaked process
   handles. Accurate and fold-down retail exit captures finalized correctly.
 - The host policy uses eight 512-sample buffers, a three-quarter refill
@@ -855,8 +856,10 @@ single-view eligibility guard.
    input/output matrix, and explicitly labelled candidate aspect, tangent,
    viewport and camera-owner fields. The wrapper always calls the generated
    body and leaves its resulting guest state unchanged. Limits and sampling
-   are validated, and synthetic direct/indirect dispatch and state-equivalence
-   cases pass. Regenerate because the manual-source fingerprint changed.
+   are validated, and synthetic direct/indirect dispatch and
+   state-equivalence cases pass. The current supported generation contains
+   this manual-source state; regenerate after any future trace change because
+   the manual-source fingerprint participates in generation provenance.
    One fresh-generation scripted run sampled 774 records through call 7,731.
    It observed only caller `0x0006BE90`, four parent return classes and six
    candidate camera states; all matrices were readable and changed across the

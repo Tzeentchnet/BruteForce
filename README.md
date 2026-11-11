@@ -40,7 +40,9 @@ closed on untracked USER-register writes or resets. A reproduced
 segment/PGRAPH/PFB deadlock is fixed without advancing GET or completing the
 queued segment. One no-retry segment-only smoke and one no-retry all-three
 smoke reached reviewed tutorial gameplay; neither is an A/B/A performance
-campaign, distinct-world FPS result or CPU-reference match. See the
+campaign, distinct-world FPS result or CPU-reference match. The planned
+24-run flush/idle/segment/all-three campaign is deferred; all three switches
+remain default-off. See the
 [user guide](docs/USER_GUIDE.md#experimental-nv2a-wait-and-segment-options).
 
 Packed depth/stencil aliases and window clipping remain default-off experiments;

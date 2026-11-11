@@ -885,8 +885,9 @@ acknowledgement clears the bit, while a short timer provides IRQ safe points
 and mandatory rechecks. It is default-off. The bounded revision reached
 reviewed movement once in a no-retry all-three bring-up, but it has not passed
 the reviewed alternating performance comparison, G2, G3, or CPU-reference
-equivalence and may change guest interrupt timing. Do not use it as a general
-performance preset yet.
+equivalence and may change guest interrupt timing. The 24-run Phase 4
+comparison is deferred. Do not use this as a general performance preset or
+start that campaign without a new project decision.
 The wait now stops with an error after 30 seconds if the real busy bit remains
 set; it does not clear the bit on timeout.
 
@@ -930,9 +931,11 @@ fixtures cover the mechanisms. One no-retry segment-only and one no-retry
 all-three smoke reached reviewed tutorial movement, but they do not establish
 matched presentation or performance.
 
-For each experiment after regenerating and building the final tree, collect a
-separate baseline/variant pair (example: PFB only). The Release build must
-include debug symbols for the complete caller-attribution gate; see the
+The following four-pair, 24-run workflow is retained for future use but is
+explicitly deferred and should not be scheduled as current work. If it is
+resumed after a new project decision, collect a separate baseline/variant pair
+for each experiment (example: PFB only). The Release build must include debug
+symbols for the complete caller-attribution gate; see the
 [symbolized-build instructions](#requirements-and-build-workflow).
 
 ```powershell

@@ -130,6 +130,12 @@ distinct-world FPS. Two single attempts are bring-up evidence, not an
 alternating comparison, CPU-reference match, G2/G3/G4/G5 result or reason to
 enable any Phase 4 switch by default.
 
+The previously planned 24-run Phase 4 matrix comprised four six-run
+baseline/candidate comparisons: flush-only, idle-only, segment-only and
+all-three, with three runs per side. It is explicitly deferred. No additional
+retail run is authorized by this evidence, and the smoke counters must not be
+promoted into a performance claim.
+
 ## Executable and provenance
 
 - The supported `default.xbe` has title ID `0x4D53001E`, entry point

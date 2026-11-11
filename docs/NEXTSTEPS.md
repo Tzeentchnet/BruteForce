@@ -206,13 +206,12 @@ Direct3D 12 work remain deferred. See
   both reached reviewed tutorial movement with the character and HUD visible
   and no Basic Controls panel, cinematic, solid-black sample, queue wait or
   overflow. These are bring-up checks, not distinct-world FPS or an A/B/A
-  result. The next performance work remains four separate baseline/candidate
-  A/B/A campaigns (flush, idle, segment, and all three), at least three runs
-  per variant, one generation, scene, script, thread count and otherwise
-  identical options. Review distinct-world frames and complete caller
-  profiles, then separately check matched CPU-reference G4 and 2× stationary
-  G5. Guard/reset failures remain evidence to investigate, not permission to
-  bypass the handshake.
+  result. The previously planned 24-run Phase 4 matrix—four separate
+  baseline/candidate comparisons for flush, idle, segment and all-three, with
+  three runs per side—is explicitly deferred and is not active work or a
+  completion gate. The switches remain default-off, and no G2–G5 or
+  performance claim follows from the smokes. Guard/reset failures remain
+  evidence to investigate, not permission to bypass the handshake.
 - Both variants of the new movement campaign logged unsupported texture
   format `0x2E` (`LIN_D24S8`). Its effect on the visible image is not yet
   established; the CPU reference also lacks a decoder for that format.
@@ -775,13 +774,12 @@ These are synthetic results, not a title comparison.
   alternating A/B/A runs; retain an uninstrumented baseline because detailed
   counters add overhead.
 - The fixed segment-only and all-three bring-up smokes reached reviewed
-  movement once each without retry. They do not replace the required
-  campaign. First measure the event-driven flush acknowledgement alone with
-  three poll/event pairs, caller profiles, fixed counters and reviewed world
-  captures. Explain its high smoke-run timer/recheck counts and keep it
-  default-off until G2, G3 and correctness gates pass. Then measure the idle
-  NV2A-thread wait and segment-at-a-time walking independently before the
-  combined milestone; isolate switches to diagnose regressions.
+  movement once each without retry. The 24-run isolation/combined campaign is
+  deferred; do not schedule the three poll/event pairs or the idle, segment
+  and all-three pairs as current work. Retain the documented caller-profile,
+  reviewed-world and matched-control requirements if the campaign is resumed.
+  Keep all three mechanisms default-off because G2, G3 and correctness gates
+  remain unmet.
 - Validate the checked cache, explicit logical-bound registrations, alias and
   layout-replacement behavior and framework P8 decoder on the title and
   additional drivers;
@@ -943,6 +941,9 @@ Split-screen support is a deferred follow-up, not part of this gate.
 8. **Split screen:** defer native references, camera/layout classification,
    Hor+ behavior and performance validation. It is not an active A2, E or
    performance completion gate, and no split-screen support is claimed.
+9. **Phase 4 campaign:** defer the 24-run flush/idle/segment/all-three A/B/A
+   matrix. The two fixed-tree smokes remain bring-up evidence only; all
+   switches stay default-off and no performance gate is waived.
 
 Still open: access to a native 4K display. Optional 5.1 output is deferred.
 

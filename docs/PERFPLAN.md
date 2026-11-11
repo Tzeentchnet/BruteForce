@@ -61,6 +61,9 @@ segment and PGRAPH interrupt state. One no-retry segment-only smoke and one
 no-retry all-three smoke then reached reviewed movement. They do not establish
 a speedup, distinct-world FPS or any of G2–G5. The benchmark checks reviewed,
 matched performance pairs and reports missing gate evidence as inconclusive.
+The 24-run Phase 4 matrix is explicitly deferred; it is not an active phase
+exit or prerequisite for other work. The switches remain default-off and the
+unmeasured gates remain open.
 Current generation `20261111-084222-7bdb6e56` contains the required store
 hooks and its runtime-only rebuild pins the fixed tree.
 Opt-in interval timing also now covers pixel-shader compile/create failures
@@ -73,7 +76,7 @@ cache-enabled hit/compile diagnostics remain separate.
 | 1 | Implemented, G4 not met. D3D11 back end (`src/gpu/`, `RECOMP_GPU=d3d11`) with the extended interface (0016). Synthetic WARP and hardware fixtures match apart from listed edge pixels. The new GPU-vertex tutorial capture differs from the CPU reference in 0.52% of pixels beyond 8/255; an older CPU-vertex capture differs substantially. |
 | 2 | Implemented (0017, on by default with the D3D11 back end). Stationary hold 3.20 → 30.41 rendered fps (3 runs each, alternating). An unreviewed retail diagnostic sampled 23,400 GPU-program batches without reported vertex differences through its last report. WARP and hardware fixtures cover additional packed formats, relative constants and culling against the CPU interpreter; matched-scene and complete format/hardware verification remain open. |
 | 3 | Partial. Async visibility reports (0018) and shared GPU presentation (0024) are opt-in. Three reviewed alternating runs per visibility mode measured 27.401 versus 30.606 world changes/s, but async still failed the 1%-low and G3 gates and remains opt-in. Submitted renderer work now has a two-event bound, and default-off elision skips copies only for demonstrably coherent, unscaled 32-bit guest surfaces. Tracked-surface flips still wait; dirty surfaces, diagnostics and scaled/16-bit frames still read back. General on-demand guest-reader interception is not implemented. CPU-written Bink frames synchronize before scaled submission. No new retail performance comparison was run. |
-| 4 | Steps 1–3 implemented behind independent default-off switches with synthetic coverage. One fixed-tree segment-only smoke and one all-three smoke reached reviewed movement after correcting the PGRAPH/PFB dependency cycle; the alternating isolation/combined campaign remains open. The last measured G3 remains 65.467% with async visibility. PFB, GET, semaphore, report, interrupt and flip ordering remain mandatory. Step 4 is deferred pending G3. |
+| 4 | Steps 1–3 implemented behind independent default-off switches with synthetic coverage. One fixed-tree segment-only smoke and one all-three smoke reached reviewed movement after correcting the PGRAPH/PFB dependency cycle. The 24-run alternating isolation/combined campaign is deferred; no performance gate is claimed. The last measured G3 remains 65.467% with async visibility. PFB, GET, semaphore, report, interrupt and flip ordering remain mandatory. Step 4 is deferred pending G3. |
 | 5 | In progress. GPU compute decodes common textures; exact D24 and packed D24S8/stencil surface aliases and GPU window clipping are experimental opt-ins. A native xemu Basic Controls match now establishes that packed-stencil reconstruction, rather than a global gamma change, removes the large brightness error in that state: 43.4320% of pixels exceed 8/255 without it and 3.7119% with it. Unsupported ownership cases and other scenes keep the option experimental and G4 unmet. D3D11 honors partial clear rectangles, and patch 0022 removes redundant software depth clears when a backend owns drawing and clearing. Patch 0019 cached hot `getenv` calls. Checked texture/colour snapshots and tracked lifetimes replace repeated page queries on those paths, but their performance and title correctness have not been measured. |
 
 ### Audio performance status
@@ -541,9 +544,11 @@ current conservative flip wait means this gate is not met.
 ## Phase 4: let the game thread run ahead
 
 Each step changes guest-visible timing, so each stays behind its own switch.
-Measure flush-only, idle-only, segment-only and all-three separately against
-the all-off baseline, each in alternating A/B/A order with at least three
-runs per variant and otherwise identical controls.
+The full controlled matrix, if explicitly resumed, measures flush-only,
+idle-only, segment-only and all-three separately against the all-off
+baseline, each in alternating A/B/A order with at least three runs per
+variant and otherwise identical controls. Four six-run comparisons produce
+the deferred 24-run campaign.
 
 **Status:** steps 1–3 have focused synthetic coverage on tree
 `3164795a5ed52658abb41f2630ed8153e6b2cce0`. An earlier corrected PFB-only
@@ -551,10 +556,12 @@ title smoke was not reviewed or profiled and predates patch 0045. The first
 all-three attempt exposed a PGRAPH/PFB deadlock, and a segment-only attempt
 reproduced it at flip 12,611. After the narrow dependency fix, one no-retry
 segment-only and one no-retry all-three attempt reached reviewed movement.
-Their flip and whole-picture-change rates are bring-up data only. Run the
-manual, matched A/B/A matrix with reviewed world and presentation evidence,
-event/timer/queue and caller counters, and the CPU reference before applying
-any gate.
+Their flip and whole-picture-change rates are bring-up data only. If the
+campaign is explicitly resumed, run the manual, matched A/B/A matrix with
+reviewed world and presentation evidence, event/timer/queue and caller
+counters, and the CPU reference before applying any gate. The matrix is
+currently deferred: do not schedule it as active work, and leave all three
+switches default-off with G2–G5 unclaimed.
 
 1. **Event-driven flush acknowledgement.** Identify the KickOff routine
    containing or calling the PFB flush poll at `0x00372180`. Replace its

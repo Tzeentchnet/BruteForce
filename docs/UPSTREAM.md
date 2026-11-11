@@ -166,11 +166,13 @@ title-side synchronization/toolkit cases pass.
   not contact upstream, so overlap must be rechecked before a submission.
 - **Before filing:** independently split the generic pieces, test the full
   worker/guard integration and another title, exercise unsupported hosts,
-  review native/CPU matching and alternating title measurements, and check
-  current upstream with approval before any upstream interaction.
+  review native/CPU matching and, if the deferred campaign is resumed,
+  alternating title measurements; then check current upstream with approval
+  before any upstream interaction.
 - **Status:** local patch, default off; fixed-tree retail bring-up passed once
-  for segment-only and all-three, but the reviewed A/B/A campaign remains
-  open. No upstream submission or contact.
+  for segment-only and all-three. The 24-run reviewed A/B/A campaign is
+  deferred, so this evidence is not a performance submission basis. No
+  upstream submission or contact.
 
 ### Submission queue
 
@@ -894,19 +896,20 @@ own GPU back end, an extended interface for it, and its own pacing fixes.
     routine's four-byte `ret` effect; this was corrected without changing the
     framework helper. One corrected enabled movement smoke passed. The
     diagnostic fixture exercises off/on, bounded reports and flip-held
-    acknowledgement. A reviewed alternating title comparison remains
-    outstanding.
+    acknowledgement. The reviewed alternating title comparison is part of
+    the deferred 24-run Phase 4 campaign.
     *Overlap:* checked open and merged work plus the tracking index
     [sp00nznet/xboxrecomp#184](https://github.com/sp00nznet/xboxrecomp/pull/184)
     on 2026-11-03. No current change implements this handshake.
     [sp00nznet/xboxrecomp#285](https://github.com/sp00nznet/xboxrecomp/pull/285)
     concerns pre-snapshot readback and does not overlap.
-    *Before filing:* run and review poll/event/poll/event/poll/event, explain
-    the timer/recheck counts, retain the CPU reference, test another title or
-    a framework fixture at the integration boundary, and split any unrelated
-    documentation or title hook from the generic patch.
+    *Before filing:* if the campaign is resumed, run and review
+    poll/event/poll/event/poll/event, explain the timer/recheck counts and
+    retain the CPU reference. Test another title or a framework fixture at
+    the integration boundary, and split any unrelated documentation or title
+    hook from the generic patch.
     *Status:* local default-off framework patch; applies in the pinned toolkit
-    tree; not prepared or filed.
+    tree; the title comparison is deferred, so it is not prepared or filed.
 
 18. **Walk one KickOff segment at a time.**
     *Problem:* the walk runs from the last PUT to the register's current PUT

@@ -601,8 +601,10 @@ while framework GET/PUT updates use its writable alias. The 128-entry queue
 and five-second wait limit fail explicitly instead of dropping work.
 Synthetic marker tests cover this ordering boundary. One fixed-tree
 segment-only and one all-three retail smoke reached reviewed movement, but
-matched CPU output, presentation parity and the A/B/A performance campaign
-remain open.
+matched CPU output and presentation parity remain unproven. The 24-run
+flush/idle/segment/all-three A/B/A performance campaign is explicitly
+deferred; the smokes are not performance evidence and all switches remain
+default-off.
 
 Window size and fullscreen determine native mode's output picture. The
 point/linear display filter applies to the CPU route and scale-1 fallback;

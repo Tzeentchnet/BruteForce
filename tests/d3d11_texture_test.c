@@ -37,17 +37,20 @@ static size_t reference_stride(uint32_t w, uint32_t h, unsigned bpp,
 
 static int check_texture(ID3D11Device *device, ID3D11DeviceContext *context,
                          GpuTextureDecoder *decoder, Nv2aTexture *t, unsigned bpp,
-                         int swizzled, int faces, unsigned palette_entries)
+                         int swizzled, int faces, unsigned palette_entries, int enable_mips)
 {
     ID3D11Texture2D *gpu = NULL, *staging = NULL;
     D3D11_TEXTURE2D_DESC desc;
     D3D11_MAPPED_SUBRESOURCE mapped;
+    GpuTextureLayout layout;
     uint32_t *expected = NULL, *p8_decoded = NULL;
     size_t stride = reference_stride(t->width, t->height, bpp, t->pitch, t->levels, swizzled);
-    unsigned face, x, y;
+    unsigned face, level, x, y;
     HRESULT hr;
     int ok = 0;
 
+    if (!gpu_texture_layout(t, faces, enable_mips, &layout))
+        goto done;
     if (faces == 6 && gpu_texture_face_stride(t) != stride) {
         fprintf(stderr, "FAIL: cube face stride format 0x%02X\n", t->color);
         goto done;
@@ -56,15 +59,18 @@ static int check_texture(ID3D11Device *device, ID3D11DeviceContext *context,
     if (!expected)
         goto done;
     if (t->color == 0x0B) {
-        p8_decoded = (uint32_t *)malloc((size_t)t->width * t->height * faces * sizeof *p8_decoded);
-        if (!p8_decoded || !gpu_texture_decode_p8_cpu(t, faces, guest(t->offset),
-                                                       guest(t->palette), palette_entries, p8_decoded))
+        p8_decoded = (uint32_t *)malloc((size_t)t->width * t->height * sizeof *p8_decoded);
+        if (!p8_decoded)
             goto done;
     }
-    if (!gpu_texture_decode(decoder, device, context, t, faces, guest(t->offset),
+    if (!gpu_texture_decode(decoder, device, context, t, &layout, guest(t->offset), layout.span,
                             t->palette ? guest(t->palette) : NULL, palette_entries, &gpu))
         goto done;
     ID3D11Texture2D_GetDesc(gpu, &desc);
+    if (desc.MipLevels != layout.levels || desc.ArraySize != (unsigned)faces) {
+        fprintf(stderr, "FAIL: compute texture subresource count\n");
+        goto done;
+    }
     desc.Usage = D3D11_USAGE_STAGING;
     desc.BindFlags = 0;
     desc.CPUAccessFlags = D3D11_CPU_ACCESS_READ;
@@ -76,41 +82,54 @@ static int check_texture(ID3D11Device *device, ID3D11DeviceContext *context,
     }
     ID3D11DeviceContext_CopyResource(context, (ID3D11Resource *)staging, (ID3D11Resource *)gpu);
     for (face = 0; face < (unsigned)faces; ++face) {
+      for (level = 0; level < layout.levels; ++level) {
+        const GpuTextureSubresource *sub = &layout.subresource[face][level];
+        unsigned index = level + face * layout.levels;
         Nv2aTexture reference = *t;
-        reference.offset += (uint32_t)(face * stride);
+        reference.offset += (uint32_t)sub->offset;
+        reference.width = sub->width;
+        reference.height = sub->height;
+        reference.pitch = swizzled ? 0 : (uint32_t)sub->row_pitch;
+        reference.levels = 1;
         if (!nv2a_backend_decode_texture(&reference, expected)) {
             fprintf(stderr, "FAIL: CPU texture decode format 0x%02X\n", t->color);
             goto done;
         }
-        hr = ID3D11DeviceContext_Map(context, (ID3D11Resource *)staging, face,
+        if (p8_decoded && !gpu_texture_decode_p8_cpu(&layout, face, level, guest(t->offset),
+                                                      layout.span, guest(t->palette),
+                                                      palette_entries, p8_decoded,
+                                                      (size_t)t->width * t->height))
+            goto done;
+        hr = ID3D11DeviceContext_Map(context, (ID3D11Resource *)staging, index,
                                     D3D11_MAP_READ, 0, &mapped);
         if (FAILED(hr)) {
             fprintf(stderr, "FAIL: map texture 0x%08lX\n", (unsigned long)hr);
             goto done;
         }
-        for (y = 0; y < t->height; ++y) {
+        for (y = 0; y < sub->height; ++y) {
             const uint8_t *row = (const uint8_t *)mapped.pData + (size_t)y * mapped.RowPitch;
-            for (x = 0; x < t->width; ++x) {
-                uint32_t argb = expected[(size_t)y * t->width + x];
+            for (x = 0; x < sub->width; ++x) {
+                uint32_t argb = expected[(size_t)y * sub->width + x];
                 const uint8_t *rgba = row + x * 4;
-                if (p8_decoded && p8_decoded[((size_t)face * t->height + y) * t->width + x] != argb) {
-                    fprintf(stderr, "FAIL: CPU P8 snapshot decoder face %u pixel %u,%u\n",
-                            face, x, y);
-                    ID3D11DeviceContext_Unmap(context, (ID3D11Resource *)staging, face);
+                if (p8_decoded && p8_decoded[(size_t)y * sub->width + x] != argb) {
+                    fprintf(stderr, "FAIL: CPU P8 snapshot decoder face %u level %u pixel %u,%u\n",
+                            face, level, x, y);
+                    ID3D11DeviceContext_Unmap(context, (ID3D11Resource *)staging, index);
                     goto done;
                 }
                 if (rgba[0] != ((argb >> 16) & 255) || rgba[1] != ((argb >> 8) & 255)
                     || rgba[2] != (argb & 255) || rgba[3] != (argb >> 24)) {
-                    fprintf(stderr, "FAIL: format 0x%02X %ux%u face %u pixel %u,%u:"
+                    fprintf(stderr, "FAIL: format 0x%02X %ux%u face %u level %u pixel %u,%u:"
                                     " expected %08X got %02X%02X%02X%02X\n",
-                            t->color, t->width, t->height, face, x, y, argb,
+                            t->color, sub->width, sub->height, face, level, x, y, argb,
                             rgba[3], rgba[0], rgba[1], rgba[2]);
-                    ID3D11DeviceContext_Unmap(context, (ID3D11Resource *)staging, face);
+                    ID3D11DeviceContext_Unmap(context, (ID3D11Resource *)staging, index);
                     goto done;
                 }
             }
         }
-        ID3D11DeviceContext_Unmap(context, (ID3D11Resource *)staging, face);
+        ID3D11DeviceContext_Unmap(context, (ID3D11Resource *)staging, index);
+      }
     }
     ok = 1;
 done:
@@ -175,7 +194,7 @@ int bruteforce_test_textures(int hardware)
             t.pitch = formats[i].swizzled ? 512 : t.width * formats[i].bpp + 3;
             t.levels = 1;
             if (!check_texture(device, context, &decoder, &t, formats[i].bpp,
-                               formats[i].swizzled, 1, t.palette ? 256u : 0u))
+                               formats[i].swizzled, 1, t.palette ? 256u : 0u, 0))
                 goto done;
             cases++;
         }
@@ -184,13 +203,31 @@ int bruteforce_test_textures(int hardware)
         for (j = 1; j <= 3; j += 2) {
             t.levels = j;
             if (!check_texture(device, context, &decoder, &t, formats[i].bpp,
-                               formats[i].swizzled, 6, t.palette ? 256u : 0u))
+                               formats[i].swizzled, 6, t.palette ? 256u : 0u, 0))
                 goto done;
             cases++;
         }
     }
+    for (i = 0; i < sizeof formats / sizeof formats[0]; ++i) {
+        Nv2aTexture t = {0};
+        int faces;
+        t.offset = source;
+        t.color = formats[i].format;
+        t.palette = t.color == 0x0B ? palette : 0;
+        for (faces = 1; faces <= 6; faces += 5) {
+            t.width = faces == 6 ? 8 : 16;
+            t.height = 8;
+            t.levels = faces == 6 ? 4 : 5;
+            t.pitch = formats[i].swizzled ? 512 : t.width * formats[i].bpp + 3;
+            if (!check_texture(device, context, &decoder, &t, formats[i].bpp,
+                               formats[i].swizzled, faces, t.palette ? 256u : 0u, 1))
+                goto done;
+        }
+    }
+    puts("mip compute cases 40");
     for (i = 0; i < 4; ++i) {
         Nv2aTexture t = {0};
+        GpuTextureLayout layout;
         unsigned entries = 256u >> i, face, index, invalid;
         uint32_t allocation = xbox_ContiguousAlloc(0x2000, 4096);
         size_t stride;
@@ -214,11 +251,12 @@ int bruteforce_test_textures(int hardware)
             table[index] = 0xFF000000u | index * 0x010101u;
         if (!VirtualProtect(guest(allocation + 0x1000), 0x1000, PAGE_NOACCESS, &old_protect))
             goto done;
-        if (!check_texture(device, context, &decoder, &t, 1, 1, 6, entries))
+        if (!check_texture(device, context, &decoder, &t, 1, 1, 6, entries, 0))
             goto done;
         if (entries < 256) {
             ((uint8_t *)guest(source))[5 * stride + 63] = (uint8_t)entries;
-            if (gpu_texture_p8_indices_valid(&t, 6, guest(source), entries, &invalid)
+            if (!gpu_texture_layout(&t, 6, 0, &layout)
+                || gpu_texture_p8_indices_valid(&layout, guest(source), layout.span, entries, &invalid)
                 || invalid != entries) {
                 fprintf(stderr, "FAIL: out-of-range P8 index in the last cube face\n");
                 goto done;

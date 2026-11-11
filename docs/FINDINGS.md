@@ -2083,8 +2083,66 @@ contribution. The [UPSTREAM worklist](./UPSTREAM.md#local-patches-to-evaluate)
 records the follow-up; no pull request was filed.
 
 Known differences, by design: stencil is honoured on the GPU path and
-ignored on the CPU path; depth is D24 rather than a float buffer; textures
-are sampled at level 0 only on both paths.
+ignored on the CPU path; depth is D24 rather than a float buffer. The
+default texture paths sample level 0 on both renderers; the later opt-in mip
+path below deliberately differs.
+
+### Experimental mipmap sampling: synthetic evidence (2026-11-11)
+
+The project D3D11 backend now has default-off `RECOMP_GPU_MIPS` and
+`RECOMP_GPU_ANISO` switches; the CPU rasterizer remains a level-zero
+reference. These are generic backend experiments, not observations of the
+North American retail game's mip use. No game, emulator, or performance
+campaign was run for this change.
+
+The Release synthetic D3D11 matrix passed 293 cases with WARP and an NVIDIA
+GeForce RTX 5070 enabled (driver version query unavailable). Per device it
+retained 140 base-level CPU/GPU decoder cases and four guarded short-palette
+cubes, and added 40 mip-enabled compute/CPU decode cases checking each
+exposed subresource (linear formats remain level zero). Additional native and
+pytest cases inspect 2D and cube SRV subresources for swizzled, linear,
+BC1/2/3 and P8, including tiny BC CPU fallback, a guarded odd-width packed-YUV
+pair, declared-level capping, final face/level spans, short/unreadable chains,
+palette changes, and same-frame lower-level rewrites. A final-level invalid
+P8 index is rejected when exposed but is not sampled when mips are off.
+The disabled path retains a safely bounded non-power-of-two level-zero CPU
+swizzle; a malformed declaration whose Morton indices exceed its source span
+is rejected rather than preserving the old out-of-bounds behavior.
+
+Rendered synthetic 2D quads selected independently colored mip levels,
+level-zero-only filters, integer and fractional clamps, positive and negative
+bias, point/linear minification and magnification, stage-1 clamps, and
+same-frame rewrites. At 2x physical scale the synthetic quads selected the
+expected finer levels. A rendered cube sampled all six faces at a clamped
+mip and observed a rewrite of the last face. The same fixtures run with GPU and
+CPU texture decoders; enabled mipped textures retain exact cache snapshots
+even if approximate caching is requested, including guarded fallback to
+level zero. A render-target sample stayed at level zero, and existing
+depth/stencil alias frames matched with mips off/on while multi-level aliases
+were rejected. These checks cover known patterns, not retail textures or an
+original-hardware oracle.
+
+The implementation treats CONTROL0 min/max as unsigned 4.8 and the 13-bit
+filter bias as signed 5.8, based on the public Nouveau NV30
+[sampler encoding](https://github.com/Kenji-NX/mesa/blob/main/src/gallium/drivers/nouveau/nv30/nv30_texture.c)
+and [register shifts](https://github.com/Kenji-NX/mesa/blob/main/src/gallium/drivers/nouveau/nv30/nv30_fragtex.c).
+That is a plausible related-GPU interpretation, **not verified NV2A
+behavior**. xemu v0.8.139's
+[texture shape code](https://github.com/xemu-project/xemu/blob/aa54c34cae1c09410d74c69a44210a9867fe2d16/hw/xbox/nv2a/pgraph/texture.c)
+instead treats the 12-bit clamp fields as integer levels and also limits the
+shape using the maximum clamp. The implementations can therefore differ for
+fractional or nonzero raw fields. Their cube spacing for declarations beyond
+the natural 1x1 chain is also not established as equivalent; this backend
+retains full declared face spacing while capping exposed levels. Resolve both
+questions using matched frames or stronger hardware evidence before
+default-enabling the option.
+
+Linear and render-target aliases remain level-zero-only; depth/stencil
+aliases reject multi-level declarations, with diagnostics. No missing levels
+are generated. VRAM use, cache cost, title-supplied levels,
+4K image quality and distinct-world-frame performance remain unmeasured.
+Future comparisons require matched scale-1 xemu/CPU/D3D11 frames and controlled
+same-generation A/B/A runs with settings and frame counts recorded.
 
 ### Blood Wake-derived internal-resolution milestone
 
@@ -2380,7 +2438,7 @@ on runtime validation in either title:
 | --- | --- |
 | Persistent shader-cache warm-up | High-value next step after the existing cache is accepted for normal use. Blood Wake's earlier hidden-scene warm-up and current load-time vertex-program preparation are two distinct discovery methods. Brute Force can reuse the concept and its own routes, but not Blood Wake's launch-page offsets, scene list, wrapper addresses, or shader groups. Warm-up failures and cache identity must remain explicit. |
 | Event-driven short waits, idle NV2A sleep and segment-at-a-time walking | Potentially high performance value. Blood Wake preserves the flush acknowledgement and wakes the waiter promptly instead of skipping it. This overlaps the existing pipeline plan, but is synchronization-sensitive and needs executor fixtures plus matched A/B/A measurements. |
-| Mip upload followed by anisotropic filtering | High visual value for scaled output, in that order. Blood Wake enables anisotropy only for eligible mipped samplers. Open [sp00nznet/xboxrecomp#253](https://github.com/sp00nznet/xboxrecomp/pull/253) is CPU-rasterizer filtering without mip levels and does not implement the D3D11 path. |
+| Mip upload followed by anisotropic filtering | Potential visual value for scaled output, in that order. Blood Wake enables anisotropy only for eligible mipped samplers. Merged [sp00nznet/xboxrecomp#253](https://github.com/sp00nznet/xboxrecomp/pull/253) is CPU-rasterizer filtering without mip levels and does not implement the D3D11 path. The new project path is synthetic-tested and default-off; title/reference gates remain open. |
 | Original/enhanced fix registry and generated settings schema | Useful release-engineering patterns, but lower priority. Brute Force already has default-off `RECOMP_*` experiments and a table-driven launcher; an edition boundary becomes valuable only when a coherent enhanced preset and save-compatibility policy exist. |
 | Pinned build-from-disc pipeline, expected toolkit tree, profiler and GPU audit | Already present in equivalent or stricter form. Brute Force verifies the retail XBE, generation inputs and patched toolkit tree, and has adapted the profiler and audit. |
 | Persistent host window across title self-reboots | Conditional. It would improve continuity only after Brute Force's real self-reboot flow is exercised and shown to need it. |

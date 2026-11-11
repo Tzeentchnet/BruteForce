@@ -25,7 +25,9 @@ Direct3D 11 is the default renderer for new launcher settings. The CPU
 reference renderer remains available from the launcher for comparison and
 troubleshooting. Native-resolution resize rollback has synthetic coverage;
 retail gameplay and depth/stencil reinitialization after resize remain
-unvalidated.
+unvalidated. Guest mipmap sampling and 8x anisotropic filtering are separate
+default-off D3D11 experiments with synthetic coverage; title and xemu
+comparisons remain open. See the [user guide](docs/USER_GUIDE.md#d3d11-renderer-and-benchmark-diagnostics).
 
 The pinned framework has been updated to xboxrecomp v0.17.0 plus selected
 post-release fixes. Fresh Release generation `20261111-002138-a9dbc18a`

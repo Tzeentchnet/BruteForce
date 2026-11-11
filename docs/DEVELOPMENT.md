@@ -106,6 +106,25 @@ Fault-injection hooks exist only in the native test target. They do not prove
 retail gameplay, depth/stencil reinitialization, device recovery, a VRAM
 budget or performance.
 
+For the focused mipmap and texture-regression matrix, use the same synthetic
+build and set `BRUTEFORCE_TEST_D3D11` as above:
+
+```powershell
+cmake --build build\smoke --config Release --target bruteforce_d3d11_test
+# Optional: include the default hardware adapter as well as WARP.
+$env:BRUTEFORCE_TEST_D3D11_HARDWARE = "1"
+python -m pytest -q --basetemp build\smoke\pytest-mips tests\test_d3d11.py `
+  -k "mip or gpu_texture_decode_matches_cpu or native_bc_upload or texture_cache_observes or approximate_cache or unsupported_texture_cache or failed_texture_uploads or short_p8 or invalid_p8 or cached_p8 or gpu_matches_cpu_reference or gpu_scene_has_expected_content"
+```
+
+The fixture checks mip layout through the final cube face and level,
+guarded/short ranges and palettes, direct BC and CPU/GPU-decoded uploads,
+sampler cache keys, filters, fractional clamps, signed bias, and same-frame
+rewrites, including guarded base-level fallback under approximate-cache mode.
+Rendered 2D and cube scenes exercise supplied levels, stage-specific clamps,
+the disabled path and 2x physical-scale LOD selection. It does not prove title
+image equivalence, hardware NV2A behavior, resource budgets or performance.
+
 Project-owned source is MIT-licensed. The linked executable includes xemu's
 GPL-2.0-or-later DSP interpreter and is distributed, if at all, under
 GPL-2.0-or-later as a combined work. Some DSP DMA and framework APU files use

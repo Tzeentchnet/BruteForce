@@ -27,6 +27,7 @@
 #include "gpu/d3d11_device_status.h"
 #include "gpu/null_backend.h"
 #include "gpu/render_scale.h"
+#include "gpu/texture_decode.h"
 #include "perf_counters.h"
 #include "video/gpu_present.h"
 
@@ -38,6 +39,8 @@ extern void nv2a_pb_exec_method(uint32_t subch, uint32_t method, uint32_t param)
 extern void nv2a_pb_exec_poll(void);
 extern void nv2a_pb_exec_report(void);
 extern int bruteforce_test_textures(int hardware);
+extern int bruteforce_test_mipmaps(void);
+extern int bruteforce_test_mip_p8_invalid(void);
 extern int bruteforce_test_shader_cache_keys(void);
 extern int bruteforce_test_shader_cache_publication(int readonly, int different, int corrupt);
 extern int bruteforce_test_shader_cache_temp_collision(int exhausted);
@@ -1282,7 +1285,7 @@ static int scene_glare_threshold(const char *out_path, int program)
     return 1;
 }
 
-static int scene_stencil_texture(const char *out_path, int program)
+static int scene_stencil_texture(const char *out_path, int program, int mip_probe)
 {
     static const Pos full[4] = {{0, 0, 0, 1}, {64, 0, 0, 1},
                                  {64, 64, 0, 1}, {0, 64, 0, 1}};
@@ -1395,6 +1398,13 @@ static int scene_stencil_texture(const char *out_path, int program)
     clear(0xF0, 0xFF000000u, 0);
     screen_quad(0xFFFFFFFFu);
     REQUIRE(save_frame(f, b), "save base packed depth frame");
+    if (mip_probe) {
+        surface(b, B_SIZE, other_z);
+        texture_packed_depth(z, B_SIZE, B_SIZE, B_SIZE * 4);
+        method(0x1B04, 2u << 4 | 0x41u << 8 | 2u << 16);
+        combiners(1);
+        draw(8, full, white, uv, 4, vb);
+    }
     REQUIRE(fclose(f) == 0, "close packed depth frames");
     puts("packed depth frames 13");
     return 1;
@@ -1948,6 +1958,176 @@ static int scene_bc(const char *out_path)
     return 1;
 }
 
+static void mip_quad(float x, float y, float u, uint32_t vb)
+{
+    const Pos p[4] = {{x, y, 0, 1}, {x + 4, y, 0, 1},
+                      {x + 4, y + 4, 0, 1}, {x, y + 4, 0, 1}};
+    const float uv[4][2] = {{u, 0}, {u + 1, 0}, {u + 1, 1}, {u, 1}};
+    static const uint32_t white[4] = {
+        0xFFFFFFFFu, 0xFFFFFFFFu, 0xFFFFFFFFu, 0xFFFFFFFFu
+    };
+    draw(8, p, white, uv, 4, vb);
+}
+
+static int scene_mipmaps(const char *out_path)
+{
+    static const uint32_t colors[] = {
+        0xFFFF0000u, 0xFF00FF00u, 0xFF0000FFu, 0xFFFFFF00u, 0xFFFF00FFu
+    };
+    static const unsigned texels[] = {256, 64, 16, 4, 1};
+    uint32_t b = xbox_ContiguousAlloc(B_SIZE * B_SIZE * 4, 4096);
+    uint32_t tex = xbox_ContiguousAlloc(0x1000, 4096);
+    uint32_t vb = xbox_ContiguousAlloc(0x1000, 4096);
+    uint32_t target = xbox_ContiguousAlloc(16 * 16 * 4, 4096);
+    uint32_t *pixels;
+    unsigned level, i, offset = 0;
+    FILE *f;
+    REQUIRE(b && tex && vb && target, "allocate mipmap scene");
+    pixels = (uint32_t *)guest(tex);
+    for (level = 0; level < 5; ++level)
+        for (i = 0; i < texels[level]; ++i)
+            pixels[offset++] = colors[level];
+    identity_matrix();
+    surface(b, B_SIZE, 0);
+    clear(0xF0, 0xFF000000u, 0);
+    method(0x1B00, tex - XBOX_CONTIG_BASE);
+    method(0x1B04, 2u << 4 | 0x06u << 8 | 5u << 16 | 4u << 20 | 4u << 24);
+    method(0x1B08, 3u | 3u << 8);
+    method(0x1B0C, 0x40000000u | 0xFFFu << 6);
+    combiners(1);
+
+    method(0x1B14, 1u << 24 | 3u << 16);
+    mip_quad(2, 2, 0, vb);                        /* level 2 */
+    method(0x1B14, 1u << 24 | 1u << 16);
+    mip_quad(9, 2, 0, vb);                        /* no mip filter */
+    method(0x1B14, 1u << 24 | 3u << 16);
+    method(0x1B0C, 0x40000000u | 0x100u << 6);
+    mip_quad(16, 2, 0, vb);                       /* max LOD 1 */
+    method(0x1B0C, 0x40000000u | 0x300u << 18 | 0xFFFu << 6);
+    mip_quad(23, 2, 0, vb);                       /* min LOD 3 */
+    method(0x1B0C, 0x40000000u | 0xFFFu << 6);
+    method(0x1B14, 1u << 24 | 3u << 16 | 0x100u);
+    mip_quad(30, 2, 0, vb);                       /* bias +1 */
+    method(0x1B14, 1u << 24 | 5u << 16 | 0x80u);
+    mip_quad(37, 2, 0, vb);                       /* half-way between levels 2 and 3 */
+    for (i = 0; i < 16; ++i)
+        pixels[256 + 64 + i] = 0xFF00FFFFu;
+    method(0x1B14, 1u << 24 | 3u << 16);
+    mip_quad(44, 2, 0, vb);                       /* same-frame level 2 rewrite */
+    method(0x1B04, 2u << 4 | 0x06u << 8 | 2u << 16 | 4u << 20 | 4u << 24);
+    mip_quad(51, 2, 0, vb);                       /* only two declared levels */
+    method(0x1B04, 2u << 4 | 0x06u << 8 | 5u << 16 | 4u << 20 | 4u << 24);
+    method(0x1B14, 1u << 24 | 5u << 16);
+    method(0x1B0C, 0x40000000u | 0x280u << 18 | 0x280u << 6);
+    mip_quad(58, 2, 0, vb);                       /* fractional LOD 2.5 */
+    method(0x1B0C, 0x40000000u | 0xFFFu << 6);
+    method(0x1B14, 1u << 24 | 3u << 16 | 0x1F00u);
+    mip_quad(2, 10, 0, vb);                       /* bias -1 */
+    pixels[1] = 0xFF00FF00u;
+    method(0x1B14, 1u << 24 | 6u << 16);
+    sample_quad(2, 20, 0.0625f, 0.03125f, vb);   /* magnification point */
+    method(0x1B14, 2u << 24 | 1u << 16);
+    sample_quad(14, 20, 0.0625f, 0.03125f, vb);  /* magnification linear */
+    pixels[256 + 64 + 1] = 0xFFFFFF00u;
+    method(0x1B14, 2u << 24 | 3u << 16);
+    mip_quad(30, 20, 0.125f, vb);                 /* minification point */
+    method(0x1B14, 1u << 24 | 4u << 16);
+    mip_quad(37, 20, 0.125f, vb);                 /* minification linear */
+    method(0x1B40, tex - XBOX_CONTIG_BASE);
+    method(0x1B44, 2u << 4 | 0x06u << 8 | 5u << 16 | 4u << 20 | 4u << 24);
+    method(0x1B48, 3u | 3u << 8);
+    method(0x1B4C, 0x40000000u | 0x100u << 6);
+    method(0x1B54, 1u << 24 | 3u << 16);
+    method(0x1748, vb + 0x800 - XBOX_CONTIG_BASE);
+    method(0x1788, 0x0822);                       /* float2 stage-1 coordinates */
+    combiners_stage(1);
+    mip_quad(2, 34, 0, vb);                       /* stage-1 max LOD 1 */
+    method(0x1B4C, 0x40000000u | 0x300u << 18 | 0x300u << 6);
+    mip_quad(9, 34, 0, vb);                       /* stage-1 LOD 3 */
+    surface(target, 16, 0);
+    clear(0xF0, 0xFF9933CCu, 0);
+    surface(b, B_SIZE, 0);
+    method(0x1B00, target - XBOX_CONTIG_BASE);
+    method(0x1B14, 1u << 24 | 3u << 16);
+    combiners(1);
+    mip_quad(16, 34, 0, vb);                      /* render target remains level zero */
+    flip();
+    f = fopen(out_path, "wb");
+    REQUIRE(f && fwrite(guest(b), 4, B_SIZE * B_SIZE, f) == B_SIZE * B_SIZE &&
+            fclose(f) == 0, "write mipmap scene");
+    puts("mipmap scene drawn");
+    return 1;
+}
+
+static int scene_mip_cube(const char *out_path)
+{
+    static const float direction[6][3] = {
+        {1, 0, 0}, {-1, 0, 0}, {0, 1, 0}, {0, -1, 0}, {0, 0, 1}, {0, 0, -1}
+    };
+    static const uint32_t base[6] = {
+        0xFFFF0000u, 0xFF00FF00u, 0xFF0000FFu,
+        0xFFFFFF00u, 0xFFFF00FFu, 0xFF00FFFFu
+    };
+    static const uint32_t white[4] = {
+        0xFFFFFFFFu, 0xFFFFFFFFu, 0xFFFFFFFFu, 0xFFFFFFFFu
+    };
+    Nv2aTexture t = {0};
+    GpuTextureLayout layout;
+    uint32_t b = xbox_ContiguousAlloc(B_SIZE * B_SIZE * 4, 4096);
+    uint32_t tex = xbox_ContiguousAlloc(0x3000, 4096);
+    uint32_t vb = xbox_ContiguousAlloc(0x1000, 4096);
+    unsigned face, level, i;
+    FILE *f;
+    REQUIRE(b && tex && vb, "allocate mipmap cube scene");
+    t.width = t.height = 16;
+    t.color = 0x06;
+    t.levels = 5;
+    REQUIRE(gpu_texture_layout(&t, 6, 1, &layout) && layout.faces == 6 &&
+            layout.levels == 5, "cube scene layout");
+    for (face = 0; face < 6; ++face)
+        for (level = 0; level < 5; ++level) {
+            const GpuTextureSubresource *s = &layout.subresource[face][level];
+            uint32_t color = level == 0 ? base[face] :
+                (0xFF000000u | ((face + 1) * 20u) << 16 |
+                 ((face + 1) * 15u) << 8 | (160u + level * 10u));
+            uint32_t *pixels = (uint32_t *)((uint8_t *)guest(tex) + s->offset);
+            for (i = 0; i < s->width * s->height; ++i)
+                pixels[i] = color;
+        }
+    identity_matrix();
+    surface(b, B_SIZE, 0);
+    clear(0xF0, 0xFF000000u, 0);
+    method(0x1B00, tex - XBOX_CONTIG_BASE);
+    method(0x1B04, 4u | 2u << 4 | 0x06u << 8 | 5u << 16 | 4u << 20 | 4u << 24);
+    method(0x1B08, 3u | 3u << 8 | 3u << 16);
+    method(0x1B0C, 0x40000000u | 0x200u << 18 | 0x200u << 6);
+    method(0x1B14, 1u << 24 | 3u << 16);
+    combiners(1);
+    method(0x1E70, 3u);
+    for (face = 0; face < 7; ++face) {
+        float x = 2.0f + face * 8.0f;
+        Pos p[4] = {{x, 10, 0, 1}, {x + 6, 10, 0, 1},
+                    {x + 6, 16, 0, 1}, {x, 16, 0, 1}};
+        float uv[4][3];
+        unsigned selected = face < 6 ? face : 5;
+        if (face == 6) {
+            const GpuTextureSubresource *s = &layout.subresource[5][2];
+            uint32_t *pixels = (uint32_t *)((uint8_t *)guest(tex) + s->offset);
+            for (i = 0; i < s->width * s->height; ++i)
+                pixels[i] = 0xFFFFFFFFu;
+        }
+        for (i = 0; i < 4; ++i)
+            memcpy(uv[i], direction[selected], sizeof uv[i]);
+        draw_with_texcoords(8, p, white, &uv[0][0], 3, 4, vb);
+    }
+    flip();
+    f = fopen(out_path, "wb");
+    REQUIRE(f && fwrite(guest(b), 4, B_SIZE * B_SIZE, f) == B_SIZE * B_SIZE &&
+            fclose(f) == 0, "write mipmap cube scene");
+    puts("mipmap cube scene drawn");
+    return 1;
+}
+
 static int test_scale_config(void)
 {
     static const char *const invalid_outputs[] = {
@@ -2445,6 +2625,14 @@ int main(int argc, char **argv)
         return test_scale_init_retry(argv[2]) ? 0 : 1;
     if (strncmp(argv[2], "device-", 7) == 0)
         return test_device_status(argv[2], argv[3]) ? 0 : 1;
+    if (strncmp(argv[2], "mipmaps-", 8) == 0 ||
+        strncmp(argv[2], "mip-p8-invalid-", 15) == 0) {
+        if (_putenv_s("RECOMP_D3D11_WARP", strstr(argv[2], "hardware") ? "0" : "1") != 0 ||
+            !bruteforce_d3d11_install() || !bruteforce_d3d11_test_initialize_device())
+            return 1;
+        return (strncmp(argv[2], "mipmaps-", 8) == 0 ?
+                bruteforce_test_mipmaps() : bruteforce_test_mip_p8_invalid()) ? 0 : 1;
+    }
     if (strncmp(argv[2], "textures-", 9) == 0)
         return bruteforce_test_textures(strstr(argv[2], "hardware") != NULL) ? 0 : 1;
     if (strncmp(argv[2], "guard", 5) == 0)
@@ -2535,8 +2723,11 @@ int main(int argc, char **argv)
                                                      strstr(argv[2], "vertical") != NULL) :
         strstr(argv[2], "clip") ? !scene_window_clip(argv[3], strstr(argv[2], "vsh") != NULL) :
         strstr(argv[2], "glare") ? !scene_glare_threshold(argv[3], strstr(argv[2], "vsh") != NULL) :
-        strstr(argv[2], "stencil") ? !scene_stencil_texture(argv[3], strstr(argv[2], "vsh") != NULL) :
+        strstr(argv[2], "stencil") ? !scene_stencil_texture(
+            argv[3], strstr(argv[2], "vsh") != NULL, strstr(argv[2], "mip-probe") != NULL) :
         strstr(argv[2], "depth") ? !scene_depth_texture(argv[3], strstr(argv[2], "vsh") != NULL) :
+        strstr(argv[2], "mip-cube") ? !scene_mip_cube(argv[3]) :
+        strstr(argv[2], "mip-scene") ? !scene_mipmaps(argv[3]) :
         strstr(argv[2], "bc") ? !scene_bc(argv[3]) :
         !scene(argv[3], strstr(argv[2], "vsh") != NULL, strncmp(argv[2], "gpu", 3) == 0))
         return 1;

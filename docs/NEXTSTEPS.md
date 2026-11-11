@@ -530,23 +530,29 @@ run, so G4/G5 and the reported default 6 fps remain open.
    at 1080p and 4K presets, A/B/A against scale 1, reporting distinct world
    frames and the GPU, driver and scale used. Record results in FINDINGS.
 
-10. **Mipmaps and filtering for scaled modes (wanted; was deferred).** The
-    deferral is lifted for 4K. Today both paths sample level 0 only, so
-    minification will shimmer at high resolution. Plan: (a) establish what
-    the title supplies: whether its textures carry mip chains in guest
-    memory, in which formats, and how many levels (unverified; the existing
-    native BC mip fixtures show the decoder can read levels); (b) make the
-    GPU decoder upload the supplied chain and let the hardware select
-    levels, honouring the NV2A level range and LOD bias from the texture
-    registers, and generate levels only where the title supplies none and
-    xemu shows the console sampled them; (c) add anisotropic filtering as a
-    separate switch (Blood Wake's `VFX_ANISO` is prior art); (d) put it
-    behind `RECOMP_GPU_MIPS`, off by default until compared with xemu at
-    scale 1, since it changes the image relative to the CPU reference.
-    Record the CPU/GPU difference in FINDINGS as a known difference, and
-    make G4 comparisons at scale 1 with mips off. Cube, render-target,
-    palette and linear textures need separate checks, and so does the
-    texture-cache and VRAM cost.
+10. **Mipmaps and filtering for scaled modes: implemented experimentally;
+    reference and retail gates open.** `RECOMP_GPU_MIPS=1` uploads declared
+    swizzled, P8 and BC chains for 2D and cube textures and exposes their
+    valid levels to D3D11 sampling. `RECOMP_GPU_ANISO=1` separately opts
+    eligible mipped samplers into 8x anisotropy. Both default off; the CPU
+    reference and the disabled D3D11 path remain at level zero. Linear
+    textures and render-target aliases remain level-zero-only; depth/stencil
+    aliases reject multi-level declarations. These paths report diagnostics;
+    no levels are generated. Synthetic WARP and hardware
+    fixtures cover subresources, filtering, fractional clamps, bias,
+    rewrites, guarded ranges and cube edges. See
+    [FINDINGS](./FINDINGS.md#experimental-mipmap-sampling-synthetic-evidence-2026-11-11)
+    for the evidence and the unresolved xemu/NV2A clamp interpretation.
+
+    Next establish the retail title's supplied chains and compare identical
+    scale-1 frames against xemu and the CPU reference with the switches off
+    and on, including mip transitions and aliases. Resolve the 4.8 clamp
+    interpretation and declared cube-face spacing against stronger reference
+    evidence before considering a default change. Generate levels only if
+    evidence shows the console samples levels the title did not supply.
+    Measure texture-cache cost, VRAM and distinct-world-frame performance
+    with controlled A/B/A runs at 1080p and 4K; native 4K-display and
+    matched retail gameplay remain external gates.
 
 *Done when:* the 4K preset runs a scripted movement campaign with the output
 matching the scale-1 picture on average once downsampled, no scale-specific
@@ -825,7 +831,7 @@ Still open: access to a native 4K display. Optional 5.1 output is deferred.
    allow. The widescreen trace is diagnostic and must not change output.
 2. Implement E3-E8 behind one default-off mode, with a 4:3 regression gate
    before wide output. Keep HUD relocation deferred.
-3. Continue B1-B10 behind switches with scale 1 unchanged.
+3. Continue B1-B10 behind switches with default scale-1 behavior unchanged.
 4. Run C's human listening pass against the stable scene from A; repeat
    automated audio probes only for a new symptom or materially different
    audio-heavy scene.

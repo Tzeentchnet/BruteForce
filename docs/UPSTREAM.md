@@ -655,6 +655,48 @@ own GPU back end, an extended interface for it, and its own pacing fixes.
     and source identity, explicit worker failures, and cold/warm output
     checks; Blood Wake's wrapper addresses and shader groups are not generic.
 
+14a. **Upload and sample declared guest mip chains in GPU back ends.**
+    *Problem:* a backend exposing only level zero cannot reproduce guest
+    minification; independently, the existing texture metadata does not
+    carry CONTROL0 LOD clamps as explicit fields. Whole-chain source bounds,
+    cube spacing, P8 ranges and cache invalidation need to agree.
+    *Evidence:* a synthetic D3D11 scene selects distinct levels and catches
+    same-frame lower-level rewrites; the off path remains level zero. This
+    does not establish that the Brute Force retail revision supplies a
+    particular chain or that its enabled image matches xemu/NV2A.
+    *Change:* generic project-side layout, uploads, SRV exposure and
+    descriptor-based sampler identity use the existing raw register mirror.
+    `RECOMP_GPU_MIPS` and `RECOMP_GPU_ANISO` are independently default-off;
+    no framework patch or pinned-tree change was made. Explicit fallbacks
+    retain the CPU reference, and no title addresses or content are involved.
+    The level-zero path also rejects malformed non-power-of-two swizzles whose
+    Morton indices exceed their source span instead of reading out of bounds.
+    Blood Wake's mip upload and `VFX_ANISO` are prior art; no code was copied
+    from it for this implementation.
+    *Tests:* WARP and RTX 5070 synthetic 2D/cube upload and sampled-image
+    fixtures cover swizzled, linear, BC and P8 formats, all exposed levels,
+    filters, fractional clamps, positive/negative bias, declared-count and
+    palette/last-face rewrites, guarded and tracked-short chains including
+    fallback rewrites under approximate caching, and a final-level invalid P8
+    index. Render-target, depth and stencil alias regressions exercise their
+    level-zero/rejection behavior. They do not prove NV2A semantics, title
+    compatibility, race freedom for concurrent guest writes, or performance.
+    *Overlap:* checked read-only 2026-11-11: [#184](https://github.com/sp00nznet/xboxrecomp/pull/184)
+    tracks GPU backend work; merged [#253](https://github.com/sp00nznet/xboxrecomp/pull/253)
+    concerns CPU filtering without this D3D11 mip path; merged
+    [#145](https://github.com/sp00nznet/xboxrecomp/pull/145) covers CPU P8
+    sampling. [NV30 sampler code](https://github.com/Kenji-NX/mesa/blob/main/src/gallium/drivers/nouveau/nv30/nv30_texture.c)
+    supports the 4.8 clamp interpretation used here, while
+    [xemu v0.8.139](https://github.com/xemu-project/xemu/blob/aa54c34cae1c09410d74c69a44210a9867fe2d16/hw/xbox/nv2a/pgraph/texture.c)
+    uses raw integer clamp values. These are reference observations, not
+    proof of NV2A hardware behavior.
+    *Before filing:* reconcile clamp units and declared cube stride with
+    xemu and hardware evidence; define generic backend metadata and
+    ownership/race contracts with #184; verify additional titles, formats,
+    aliases and performance. Recheck upstream before any approved filing.
+    *Status:* project implementation and synthetic fixture; framework
+    contribution candidate, not prepared or filed.
+
 15. **Present from the back end, with readback on demand.**
     *Problem:* the presenter copies or converts the flipped guest frame on
     the CPU, and a GPU back end must read its surface back into guest memory

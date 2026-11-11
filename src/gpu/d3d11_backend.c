@@ -63,6 +63,7 @@
 #include "rc_hlsl.h"
 #include "shader_cache.h"
 #include "texture_decode.h"
+#include "texture_sampler.h"
 #include "vsh_hlsl.h"
 #include "../perf_counters.h"
 
@@ -1684,7 +1685,7 @@ static int mirror_full_color_clear(Surf *s, uint32_t argb)
 #define MAX_TEX 2048
 #define MAX_TEX_SNAPSHOT_BYTES (128u << 20)
 typedef struct {
-    uint32_t offset, w, h, pitch, color, levels, palette, palette_entries;
+    uint32_t offset, w, h, pitch, color, levels, uploaded_levels, palette, palette_entries;
     uint64_t hash, sparse, palette_hash;
     uint32_t gen, stable, last_use;
     uint8_t cube, unsupported;
@@ -1700,7 +1701,7 @@ static uint32_t *s_decode;
 static size_t s_decode_cap;
 static size_t s_tex_snapshot_bytes;
 static GpuTextureDecoder s_texture_decoder;
-static int s_tex_gpu = 1, s_tex_log, s_tex_approx;
+static int s_tex_gpu = 1, s_tex_log, s_tex_approx, s_tex_mips, s_tex_aniso;
 
 static uint64_t hash_bytes(const uint8_t *p, size_t n)
 {
@@ -1717,15 +1718,8 @@ static uint64_t hash_bytes(const uint8_t *p, size_t n)
     return h;
 }
 
-/* The bytes level 0 (all faces, for a cube) occupies in guest memory. */
-static size_t tex_bytes(const Nv2aTexture *t, int faces)
+static uint64_t tex_hash(const Nv2aTexture *t, size_t n)
 {
-    return gpu_texture_span(t, faces);
-}
-
-static uint64_t tex_hash(const Nv2aTexture *t, int faces)
-{
-    size_t n = tex_bytes(t, faces);
     if (!n)
         return 0;
     s_st.tex_approx_hash_bytes += n;
@@ -1733,9 +1727,9 @@ static uint64_t tex_hash(const Nv2aTexture *t, int faces)
 }
 
 /* 128 eight-byte samples spread over the texture. */
-static uint64_t tex_sparse(const Nv2aTexture *t, int faces)
+static uint64_t tex_sparse(const Nv2aTexture *t, size_t n)
 {
-    size_t n = tex_bytes(t, faces), i;
+    size_t i;
     const uint8_t *p = GUEST(t->offset);
     uint64_t h = 1469598103934665603ull;
     if (n < 8)
@@ -1827,11 +1821,13 @@ static void discard_tex(Tex *e)
     memset(&s_tex[s_ntex], 0, sizeof s_tex[s_ntex]);
 }
 
-static void set_tex_key(Tex *e, const Nv2aTexture *t, int cube, unsigned palette_entries)
+static void set_tex_key(Tex *e, const Nv2aTexture *t, int cube, unsigned palette_entries,
+                        unsigned uploaded_levels)
 {
     e->offset = t->offset; e->w = t->width; e->h = t->height;
     e->color = t->color; e->pitch = t->pitch; e->cube = (uint8_t)cube;
-    e->levels = t->levels; e->palette = t->palette; e->palette_entries = palette_entries;
+    e->levels = t->levels; e->uploaded_levels = uploaded_levels;
+    e->palette = t->palette; e->palette_entries = palette_entries;
     e->last_use = s_gen;
 }
 
@@ -1839,6 +1835,8 @@ static int ensure_decode(size_t texels)
 {
     if (texels <= s_decode_cap)
         return 1;
+    if (texels > SIZE_MAX / sizeof *s_decode)
+        return 0;
     free(s_decode);
     s_decode = (uint32_t *)malloc(texels * 4);
     s_decode_cap = s_decode ? texels : 0;
@@ -1865,32 +1863,55 @@ static void check_p8_span(uint32_t va, size_t bytes, int palette)
     }
 }
 
+static int texture_span_readable(uint32_t va, size_t bytes)
+{
+    uint32_t remaining = va >= XBOX_CONTIG_BASE
+                       && (uint64_t)va < (uint64_t)XBOX_CONTIG_BASE + XBOX_CONTIG_SIZE
+                       ? xbox_ContiguousBlockSize(va) : xbox_HeapBlockSize(va);
+    return (!remaining || bytes <= remaining) && readable_guest_range(va, bytes);
+}
+
+static void mip_fallback(const char *reason, const Nv2aTexture *t, unsigned stage)
+{
+    static unsigned reports;
+    if (reports++ < 32)
+        fprintf(stderr, "[GPU-MIPS] stage %u texture 0x%08X format 0x%02X: %s%s\n",
+                stage, t->offset, t->color, reason,
+                reports == 32 ? " (further mip fallback reports suppressed)" : "");
+}
+
+static int mip_filter_requested(uint32_t filter)
+{
+    uint32_t min_filter = (filter >> 16) & 0xFFu;
+    return min_filter >= 3 && min_filter <= 6;
+}
+
 typedef enum {
     TEX_UPLOAD_FAILED,
     TEX_UPLOAD_OK,
     TEX_UPLOAD_UNSUPPORTED
 } TextureUploadResult;
 
-/* Level 0 of a 2D texture (or all six faces of a cube) to the GPU. DXT
- * blocks go as they are (BC1-3 are the same S3TC blocks); everything else
- * through the framework's decoder, the same one the CPU path samples with. */
+/* DXT blocks go as BC1-3; the other supported formats use the compute or
+ * reference CPU decoder. D3D subresources are ordered by face, then level. */
 static TextureUploadResult upload(Tex *e, const Nv2aTexture *t, int cube,
+                                  const GpuTextureLayout *layout,
                                   const uint8_t *source, const uint8_t *palette,
                                   unsigned palette_entries, const char **path)
 {
     D3D11_TEXTURE2D_DESC td;
-    D3D11_SUBRESOURCE_DATA init[6];
+    D3D11_SUBRESOURCE_DATA init[GPU_TEXTURE_MAX_FACES * GPU_TEXTURE_MAX_LEVELS];
     D3D11_SHADER_RESOURCE_VIEW_DESC sv;
-    int dxt = (int)d3d8_format_dxt_block_bytes(t->color), faces = cube ? 6 : 1, f;
-    size_t face_bytes = cube ? gpu_texture_face_stride(t) : tex_bytes(t, 1);
+    int dxt = (int)d3d8_format_dxt_block_bytes(t->color);
+    unsigned face, level;
     HRESULT hr;
     int decoded_gpu = 0, attempted_gpu = 0;
 
     memset(&td, 0, sizeof td);
     td.Width = t->width;
     td.Height = t->height;
-    td.MipLevels = 1;
-    td.ArraySize = (UINT)faces;
+    td.MipLevels = layout->levels;
+    td.ArraySize = layout->faces;
     td.SampleDesc.Count = 1;
     td.Usage = D3D11_USAGE_DEFAULT;
     td.BindFlags = D3D11_BIND_SHADER_RESOURCE;
@@ -1899,25 +1920,31 @@ static TextureUploadResult upload(Tex *e, const Nv2aTexture *t, int cube,
     if (dxt && !t->pitch && (t->width & 3) == 0 && (t->height & 3) == 0) {
         td.Format = t->color == 0x0C ? DXGI_FORMAT_BC1_UNORM
                   : t->color == 0x0E ? DXGI_FORMAT_BC2_UNORM : DXGI_FORMAT_BC3_UNORM;
-        for (f = 0; f < faces; f++) {
-            init[f].pSysMem = source + f * face_bytes;
-            init[f].SysMemPitch = (t->width / 4) * (UINT)dxt;
-        }
+        for (face = 0; face < layout->faces; ++face)
+            for (level = 0; level < layout->levels; ++level) {
+                const GpuTextureSubresource *sub = &layout->subresource[face][level];
+                unsigned index = level + face * layout->levels;
+                init[index].pSysMem = source + sub->offset;
+                init[index].SysMemPitch = (UINT)sub->row_pitch;
+            }
         *path = "BC";
         s_st.tex_bc++;
     } else if (t->color == 0x12 && t->pitch >= t->width * 4) {
         td.Format = DXGI_FORMAT_B8G8R8A8_UNORM;
-        for (f = 0; f < faces; f++) {
-            init[f].pSysMem = source + f * face_bytes;
-            init[f].SysMemPitch = t->pitch;
+        for (face = 0; face < layout->faces; ++face) {
+            const GpuTextureSubresource *sub = &layout->subresource[face][0];
+            unsigned index = face * layout->levels;
+            init[index].pSysMem = source + sub->offset;
+            init[index].SysMemPitch = (UINT)sub->row_pitch;
         }
         *path = "direct";
         s_st.tex_direct++;
     } else {
         if (s_tex_gpu && gpu_texture_decode_supported(t)) {
             attempted_gpu = 1;
-            decoded_gpu = gpu_texture_decode(&s_texture_decoder, s_dev, s_ctx, t, faces,
-                                              source, palette, palette_entries, &e->tex);
+            decoded_gpu = gpu_texture_decode(&s_texture_decoder, s_dev, s_ctx, t, layout,
+                                              source, layout->span, palette, palette_entries,
+                                              &e->tex);
             if (!decoded_gpu) {
                 gpu_d3d11_check_device(s_dev, S_OK, "texture compute decoding");
                 fprintf(stderr, "[GPU-D3D11] falling back to CPU texture decoding\n");
@@ -1928,34 +1955,55 @@ static TextureUploadResult upload(Tex *e, const Nv2aTexture *t, int cube,
             *path = "GPU";
             s_st.tex_gpu++;
         } else {
-            size_t texels = (size_t)t->width * t->height;
+            size_t total_texels = 0, used_texels = 0;
             td.Format = DXGI_FORMAT_B8G8R8A8_UNORM;
-            if (!ensure_decode(texels * faces)) {
+            for (face = 0; face < layout->faces; ++face)
+                for (level = 0; level < layout->levels; ++level) {
+                    const GpuTextureSubresource *sub = &layout->subresource[face][level];
+                    size_t texels = (size_t)sub->width * sub->height;
+                    if (texels > SIZE_MAX - total_texels)
+                        return TEX_UPLOAD_FAILED;
+                    total_texels += texels;
+                }
+            if (!ensure_decode(total_texels)) {
                 fprintf(stderr, "[GPU-D3D11] cannot allocate CPU texture decode buffer\n");
                 return TEX_UPLOAD_FAILED;
             }
-            if (t->color == 0x0B
-                && !gpu_texture_decode_p8_cpu(t, faces, source, palette, palette_entries, s_decode))
-                return TEX_UPLOAD_FAILED;
-            for (f = 0; f < faces; f++) {
-                if (t->color != 0x0B) {
-                    Nv2aTexture face = *t;
-                    face.offset = t->offset + (uint32_t)(f * face_bytes);
-                    if (!nv2a_backend_decode_texture(&face, s_decode + texels * f)) {
-                        static unsigned failures;
-                        if (failures++ < 10)
-                            fprintf(stderr, "[GPU-D3D11] cannot decode texture format 0x%02X"
-                                            " at 0x%08X%s\n", t->color, t->offset,
-                                    failures == 10 ? " (further failures suppressed)" : "");
-                        /* The pinned CPU decoder only rejects unsupported non-P8 formats;
-                         * an attempted GPU decode may instead have failed transiently. */
-                        return attempted_gpu ? TEX_UPLOAD_FAILED : TEX_UPLOAD_UNSUPPORTED;
+            for (face = 0; face < layout->faces; ++face)
+                for (level = 0; level < layout->levels; ++level) {
+                    const GpuTextureSubresource *sub = &layout->subresource[face][level];
+                    size_t texels = (size_t)sub->width * sub->height;
+                    unsigned index = level + face * layout->levels;
+                    Nv2aTexture image = *t;
+                    if (t->color == 0x0B) {
+                        if (!gpu_texture_decode_p8_cpu(layout, face, level, source, layout->span,
+                                                       palette, palette_entries,
+                                                       s_decode + used_texels, texels))
+                            return TEX_UPLOAD_FAILED;
+                    } else {
+                        if (sub->offset > UINT32_MAX - t->offset)
+                            return TEX_UPLOAD_FAILED;
+                        image.offset = t->offset + (uint32_t)sub->offset;
+                        image.width = sub->width;
+                        image.height = sub->height;
+                        image.pitch = layout->storage == GPU_TEXTURE_LINEAR
+                                    ? (uint32_t)sub->row_pitch : 0;
+                        image.levels = 1;
+                        if (!nv2a_backend_decode_texture(&image, s_decode + used_texels)) {
+                            static unsigned failures;
+                            if (failures++ < 10)
+                                fprintf(stderr, "[GPU-D3D11] cannot decode texture format 0x%02X"
+                                                " at 0x%08X%s\n", t->color, t->offset,
+                                        failures == 10 ? " (further failures suppressed)" : "");
+                            /* An attempted GPU decode may have failed transiently. */
+                            return attempted_gpu ? TEX_UPLOAD_FAILED : TEX_UPLOAD_UNSUPPORTED;
+                        }
                     }
+                    init[index].pSysMem = s_decode + used_texels;
+                    init[index].SysMemPitch = sub->width * 4;
+                    used_texels += texels;
                 }
-                init[f].pSysMem = s_decode + texels * f;
-                init[f].SysMemPitch = t->width * 4;
-            }
-            if (t->color != 0x0B && memcmp(source, GUEST(t->offset), tex_bytes(t, faces))) {
+            if (t->color != 0x0B && memcmp(source, GUEST(t->offset), layout->span)) {
                 fprintf(stderr, "[GPU-D3D11] texture changed during CPU decoding;"
                                 " cannot safely cache the result\n");
                 fflush(stderr);
@@ -1977,10 +2025,10 @@ static TextureUploadResult upload(Tex *e, const Nv2aTexture *t, int cube,
     sv.Format = td.Format;
     if (cube) {
         sv.ViewDimension = D3D11_SRV_DIMENSION_TEXTURECUBE;
-        sv.TextureCube.MipLevels = 1;
+        sv.TextureCube.MipLevels = layout->levels;
     } else {
         sv.ViewDimension = D3D11_SRV_DIMENSION_TEXTURE2D;
-        sv.Texture2D.MipLevels = 1;
+        sv.Texture2D.MipLevels = layout->levels;
     }
     hr = ID3D11Device_CreateShaderResourceView(s_dev, (ID3D11Resource *)e->tex, &sv, &e->srv);
     if (FAILED(hr)) {
@@ -1996,11 +2044,12 @@ static TextureUploadResult upload(Tex *e, const Nv2aTexture *t, int cube,
 /* The view a stage samples, and the size its texel-space coordinates are
  * divided by (*tw, *th). */
 static ID3D11ShaderResourceView *get_texture(const Nv2aTexture *t, int cube, unsigned stage,
-                                             float *tw, float *th)
+                                             float *tw, float *th, unsigned *mip_levels)
 {
     Tex *e = NULL;
     Surf *rt;
     Nv2aTexture normalized;
+    GpuTextureLayout layout, base;
     uint64_t h, palette_hash = 0;
     size_t source_bytes, palette_bytes, snapshot_bytes;
     uint8_t *snapshot;
@@ -2010,9 +2059,10 @@ static ID3D11ShaderResourceView *get_texture(const Nv2aTexture *t, int cube, uns
     TextureUploadResult upload_result;
     uint64_t perf_start = 0;
     int perf = g_bruteforce_perf_counters_enabled;
-    int rewritten;
+    int rewritten, approximate;
     int i, faces = cube ? 6 : 1;
 
+    *mip_levels = 1;
     if (!t || !t->width || !t->height || t->width > 4096 || t->height > 4096)
         return NULL;
     if (t->pitch && (d3d8_format_is_swizzled(t->color)
@@ -2024,16 +2074,27 @@ static ID3D11ShaderResourceView *get_texture(const Nv2aTexture *t, int cube, uns
     }
     *tw = (float)t->width;
     *th = (float)t->height;
-    if (s_depth_texture && t->color == 0x2E)
-        return get_depth_texture(t, cube, (nv2a_backend_reg(0x1B04 + stage * 0x40) >> 16) & 0xF);
+    if (s_depth_texture && t->color == 0x2E) {
+        uint32_t levels = (nv2a_backend_reg(0x1B04 + stage * 0x40) >> 16) & 0xF;
+        if (s_tex_mips && (levels > 1 || mip_filter_requested(t->filter)))
+            mip_fallback(levels > 1 ? "multi-level depth alias unsupported; texture rejected"
+                                    : "depth alias is level 0 only", t, stage);
+        return get_depth_texture(t, cube, levels);
+    }
     if (s_stencil_alias && t->color == 0x41 && overlapping_depth(t, cube)) {
         uint32_t format = nv2a_backend_reg(0x1B04 + stage * 0x40);
-        return get_packed_depth_texture(t, (format & 4) != 0, (format >> 16) & 0xF);
+        uint32_t levels = (format >> 16) & 0xF;
+        if (s_tex_mips && (levels > 1 || mip_filter_requested(t->filter)))
+            mip_fallback(levels > 1 ? "multi-level stencil alias unsupported; texture rejected"
+                                    : "stencil alias is level 0 only", t, stage);
+        return get_packed_depth_texture(t, (format & 4) != 0, levels);
     }
     if (!cube) {
         /* Render to texture: a surface this back end drew. */
         rt = find_surf(t->offset);
         if (rt && rt != s_cur) {
+            if (s_tex_mips && (t->levels > 1 || mip_filter_requested(t->filter)))
+                mip_fallback("render-target alias is level 0 only", t, stage);
             s_st.rtt++;
             *tw = (float)rt->w;
             *th = (float)rt->h;
@@ -2048,19 +2109,53 @@ static ID3D11ShaderResourceView *get_texture(const Nv2aTexture *t, int cube, uns
                 }
         }
     }
-    source_bytes = tex_bytes(t, faces);
-    if (!source_bytes) {
-        fprintf(stderr, "[GPU-D3D11] invalid texture span for format 0x%02X, %ux%u\n",
-                t->color, t->width, t->height);
+    if (!gpu_texture_layout(t, faces, s_tex_mips, &layout)) {
+        fprintf(stderr, "[GPU-D3D11] invalid texture span or layout for format 0x%02X, %ux%u"
+                        " faces=%d levels=%u\n", t->color, t->width, t->height, faces, t->levels);
         return NULL;
     }
+    if (s_tex_mips) {
+        if (layout.storage != GPU_TEXTURE_LINEAR && t->levels > layout.levels)
+            mip_fallback("declared levels exceed the 1x1 chain; capped", t, stage);
+        if (layout.storage == GPU_TEXTURE_LINEAR && mip_filter_requested(t->filter))
+            mip_fallback("linear texture has no mip chain; sampling level 0", t, stage);
+        else if (layout.levels == 1 && mip_filter_requested(t->filter))
+            mip_fallback("no additional mip levels declared; sampling level 0", t, stage);
+        if (!texture_span_readable(t->offset, layout.span)) {
+            if (layout.levels > 1 && gpu_texture_layout(t, faces, 0, &base)
+                && (!cube || base.face_stride == layout.face_stride)
+                && texture_span_readable(t->offset, base.span)) {
+                mip_fallback("mip chain is unreadable or shorter than its tracked allocation;"
+                             " falling back to level 0", t, stage);
+                layout = base;
+            } else {
+                mip_fallback("texture span is unreadable or shorter than its tracked allocation;"
+                             " texture rejected", t, stage);
+                if (t->color == 0x0B)
+                    check_p8_span(t->offset, layout.span, 0);
+                return NULL;
+            }
+        }
+    }
+    source_bytes = layout.span;
     if (t->color == 0x0B) {
         palette_entries = 256u >> ((nv2a_backend_reg(0x1B20 + stage * 0x40) >> 2) & 3u);
-        check_p8_span(t->offset, source_bytes, 0);
+        if (!s_tex_mips)
+            check_p8_span(t->offset, source_bytes, 0);
         check_p8_span(t->palette, (size_t)palette_entries * 4, 1);
     }
     palette_bytes = (size_t)palette_entries * 4;
+    if (palette_bytes > SIZE_MAX - source_bytes)
+        return NULL;
     snapshot_bytes = source_bytes + palette_bytes;
+    approximate = s_tex_approx && !(s_tex_mips && layout.storage != GPU_TEXTURE_LINEAR &&
+                                   layout.declared_levels > 1);
+    if (s_tex_approx && !approximate) {
+        static int reported;
+        if (!reported++)
+            fprintf(stderr, "[GPU-MIPS] mipped textures use exact snapshots even when"
+                            " the approximate cache is enabled\n");
+    }
     if (perf)
         perf_start = bruteforce_perf_clock();
     for (i = 0; i < s_ntex; i++) {
@@ -2070,7 +2165,8 @@ static ID3D11ShaderResourceView *get_texture(const Nv2aTexture *t, int cube, uns
                 && s_tex[i].color == t->color && s_tex[i].pitch == t->pitch
                 && s_tex[i].cube == (uint8_t)cube && s_tex[i].palette == t->palette
                 && s_tex[i].palette_entries == palette_entries
-                && (!cube || s_tex[i].levels == t->levels)) {
+                && (!(cube || s_tex_mips) || s_tex[i].levels == t->levels)
+                && (!s_tex_mips || s_tex[i].uploaded_levels == layout.levels)) {
             e = &s_tex[i];
             break;
         }
@@ -2085,11 +2181,11 @@ static ID3D11ShaderResourceView *get_texture(const Nv2aTexture *t, int cube, uns
             bruteforce_perf_record_texture_unsupported_hit();
         return NULL;
     }
-    if (s_tex_approx && palette_bytes) {
+    if (approximate && palette_bytes) {
         s_st.tex_approx_hash_bytes += palette_bytes;
         palette_hash = hash_bytes(GUEST(t->palette), palette_bytes);
     }
-    if (!s_tex_approx) {
+    if (!approximate) {
         if (e && e->snapshot && e->snapshot_bytes == snapshot_bytes) {
             size_t compared_palette_bytes = 0;
             int source_equal, palette_equal;
@@ -2108,29 +2204,33 @@ static ID3D11ShaderResourceView *get_texture(const Nv2aTexture *t, int cube, uns
                     bruteforce_perf_clock() - perf_start);
             if (source_equal && palette_equal) {
                 e->last_use = s_gen;
+                *mip_levels = e->uploaded_levels;
                 return e->srv;
             }
         }
     } else {
         if (e && e->gen == s_gen && e->palette_hash == palette_hash) {
             e->last_use = s_gen;
+            *mip_levels = e->uploaded_levels;
             return e->srv;
         }
         if (e && e->palette_hash == palette_hash && e->stable >= 30
                 && ((s_gen + (e->offset >> 12)) & 31) != 0
-                && tex_sparse(t, faces) == e->sparse) {
+                && tex_sparse(t, source_bytes) == e->sparse) {
             e->gen = s_gen;
             e->last_use = s_gen;
+            *mip_levels = e->uploaded_levels;
             return e->srv;
         }
-        h = tex_hash(t, faces);
+        h = tex_hash(t, source_bytes);
         if (e && e->hash == h && h && e->palette_hash == palette_hash) {
             if (e->stable < 0xFFFFFFFFu)
                 e->stable++;
             if (e->stable == 30)
-                e->sparse = tex_sparse(t, faces);
+                e->sparse = tex_sparse(t, source_bytes);
             e->gen = s_gen;
             e->last_use = s_gen;
+            *mip_levels = e->uploaded_levels;
             return e->srv;
         }
     }
@@ -2148,7 +2248,7 @@ static ID3D11ShaderResourceView *get_texture(const Nv2aTexture *t, int cube, uns
     if (perf)
         bruteforce_perf_record_texture_snapshot(snapshot_bytes,
                                                 bruteforce_perf_clock() - perf_start);
-    if (palette_bytes && !gpu_texture_p8_indices_valid(t, faces, snapshot,
+    if (palette_bytes && !gpu_texture_p8_indices_valid(&layout, snapshot, source_bytes,
                                                         palette_entries, &invalid_index)) {
         if (invalid_index < 256)
             fprintf(stderr, "[GPU-D3D11] P8 index %u exceeds %u-entry palette at stage %u;"
@@ -2161,7 +2261,7 @@ static ID3D11ShaderResourceView *get_texture(const Nv2aTexture *t, int cube, uns
         fflush(stderr);
         abort();
     }
-    if (s_tex_approx) {
+    if (approximate) {
         s_st.tex_approx_hash_bytes += source_bytes;
         h = hash_bytes(snapshot, source_bytes) ^ ((uint64_t)t->color << 56);
         if (palette_bytes) {
@@ -2176,8 +2276,9 @@ static ID3D11ShaderResourceView *get_texture(const Nv2aTexture *t, int cube, uns
         bruteforce_perf_record_texture_rewrite();
     e = tex_slot(e);
     memset(e, 0, sizeof *e);
-    set_tex_key(e, t, cube, palette_entries);
-    upload_result = upload(e, t, cube, snapshot, palette_bytes ? snapshot + source_bytes : NULL,
+    set_tex_key(e, t, cube, palette_entries, layout.levels);
+    upload_result = upload(e, t, cube, &layout, snapshot,
+                           palette_bytes ? snapshot + source_bytes : NULL,
                            palette_entries, &path);
     if (upload_result != TEX_UPLOAD_OK) {
         free(snapshot);
@@ -2193,15 +2294,16 @@ static ID3D11ShaderResourceView *get_texture(const Nv2aTexture *t, int cube, uns
     }
     e->palette_hash = palette_hash;
     e->hash = h; e->gen = s_gen;
-    if (s_tex_approx)
+    if (approximate)
         free(snapshot);
     else
         retain_tex_snapshot(e, snapshot, snapshot_bytes);
     if (s_tex_log)
         fprintf(stderr, "[GPU-TEX] %s %s va=0x%08X format=0x%02X %ux%u pitch=%u"
-                        " faces=%d levels=%u palette=0x%08X\n",
+                        " faces=%d levels=%u uploaded=%u palette=0x%08X\n",
                 rewritten ? "changed" : "new", path, t->offset, t->color, t->width,
-                t->height, t->pitch, faces, t->levels, t->palette);
+                t->height, t->pitch, faces, t->levels, layout.levels, t->palette);
+    *mip_levels = layout.levels;
     return e->srv;
 }
 
@@ -2280,12 +2382,13 @@ static D3D11_STENCIL_OP map_sop(uint32_t o)
 #define MAX_STATE 256
 typedef struct { uint32_t key[5]; ID3D11BlendState *bs; } BlendEntry;
 typedef struct { uint32_t key[10]; ID3D11DepthStencilState *ds; } DsEntry;
-typedef struct { uint32_t key[3]; ID3D11SamplerState *ss; } SampEntry;
+typedef struct { D3D11_SAMPLER_DESC key; ID3D11SamplerState *ss; } SampEntry;
 static BlendEntry s_blend[MAX_STATE];
 static int s_nblend;
 static DsEntry s_ds[MAX_STATE];
 static int s_nds;
-static SampEntry s_samp[MAX_STATE];
+#define MAX_SAMP 4096
+static SampEntry s_samp[MAX_SAMP];
 static int s_nsamp;
 
 static ID3D11BlendState *get_blend(const Nv2aRenderState *rs)
@@ -2355,34 +2458,45 @@ static ID3D11DepthStencilState *get_ds(const Nv2aRenderState *rs, int has_depth)
     return s_ds[s_nds++].ds;
 }
 
-/* Address modes and the filter as the CPU path's rc_texel samples: bilinear
- * when MAG is 2 or MIN is 2, 4 or 6, else the nearest texel; level 0 only. */
-static ID3D11SamplerState *get_sampler(uint32_t addr_u, uint32_t addr_v, uint32_t filter)
+static ID3D11SamplerState *get_sampler(uint32_t addr_u, uint32_t addr_v, uint32_t filter,
+                                       uint32_t control0, unsigned levels)
 {
-    uint32_t mag = (filter >> 24) & 0xF, min = (filter >> 16) & 0xFF;
-    int linear = mag == 2 || min == 2 || min == 4 || min == 6;
-    uint32_t key[3] = { addr_u, addr_v, (uint32_t)linear };
     D3D11_SAMPLER_DESC sd;
+    unsigned warnings;
     int i;
 
+    warnings = gpu_texture_sampler_desc(&sd, addr_u, addr_v, filter, control0,
+                                        levels, s_tex_mips, s_tex_aniso);
+    if (warnings) {
+        static unsigned reports;
+        if (reports++ < 16) {
+            fprintf(stderr, "[GPU-MIPS] sampler filter 0x%08X:", filter);
+            if (warnings & GPU_SAMPLER_UNKNOWN_MIN)
+                fprintf(stderr, " unknown minification filter, using point;");
+            if (warnings & GPU_SAMPLER_UNKNOWN_MAG)
+                fprintf(stderr, " unknown magnification filter, using point;");
+            if (warnings & GPU_SAMPLER_CONVOLUTION)
+                fprintf(stderr, " convolution approximated by linear filtering;");
+            if (warnings & GPU_SAMPLER_BIAS_CLAMPED)
+                fprintf(stderr, " LOD bias clamped to the D3D11 limit;");
+            if (warnings & GPU_SAMPLER_LOD_RANGE)
+                fprintf(stderr, " inverted LOD clamps collapsed to the maximum;");
+            fprintf(stderr, "%s\n", reports == 16 ? " further reports suppressed" : "");
+        }
+    }
     for (i = 0; i < s_nsamp; i++)
-        if (!memcmp(s_samp[i].key, key, sizeof key))
+        if (!memcmp(&s_samp[i].key, &sd, sizeof sd))
             return s_samp[i].ss;
-    if (s_nsamp == MAX_STATE)
+    if (s_nsamp == (s_tex_mips ? MAX_SAMP : MAX_STATE)) {
+        static int reported;
+        if (!reported++)
+            fprintf(stderr, "[GPU-D3D11] sampler cache is full; cannot create sampler\n");
         return NULL;
-    memset(&sd, 0, sizeof sd);
-    sd.Filter = linear ? D3D11_FILTER_MIN_MAG_MIP_LINEAR : D3D11_FILTER_MIN_MAG_MIP_POINT;
-    sd.AddressU = addr_u == 1 ? D3D11_TEXTURE_ADDRESS_WRAP : addr_u == 2 ? D3D11_TEXTURE_ADDRESS_MIRROR
-                : D3D11_TEXTURE_ADDRESS_CLAMP;
-    sd.AddressV = addr_v == 1 ? D3D11_TEXTURE_ADDRESS_WRAP : addr_v == 2 ? D3D11_TEXTURE_ADDRESS_MIRROR
-                : D3D11_TEXTURE_ADDRESS_CLAMP;
-    sd.AddressW = D3D11_TEXTURE_ADDRESS_CLAMP;
-    sd.MaxLOD = 0.0f;
-    sd.ComparisonFunc = D3D11_COMPARISON_NEVER;
-    memcpy(s_samp[s_nsamp].key, key, sizeof key);
+    }
     if (gpu_call_failed(ID3D11Device_CreateSamplerState(s_dev, &sd, &s_samp[s_nsamp].ss),
                         "creating sampler state"))
         return NULL;
+    s_samp[s_nsamp].key = sd;
     return s_samp[s_nsamp++].ss;
 }
 
@@ -2764,6 +2878,7 @@ static void d3d_draw(const Nv2aSurface *s, const Nv2aBatch *b)
     ID3D11ShaderResourceView *srv = NULL;
     ID3D11SamplerState *ss = NULL;
     float bf[4], tw = 1.0f, th = 1.0f;
+    unsigned mip_levels = 1;
 
     if (!b || !b->count || !b->state || !begin(s, b->state) ||
         !sync_guest_surface(s_cur, 0) || !set_window_clip(s))
@@ -2778,10 +2893,11 @@ static void d3d_draw(const Nv2aSurface *s, const Nv2aBatch *b)
                 return;
             }
         }
-        srv = get_texture(b->texture, 0, 0, &tw, &th);
+        srv = get_texture(b->texture, 0, 0, &tw, &th, &mip_levels);
         if (!srv && required_depth_alias(b->texture, 0))
             return;
-        ss = get_sampler(b->texture->addr_u, b->texture->addr_v, b->texture->filter);
+        ss = get_sampler(b->texture->addr_u, b->texture->addr_v, b->texture->filter,
+                         nv2a_backend_reg(0x1B0C), mip_levels);
     }
     memset(&c, 0, sizeof c);
     c.surf[0] = (float)s_cur->w; c.surf[1] = (float)s_cur->h;
@@ -2904,6 +3020,7 @@ static int xdraw_prepare(const Nv2aSurface *s, const Nv2aXBatch *b)
         uint32_t mode = (rc->stage_program >> (st * 5)) & 0x1F;
         int cube = b->tex_cube[st] && mode == 3;
         float tw = 1.0f, th = 1.0f;
+        unsigned mip_levels = 1;
         if (s_depth_texture && b->tex_valid[st] && b->tex[st].color == 0x2E &&
             mode != 0 && (b->tex_cube[st] || (mode != 1 && mode != 2))) {
             reject_depth_mode(mode, b->tex_cube[st], 0);
@@ -2911,7 +3028,7 @@ static int xdraw_prepare(const Nv2aSurface *s, const Nv2aXBatch *b)
         }
         if (!b->tex_valid[st] || mode < 1 || mode > 3)
             continue;
-        srv[st] = get_texture(&b->tex[st], cube, st, &tw, &th);
+        srv[st] = get_texture(&b->tex[st], cube, st, &tw, &th, &mip_levels);
         if (!srv[st]) {
             if (required_depth_alias(&b->tex[st], cube))
                 return 0;
@@ -2924,7 +3041,8 @@ static int xdraw_prepare(const Nv2aSurface *s, const Nv2aXBatch *b)
             key.tex_depth[st] = 1;
             key.shadow_func = nv2a_backend_reg(0x1E6C) & 7;
         }
-        ss[st] = get_sampler(b->tex[st].addr_u, b->tex[st].addr_v, b->tex[st].filter);
+        ss[st] = get_sampler(b->tex[st].addr_u, b->tex[st].addr_v, b->tex[st].filter,
+                             nv2a_backend_reg(0x1B0C + st * 0x40), mip_levels);
         c.texinfo[st][0] = 1.0f / tw;
         c.texinfo[st][1] = 1.0f / th;
     }
@@ -4581,6 +4699,21 @@ static void d3d_flip(void)
 
 #ifdef BRUTEFORCE_D3D11_TESTING
 void bruteforce_d3d11_test_flip(void) { d3d_flip(); }
+ID3D11Device *bruteforce_d3d11_test_device(void) { return s_dev; }
+ID3D11DeviceContext *bruteforce_d3d11_test_context(void) { return s_ctx; }
+ID3D11ShaderResourceView *bruteforce_d3d11_test_texture(const Nv2aTexture *texture,
+                                                         int cube, unsigned stage,
+                                                         unsigned *levels)
+{
+    float width, height;
+    return get_texture(texture, cube, stage, &width, &height, levels);
+}
+ID3D11SamplerState *bruteforce_d3d11_test_sampler(uint32_t addr_u, uint32_t addr_v,
+                                                   uint32_t filter, uint32_t control0,
+                                                   unsigned levels)
+{
+    return get_sampler(addr_u, addr_v, filter, control0, levels);
+}
 #endif
 
 static const Nv2aBackend s_backend = { d3d_clear, d3d_draw, d3d_flip };
@@ -4597,6 +4730,8 @@ int bruteforce_d3d11_install(void)
     const char *tex_gpu = getenv("RECOMP_GPU_TEX_DECODE");
     const char *tex_log = getenv("RECOMP_GPU_TEXLOG");
     const char *tex_approx = getenv("RECOMP_GPU_TEX_CACHE_APPROX");
+    const char *tex_mips = getenv("RECOMP_GPU_MIPS");
+    const char *tex_aniso = getenv("RECOMP_GPU_ANISO");
     const char *depth_texture = getenv("RECOMP_GPU_DEPTH_TEXTURE");
     const char *stencil_alias = getenv("RECOMP_GPU_STENCIL_ALIAS");
     const char *direct_present = getenv("RECOMP_GPU_DIRECT_PRESENT");
@@ -4624,6 +4759,16 @@ int bruteforce_d3d11_install(void)
     if (tex_approx && *tex_approx && strcmp(tex_approx, "0") != 0 &&
         strcmp(tex_approx, "1") != 0) {
         fprintf(stderr, "[GPU-D3D11] RECOMP_GPU_TEX_CACHE_APPROX must be 0 or 1\n");
+        return 0;
+    }
+    if (tex_mips && *tex_mips && strcmp(tex_mips, "0") != 0 &&
+        strcmp(tex_mips, "1") != 0) {
+        fprintf(stderr, "[GPU-D3D11] RECOMP_GPU_MIPS must be 0 or 1\n");
+        return 0;
+    }
+    if (tex_aniso && *tex_aniso && strcmp(tex_aniso, "0") != 0 &&
+        strcmp(tex_aniso, "1") != 0) {
+        fprintf(stderr, "[GPU-D3D11] RECOMP_GPU_ANISO must be 0 or 1\n");
         return 0;
     }
     if (!gpu_scale_prepare_config(&scale))
@@ -4666,9 +4811,18 @@ int bruteforce_d3d11_install(void)
     s_tex_gpu = !tex_gpu || strcmp(tex_gpu, "0") != 0;
     s_tex_log = tex_log && strcmp(tex_log, "1") == 0;
     s_tex_approx = tex_approx && strcmp(tex_approx, "1") == 0;
+    s_tex_mips = tex_mips && strcmp(tex_mips, "1") == 0;
+    s_tex_aniso = tex_aniso && strcmp(tex_aniso, "1") == 0;
     if (s_tex_approx)
         fprintf(stderr, "[GPU-D3D11] experimental approximate texture cache enabled;"
                         " texture rewrites can be missed\n");
+    if (s_tex_mips)
+        fprintf(stderr, "[GPU-MIPS] experimental guest mip chains enabled;"
+                        " CPU reference remains level 0\n");
+    if (s_tex_aniso)
+        fprintf(stderr, "[GPU-MIPS] experimental 8x anisotropic filtering %s\n",
+                s_tex_mips ? "enabled for eligible mipped samplers"
+                           : "inactive without RECOMP_GPU_MIPS=1");
     s_vsh_flags = mulzero && strcmp(mulzero, "1") == 0 ? GPU_VSH_MULZERO : 0;
     s_vsh_sync = getenv("RECOMP_GPU_VSH_SYNC") && strcmp(getenv("RECOMP_GPU_VSH_SYNC"), "1") == 0;
     s_zpass_async = getenv("RECOMP_GPU_ZPASS") && strcmp(getenv("RECOMP_GPU_ZPASS"), "async") == 0;

@@ -5,7 +5,9 @@
 int bruteforce_d3d11_install(void);
 
 #ifdef BRUTEFORCE_D3D11_TESTING
+#include <d3d11.h>
 #include <stdint.h>
+#include "nv2a_backend.h"
 
 typedef struct BruteforceD3D11TestSnapshot {
     uintptr_t color, color_rtv, color_srv, depth, depth_dsv;
@@ -27,6 +29,14 @@ int bruteforce_d3d11_test_snapshot(uint32_t color_va, uint32_t depth_va,
 int bruteforce_d3d11_test_shared_busy(int busy);
 int bruteforce_d3d11_test_readback(uint32_t color_va);
 void bruteforce_d3d11_test_flip(void);
+ID3D11Device *bruteforce_d3d11_test_device(void);
+ID3D11DeviceContext *bruteforce_d3d11_test_context(void);
+ID3D11ShaderResourceView *bruteforce_d3d11_test_texture(const Nv2aTexture *texture,
+                                                         int cube, unsigned stage,
+                                                         unsigned *levels);
+ID3D11SamplerState *bruteforce_d3d11_test_sampler(uint32_t addr_u, uint32_t addr_v,
+                                                   uint32_t filter, uint32_t control0,
+                                                   unsigned levels);
 #endif
 
 #endif

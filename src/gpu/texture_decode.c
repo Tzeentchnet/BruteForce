@@ -18,6 +18,7 @@ static const char s_decode_hlsl[] =
 "cbuffer Params : register(b0) {\n"
 "  uint width, height, format, swizzled;\n"
 "  uint bpp, pitch, face_stride, faces;\n"
+"  uint level_offset, unused0, unused1, unused2;\n"
 "};\n"
 "uint morton(uint x, uint y) {\n"
 "  uint result = 0, outbit = 1;\n"
@@ -38,7 +39,7 @@ static const char s_decode_hlsl[] =
 "[numthreads(8, 8, 1)]\n"
 "void main(uint3 id : SV_DispatchThreadID) {\n"
 "  if (id.x >= width || id.y >= height || id.z >= faces) return;\n"
-"  uint offset = id.z * face_stride + (swizzled != 0u\n"
+"  uint offset = level_offset + id.z * face_stride + (swizzled != 0u\n"
 "      ? morton(id.x, id.y) * bpp : id.y * pitch + id.x * bpp);\n"
 "  uint v = read_texel(offset), r = 0, g = 0, b = 0, a = 255;\n"
 "  if (format == 0x0Bu) v = palette.Load(v * 4u);\n"
@@ -83,76 +84,149 @@ static unsigned texel_bytes(uint32_t format)
     }
 }
 
-static unsigned cube_texel_bytes(uint32_t format)
+static int checked_add(size_t a, size_t b, size_t *out)
 {
-    switch (format) {
-    case 0x00: case 0x01: case 0x0B: case 0x13: case 0x19: case 0x1F:
-        return 1;
-    case 0x02: case 0x03: case 0x04: case 0x05: case 0x10: case 0x11:
-    case 0x1C: case 0x1D:
-        return 2;
-    default:
-        return 4;
+    if (b > SIZE_MAX - a)
+        return 0;
+    *out = a + b;
+    return 1;
+}
+
+static int checked_mul(size_t a, size_t b, size_t *out)
+{
+    if (a && b > SIZE_MAX / a)
+        return 0;
+    *out = a * b;
+    return 1;
+}
+
+int gpu_texture_layout(const Nv2aTexture *t, int faces, int enable_mips,
+                       GpuTextureLayout *layout)
+{
+    GpuTextureSubresource levels[GPU_TEXTURE_MAX_LEVELS];
+    size_t total = 0, stride, span = 0;
+    uint32_t w, h, count, exposed, natural = 1, i, face, block;
+
+    if (!layout)
+        return 0;
+    memset(layout, 0, sizeof *layout);
+    if (!t || !t->width || !t->height || t->width > 4096 || t->height > 4096
+        || t->levels > GPU_TEXTURE_MAX_LEVELS || (faces != 1 && faces != 6)
+        || (faces == 6 && t->width != t->height
+            && (enable_mips || t->color == 0x0B)))
+        return 0;
+
+    block = d3d8_format_dxt_block_bytes(t->color);
+    layout->storage = block ? GPU_TEXTURE_BC
+                    : d3d8_format_is_swizzled(t->color) ? GPU_TEXTURE_SWIZZLED
+                    : GPU_TEXTURE_LINEAR;
+    if (layout->storage == GPU_TEXTURE_SWIZZLED
+        && ((t->width & (t->width - 1)) || (t->height & (t->height - 1)))) {
+        /* Retain legacy level-zero CPU decoding only where its Morton
+         * indices stay inside the old width*height source span. */
+        if (enable_mips || t->color == 0x0B
+            || swizzle_offset(t->width - 1, t->height - 1, t->width, t->height)
+               >= (size_t)t->width * t->height)
+            return 0;
     }
-}
-
-static int format_sized(uint32_t format)
-{
-    return d3d8_format_is_swizzled(format) || d3d8_format_dxt_block_bytes(format);
-}
-
-static size_t level_bytes(const Nv2aTexture *t)
-{
-    unsigned block = d3d8_format_dxt_block_bytes(t->color);
-    if (block)
-        return (size_t)((t->width + 3) / 4) * ((t->height + 3) / 4) * block;
-    if (d3d8_format_is_swizzled(t->color))
-        return (size_t)t->width * t->height * texel_bytes(t->color);
-    return (size_t)t->pitch * t->height;
+    if (layout->storage == GPU_TEXTURE_LINEAR && !t->pitch)
+        return 0;
+    layout->format = t->color;
+    layout->faces = (uint32_t)faces;
+    layout->declared_levels = t->levels;
+    layout->texel_bytes = texel_bytes(t->color);
+    layout->mips_enabled = enable_mips != 0;
+    w = t->width > t->height ? t->width : t->height;
+    while (w > 1) {
+        w >>= 1;
+        ++natural;
+    }
+    count = layout->storage == GPU_TEXTURE_LINEAR ? 1 : (t->levels ? t->levels : 1);
+    /* D3D cannot expose repeated 1x1 levels, but declared storage still
+     * determines the spacing of cube faces, including when falling back. */
+    exposed = enable_mips ? (count < natural ? count : natural) : 1;
+    layout->levels = exposed;
+    w = t->width;
+    h = t->height;
+    for (i = 0; i < count; ++i) {
+        size_t pitch, size, used;
+        if (layout->storage == GPU_TEXTURE_BC) {
+            if (!checked_mul(((size_t)w + 3) / 4, block, &pitch)
+                || !checked_mul(pitch, ((size_t)h + 3) / 4, &size))
+                return 0;
+        } else if (layout->storage == GPU_TEXTURE_SWIZZLED) {
+            if (!checked_mul(w, layout->texel_bytes, &pitch)
+                || !checked_mul(pitch, h, &size))
+                return 0;
+        } else {
+            size_t row_bytes;
+            pitch = t->pitch;
+            if (enable_mips && (t->color == 0x24 || t->color == 0x25)) {
+                if (!checked_mul(((size_t)w + 1) / 2, 4, &row_bytes))
+                    return 0;
+            } else if (!checked_mul(w, layout->texel_bytes, &row_bytes)) {
+                return 0;
+            }
+            if (!checked_mul(pitch, h, &size)
+                || !checked_mul(pitch, h - 1, &used)
+                || !checked_add(used, row_bytes, &used))
+                return 0;
+            if (used > size)
+                size = used;
+        }
+        levels[i].width = w;
+        levels[i].height = h;
+        levels[i].offset = total;
+        levels[i].size = size;
+        levels[i].row_pitch = pitch;
+        if (!checked_add(total, size, &total))
+            return 0;
+        w = w > 1 ? w / 2 : 1;
+        h = h > 1 ? h / 2 : 1;
+    }
+    stride = total;
+    if (faces == 6) {
+        /* Linear faces retain the legacy pitch*height spacing even when a
+         * short pitch makes a row overlap the next face. */
+        if (layout->storage == GPU_TEXTURE_LINEAR
+            && !checked_mul(t->pitch, t->height, &stride))
+            return 0;
+        if (!checked_add(stride, 127, &stride))
+            return 0;
+        stride &= ~(size_t)127;
+    }
+    layout->face_stride = stride;
+    for (face = 0; face < (uint32_t)faces; ++face) {
+        size_t face_offset;
+        if (!checked_mul(face, stride, &face_offset))
+            return 0;
+        for (i = 0; i < exposed; ++i) {
+            GpuTextureSubresource *sub = &layout->subresource[face][i];
+            size_t end;
+            *sub = levels[i];
+            if (!checked_add(face_offset, sub->offset, &sub->offset)
+                || !checked_add(sub->offset, sub->size, &end))
+                return 0;
+            if (end > span)
+                span = end;
+        }
+    }
+    if (!span || span > GPU_TEXTURE_MAX_SPAN)
+        return 0;
+    layout->span = span;
+    return 1;
 }
 
 size_t gpu_texture_face_stride(const Nv2aTexture *t)
 {
-    size_t total = 0;
-    uint32_t w, h, levels, i, block;
-    if (!t || !t->width || !t->height || t->levels > 15)
-        return 0;
-    if (!format_sized(t->color))
-        total = (size_t)t->pitch * t->height;
-    else {
-        w = t->width;
-        h = t->height;
-        levels = t->levels ? t->levels : 1;
-        block = d3d8_format_dxt_block_bytes(t->color);
-        for (i = 0; i < levels; ++i) {
-            total += block ? (size_t)((w + 3) / 4) * ((h + 3) / 4) * block
-                           : (size_t)w * h * cube_texel_bytes(t->color);
-            w = w > 1 ? w / 2 : 1;
-            h = h > 1 ? h / 2 : 1;
-        }
-    }
-    return (total + 127u) & ~(size_t)127;
+    GpuTextureLayout layout;
+    return gpu_texture_layout(t, 6, 0, &layout) ? layout.face_stride : 0;
 }
 
 size_t gpu_texture_span(const Nv2aTexture *t, int faces)
 {
-    size_t n, stride;
-    if (!t || !t->width || !t->height || (faces != 1 && faces != 6))
-        return 0;
-    n = level_bytes(t);
-    if (!format_sized(t->color) && t->pitch) {
-        size_t used = (size_t)(t->height - 1) * t->pitch
-                    + (size_t)t->width * texel_bytes(t->color);
-        if (used > n)
-            n = used;
-    }
-    if (faces == 6) {
-        stride = gpu_texture_face_stride(t);
-        if (!stride)
-            return 0;
-        n += stride * 5;
-    }
-    return n && n <= (64u << 20) ? n : 0;
+    GpuTextureLayout layout;
+    return gpu_texture_layout(t, faces, 0, &layout) ? layout.span : 0;
 }
 
 int gpu_texture_decode_supported(const Nv2aTexture *t)
@@ -176,56 +250,77 @@ int gpu_texture_decode_supported(const Nv2aTexture *t)
     return t->pitch != 0;
 }
 
-int gpu_texture_p8_indices_valid(const Nv2aTexture *t, int faces,
-                                 const void *bytes, unsigned palette_entries,
-                                 unsigned *invalid_index)
+static int p8_header_valid(const GpuTextureLayout *layout, const void *bytes,
+                           size_t byte_count, unsigned palette_entries)
 {
-    const uint8_t *src = (const uint8_t *)bytes;
-    size_t face_size, stride, i;
-    int face;
+    return layout && layout->format == 0x0B && layout->storage == GPU_TEXTURE_SWIZZLED
+        && layout->texel_bytes == 1 && bytes && layout->span <= byte_count
+        && (layout->faces == 1 || layout->faces == 6)
+        && layout->levels && layout->levels <= GPU_TEXTURE_MAX_LEVELS
+        && (palette_entries == 32 || palette_entries == 64
+            || palette_entries == 128 || palette_entries == 256);
+}
 
-    if (invalid_index)
-        *invalid_index = 256;
-    if (!t || t->color != 0x0B || !gpu_texture_decode_supported(t) || !bytes
-        || (faces != 1 && faces != 6) || (faces == 6 && t->width != t->height)
-        || (palette_entries != 32 && palette_entries != 64
-            && palette_entries != 128 && palette_entries != 256)
-        || !gpu_texture_span(t, faces))
+static int p8_subresource_valid(const GpuTextureLayout *layout, unsigned face, unsigned level,
+                                const uint8_t *src, unsigned entries, unsigned *invalid_index)
+{
+    const GpuTextureSubresource *sub = &layout->subresource[face][level];
+    size_t i;
+    if (!sub->width || !sub->height || sub->width > 4096 || sub->height > 4096
+        || (sub->width & (sub->width - 1)) || (sub->height & (sub->height - 1))
+        || sub->size != (size_t)sub->width * sub->height
+        || sub->offset > layout->span || sub->size > layout->span - sub->offset)
         return 0;
-    face_size = (size_t)t->width * t->height;
-    stride = faces == 6 ? gpu_texture_face_stride(t) : face_size;
-    for (face = 0; face < faces; ++face)
-        for (i = 0; i < face_size; ++i)
-            if (src[(size_t)face * stride + i] >= palette_entries) {
-                if (invalid_index)
-                    *invalid_index = src[(size_t)face * stride + i];
-                return 0;
-            }
+    for (i = 0; i < sub->size; ++i)
+        if (src[sub->offset + i] >= entries) {
+            if (invalid_index)
+                *invalid_index = src[sub->offset + i];
+            return 0;
+        }
     return 1;
 }
 
-int gpu_texture_decode_p8_cpu(const Nv2aTexture *t, int faces,
-                              const void *bytes, const void *palette,
-                              unsigned palette_entries, uint32_t *output)
+int gpu_texture_p8_indices_valid(const GpuTextureLayout *layout,
+                                 const void *bytes, size_t byte_count,
+                                 unsigned palette_entries,
+                                 unsigned *invalid_index)
+{
+    unsigned face, level;
+    if (invalid_index)
+        *invalid_index = 256;
+    if (!p8_header_valid(layout, bytes, byte_count, palette_entries))
+        return 0;
+    for (face = 0; face < layout->faces; ++face)
+        for (level = 0; level < layout->levels; ++level)
+            if (!p8_subresource_valid(layout, face, level, (const uint8_t *)bytes,
+                                      palette_entries, invalid_index))
+                return 0;
+    return 1;
+}
+
+int gpu_texture_decode_p8_cpu(const GpuTextureLayout *layout, unsigned face,
+                              unsigned level, const void *bytes, size_t byte_count,
+                              const void *palette, unsigned palette_entries,
+                              uint32_t *output, size_t output_texels)
 {
     const uint8_t *src = (const uint8_t *)bytes;
     const uint8_t *pal = (const uint8_t *)palette;
-    size_t stride, face_size;
+    const GpuTextureSubresource *sub;
     uint32_t x, y;
-    int face;
 
-    if (!palette || !output || !gpu_texture_p8_indices_valid(t, faces, bytes,
-                                                               palette_entries, NULL))
+    if (!p8_header_valid(layout, bytes, byte_count, palette_entries)
+        || face >= layout->faces || level >= layout->levels || !palette || !output
+        || !p8_subresource_valid(layout, face, level, src, palette_entries, NULL))
         return 0;
-    face_size = (size_t)t->width * t->height;
-    stride = faces == 6 ? gpu_texture_face_stride(t) : face_size;
-    for (face = 0; face < faces; ++face)
-        for (y = 0; y < t->height; ++y)
-            for (x = 0; x < t->width; ++x) {
-                size_t source = (size_t)face * stride + swizzle_offset(x, y, t->width, t->height);
-                size_t dest = (size_t)face * face_size + (size_t)y * t->width + x;
-                memcpy(&output[dest], pal + (size_t)src[source] * 4, 4);
-            }
+    sub = &layout->subresource[face][level];
+    if (output_texels < (size_t)sub->width * sub->height)
+        return 0;
+    for (y = 0; y < sub->height; ++y)
+        for (x = 0; x < sub->width; ++x) {
+            size_t source = sub->offset + swizzle_offset(x, y, sub->width, sub->height);
+            size_t dest = (size_t)y * sub->width + x;
+            memcpy(&output[dest], pal + (size_t)src[source] * 4, 4);
+        }
     return 1;
 }
 
@@ -260,7 +355,7 @@ static int init_decoder(GpuTextureDecoder *decoder, ID3D11Device *device)
         return 0;
     }
     memset(&desc, 0, sizeof desc);
-    desc.ByteWidth = 32;
+    desc.ByteWidth = 48;
     desc.Usage = D3D11_USAGE_DEFAULT;
     desc.BindFlags = D3D11_BIND_CONSTANT_BUFFER;
     hr = ID3D11Device_CreateBuffer(device, &desc, NULL, &decoder->constants);
@@ -300,33 +395,64 @@ static HRESULT raw_view(ID3D11Device *device, const void *bytes, UINT size,
     return ID3D11Device_CreateShaderResourceView(device, (ID3D11Resource *)*buffer, &sd, view);
 }
 
+static int matching_layout(const Nv2aTexture *t, const GpuTextureLayout *layout,
+                           size_t byte_count)
+{
+    GpuTextureLayout expected;
+    unsigned face, level;
+    if (!layout || layout->span > byte_count
+        || !gpu_texture_layout(t, (int)layout->faces, layout->mips_enabled, &expected)
+        || expected.storage != layout->storage || expected.format != layout->format
+        || expected.faces != layout->faces || expected.levels != layout->levels
+        || expected.declared_levels != layout->declared_levels
+        || expected.texel_bytes != layout->texel_bytes
+        || expected.face_stride != layout->face_stride || expected.span != layout->span)
+        return 0;
+    for (face = 0; face < layout->faces; ++face)
+        for (level = 0; level < layout->levels; ++level) {
+            const GpuTextureSubresource *a = &expected.subresource[face][level];
+            const GpuTextureSubresource *b = &layout->subresource[face][level];
+            if (a->width != b->width || a->height != b->height
+                || a->offset != b->offset || a->size != b->size
+                || a->row_pitch != b->row_pitch)
+                return 0;
+        }
+    return 1;
+}
+
 int gpu_texture_decode(GpuTextureDecoder *decoder, ID3D11Device *device,
                        ID3D11DeviceContext *context, const Nv2aTexture *t,
-                       int faces, const void *bytes, const void *palette,
-                       unsigned palette_entries, ID3D11Texture2D **output)
+                       const GpuTextureLayout *layout, const void *bytes,
+                       size_t byte_count, const void *palette, unsigned palette_entries,
+                       ID3D11Texture2D **output)
 {
     struct {
         uint32_t width, height, format, swizzled, bpp, pitch, face_stride, faces;
+        uint32_t level_offset, unused[3];
     } params;
     ID3D11Buffer *input = NULL, *pal_buffer = NULL;
     ID3D11ShaderResourceView *views[2] = {NULL, NULL}, *no_views[2] = {NULL, NULL};
-    ID3D11UnorderedAccessView *uav = NULL, *no_uav = NULL;
+    ID3D11UnorderedAccessView *uav[GPU_TEXTURE_MAX_LEVELS] = {NULL}, *no_uav = NULL;
     D3D11_TEXTURE2D_DESC td;
     D3D11_UNORDERED_ACCESS_VIEW_DESC ud;
-    size_t span = gpu_texture_span(t, faces), stride;
+    size_t span;
+    unsigned level;
     UINT padded;
     uint8_t *copy = NULL;
     HRESULT hr = E_FAIL;
 
+    if (!output)
+        return 0;
     *output = NULL;
-    if (!gpu_texture_decode_supported(t) || !bytes || !span
+    if (!decoder || !device || !context || !gpu_texture_decode_supported(t) || !bytes
+        || !matching_layout(t, layout, byte_count)
         || (t->color == 0x0B
-            && (!palette || !gpu_texture_p8_indices_valid(t, faces, bytes,
-                                                            palette_entries, NULL)))
-        || (faces == 6 && t->width != t->height)) {
+            && (!palette || !gpu_texture_p8_indices_valid(layout, bytes, byte_count,
+                                                           palette_entries, NULL)))) {
         fprintf(stderr, "[GPU-D3D11] invalid texture compute input\n");
         return 0;
     }
+    span = layout->span;
     if (!init_decoder(decoder, device))
         return 0;
     padded = (UINT)((span + 3) & ~(size_t)3);
@@ -351,43 +477,53 @@ int gpu_texture_decode(GpuTextureDecoder *decoder, ID3D11Device *device,
     memset(&td, 0, sizeof td);
     td.Width = t->width;
     td.Height = t->height;
-    td.MipLevels = 1;
-    td.ArraySize = (UINT)faces;
+    td.MipLevels = layout->levels;
+    td.ArraySize = layout->faces;
     td.Format = DXGI_FORMAT_R8G8B8A8_UNORM;
     td.SampleDesc.Count = 1;
     td.Usage = D3D11_USAGE_DEFAULT;
     td.BindFlags = D3D11_BIND_SHADER_RESOURCE | D3D11_BIND_UNORDERED_ACCESS;
-    td.MiscFlags = faces == 6 ? D3D11_RESOURCE_MISC_TEXTURECUBE : 0;
+    td.MiscFlags = layout->faces == 6 ? D3D11_RESOURCE_MISC_TEXTURECUBE : 0;
     hr = ID3D11Device_CreateTexture2D(device, &td, NULL, output);
     if (FAILED(hr))
         goto failed;
     memset(&ud, 0, sizeof ud);
     ud.Format = td.Format;
     ud.ViewDimension = D3D11_UAV_DIMENSION_TEXTURE2DARRAY;
-    ud.Texture2DArray.ArraySize = (UINT)faces;
-    hr = ID3D11Device_CreateUnorderedAccessView(device, (ID3D11Resource *)*output, &ud, &uav);
-    if (FAILED(hr))
-        goto failed;
-    stride = faces == 6 ? gpu_texture_face_stride(t) : 0;
-    params.width = t->width;
-    params.height = t->height;
+    ud.Texture2DArray.ArraySize = layout->faces;
+    for (level = 0; level < layout->levels; ++level) {
+        ud.Texture2DArray.MipSlice = level;
+        hr = ID3D11Device_CreateUnorderedAccessView(device, (ID3D11Resource *)*output,
+                                                    &ud, &uav[level]);
+        if (FAILED(hr))
+            goto failed;
+    }
+    memset(&params, 0, sizeof params);
     params.format = t->color;
     params.swizzled = d3d8_format_is_swizzled(t->color) ? 1u : 0u;
-    params.bpp = texel_bytes(t->color);
-    params.pitch = t->pitch;
-    params.face_stride = (uint32_t)stride;
-    params.faces = (uint32_t)faces;
-    ID3D11DeviceContext_UpdateSubresource(context, (ID3D11Resource *)decoder->constants,
-                                         0, NULL, &params, 0, 0);
+    params.bpp = layout->texel_bytes;
+    params.face_stride = layout->faces == 6 ? (uint32_t)layout->face_stride : 0;
+    params.faces = layout->faces;
     ID3D11DeviceContext_CSSetShader(context, decoder->shader, NULL, 0);
     ID3D11DeviceContext_CSSetConstantBuffers(context, 0, 1, &decoder->constants);
     ID3D11DeviceContext_CSSetShaderResources(context, 0, 2, views);
-    ID3D11DeviceContext_CSSetUnorderedAccessViews(context, 0, 1, &uav, NULL);
-    ID3D11DeviceContext_Dispatch(context, (t->width + 7) / 8, (t->height + 7) / 8, (UINT)faces);
-    ID3D11DeviceContext_CSSetUnorderedAccessViews(context, 0, 1, &no_uav, NULL);
+    for (level = 0; level < layout->levels; ++level) {
+        const GpuTextureSubresource *sub = &layout->subresource[0][level];
+        params.width = sub->width;
+        params.height = sub->height;
+        params.pitch = (uint32_t)sub->row_pitch;
+        params.level_offset = (uint32_t)sub->offset;
+        ID3D11DeviceContext_UpdateSubresource(context, (ID3D11Resource *)decoder->constants,
+                                             0, NULL, &params, 0, 0);
+        ID3D11DeviceContext_CSSetUnorderedAccessViews(context, 0, 1, &uav[level], NULL);
+        ID3D11DeviceContext_Dispatch(context, (sub->width + 7) / 8,
+                                     (sub->height + 7) / 8, layout->faces);
+        ID3D11DeviceContext_CSSetUnorderedAccessViews(context, 0, 1, &no_uav, NULL);
+    }
     ID3D11DeviceContext_CSSetShaderResources(context, 0, 2, no_views);
     ID3D11DeviceContext_CSSetShader(context, NULL, NULL, 0);
-    ID3D11UnorderedAccessView_Release(uav);
+    for (level = 0; level < layout->levels; ++level)
+        ID3D11UnorderedAccessView_Release(uav[level]);
     if (views[1]) ID3D11ShaderResourceView_Release(views[1]);
     ID3D11ShaderResourceView_Release(views[0]);
     if (pal_buffer) ID3D11Buffer_Release(pal_buffer);
@@ -398,7 +534,8 @@ failed:
     gpu_d3d11_check_device(device, hr, "creating texture compute resources");
     fprintf(stderr, "[GPU-D3D11] texture compute resource creation failed 0x%08lX\n",
             (unsigned long)hr);
-    if (uav) ID3D11UnorderedAccessView_Release(uav);
+    for (level = 0; level < GPU_TEXTURE_MAX_LEVELS; ++level)
+        if (uav[level]) ID3D11UnorderedAccessView_Release(uav[level]);
     if (*output) ID3D11Texture2D_Release(*output);
     *output = NULL;
     if (views[1]) ID3D11ShaderResourceView_Release(views[1]);

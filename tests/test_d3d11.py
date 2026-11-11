@@ -623,7 +623,194 @@ def test_gpu_texture_decode_matches_cpu(device, tmp_path):
     )
     assert result.returncode == 0, result.stderr
     assert "texture cases 140" in result.stdout
+    assert "mip compute cases 40" in result.stdout
     assert "short P8 cube cases 4" in result.stdout
+
+
+@pytest.mark.parametrize("device", [
+    "warp",
+    pytest.param("hardware", marks=pytest.mark.skipif(
+        not HARDWARE, reason="set BRUTEFORCE_TEST_D3D11_HARDWARE=1 for a hardware device")),
+])
+@pytest.mark.parametrize("decode", ["0", "1"])
+@pytest.mark.parametrize(("mips", "aniso", "approximate"), [
+    ("0", "0", "0"), ("0", "1", "0"),
+    ("1", "0", "0"), ("1", "1", "0"), ("1", "1", "1"),
+])
+def test_mip_layout_uploads_cache_and_guards(tmp_path, device, decode, mips, aniso, approximate):
+    result = render_compatibility_fixture(
+        f"mipmaps-{device}", tmp_path / "unused.raw",
+        RECOMP_GPU_MIPS=mips, RECOMP_GPU_ANISO=aniso,
+        RECOMP_GPU_TEX_DECODE=decode, RECOMP_GPU_TEX_CACHE_APPROX=approximate,
+    )
+    assert result.returncode == 0, result.stderr
+    for message in ("mip layout cases passed", "mip sampler cases passed",
+                    "mip sampler cache cases passed", "mip uploads and cache cases passed",
+                    "guarded mip fallback cases passed"):
+        assert message in result.stdout
+    if mips == "1":
+        assert "guarded odd-width YUV cases passed" in result.stdout
+        assert "falling back to level 0" in result.stderr
+        for warning in ("unknown minification filter", "unknown magnification filter",
+                        "convolution approximated by linear filtering",
+                        "LOD bias clamped to the D3D11 limit",
+                        "inverted LOD clamps collapsed to the maximum"):
+            assert warning in result.stderr
+    if mips == "0" and aniso == "1":
+        assert "inactive without RECOMP_GPU_MIPS=1" in result.stderr
+    if mips == "1" and approximate == "1":
+        assert "mipped textures use exact snapshots" in result.stderr
+
+
+def test_mipmaps_default_off_and_anisotropy_alone_preserve_output(tmp_path):
+    images = []
+    for label, options in (("default", {}), ("off", {"RECOMP_GPU_MIPS": "0"}),
+                           ("aniso", {"RECOMP_GPU_ANISO": "1"})):
+        output = tmp_path / f"{label}.raw"
+        result = render_compatibility_fixture("gpu-mip-scene-warp", output, **options)
+        assert result.returncode == 0, result.stderr
+        if label == "aniso":
+            assert "inactive without RECOMP_GPU_MIPS=1" in result.stderr
+        images.append(output.read_bytes())
+    assert images[0] == images[1] == images[2]
+
+
+@pytest.mark.parametrize("device", [
+    "warp",
+    pytest.param("hardware", marks=pytest.mark.skipif(
+        not HARDWARE, reason="set BRUTEFORCE_TEST_D3D11_HARDWARE=1 for a hardware device")),
+])
+@pytest.mark.parametrize("decoder", ["compute", "software-texture"])
+@pytest.mark.parametrize(("mips", "approximate"), [("0", "0"), ("1", "0"), ("1", "1")])
+def test_sampled_mips_filters_clamps_bias_and_rewrites(tmp_path, device, decoder, mips, approximate):
+    output = tmp_path / "mip-scene.raw"
+    result = render_compatibility_fixture(
+        f"gpu-mip-scene-{decoder}-{device}", output,
+        RECOMP_GPU_MIPS=mips, RECOMP_GPU_TEX_CACHE_APPROX=approximate,
+    )
+    assert result.returncode == 0, result.stderr
+    assert "mipmap scene drawn" in result.stdout
+    if mips == "1":
+        assert "render-target alias is level 0 only" in result.stderr
+    image = output.read_bytes()
+    assert len(image) == SIZE * SIZE * 4
+    red, green, blue, yellow, cyan = (
+        (255, 0, 0, 255), (0, 255, 0, 255), (0, 0, 255, 255),
+        (255, 255, 0, 255), (0, 255, 255, 255),
+    )
+    top = ([red] * 9 if mips == "0" else
+           [blue, red, green, yellow, yellow, (128, 128, 128, 255),
+            cyan, green, (128, 255, 128, 255)])
+    samples = [(2 + 7 * i + 2, 3, color) for i, color in enumerate(top)]
+    samples += [
+        (4, 11, red if mips == "0" else green),  # signed negative bias
+        (4, 24, (128, 128, 0, 255) if mips == "0" else green),
+        (16, 24, (128, 128, 0, 255)),
+        (30, 20, red if mips == "0" else yellow),
+        (37, 20, red if mips == "0" else (128, 255, 128, 255)),
+        (4, 35, red if mips == "0" else green),
+        (11, 35, red if mips == "0" else yellow),
+        (18, 35, (153, 51, 204, 255)),
+    ]
+    for x, y, expected in samples:
+        actual = fixture_pixel(image, x, y)
+        assert max(abs(a - b) for a, b in zip(actual, expected)) <= 2, (x, y, actual, expected)
+
+
+@pytest.mark.parametrize("device", [
+    "warp",
+    pytest.param("hardware", marks=pytest.mark.skipif(
+        not HARDWARE, reason="set BRUTEFORCE_TEST_D3D11_HARDWARE=1 for a hardware device")),
+])
+@pytest.mark.parametrize("decoder", ["compute", "software-texture"])
+@pytest.mark.parametrize("mips", ["0", "1"])
+def test_sampled_cube_mips_and_last_face_rewrite(tmp_path, device, decoder, mips):
+    output = tmp_path / "mip-cube.raw"
+    result = render_compatibility_fixture(
+        f"gpu-mip-cube-{decoder}-{device}", output, RECOMP_GPU_MIPS=mips,
+    )
+    assert result.returncode == 0, result.stderr
+    assert "mipmap cube scene drawn" in result.stdout
+    image = output.read_bytes()
+    assert len(image) == SIZE * SIZE * 4
+    expected = ([(255, 0, 0, 255), (0, 255, 0, 255), (0, 0, 255, 255),
+                 (255, 255, 0, 255), (255, 0, 255, 255), (0, 255, 255, 255),
+                 (0, 255, 255, 255)] if mips == "0" else
+                [((i + 1) * 20, (i + 1) * 15, 180, 255) for i in range(6)] +
+                [(255, 255, 255, 255)])
+    for i, color in enumerate(expected):
+        actual = fixture_pixel(image, 4 + 8 * i, 13)
+        assert max(abs(a - b) for a, b in zip(actual, color)) <= 2, (i, actual, color)
+
+
+@pytest.mark.parametrize("device", [
+    "warp",
+    pytest.param("hardware", marks=pytest.mark.skipif(
+        not HARDWARE, reason="set BRUTEFORCE_TEST_D3D11_HARDWARE=1 for a hardware device")),
+])
+@pytest.mark.parametrize("decoder", ["compute", "software-texture"])
+@pytest.mark.parametrize("mips", ["0", "1"])
+def test_mip_selection_tracks_physical_render_scale(tmp_path, device, decoder, mips):
+    output = tmp_path / "scaled-mip.raw"
+    result = render_compatibility_fixture(
+        f"gpu-mip-scene-{decoder}-scale2-{device}", output, RECOMP_GPU_MIPS=mips,
+    )
+    assert result.returncode == 0, result.stderr
+    image = output.read_bytes()
+    assert len(image) == SIZE * SIZE * 4
+    red, green, blue, yellow = ((255, 0, 0, 255), (0, 255, 0, 255),
+                                (0, 0, 255, 255), (255, 255, 0, 255))
+    expected = ([red] * 9 if mips == "0" else
+                [green, red, green, yellow, blue, (0, 128, 128, 255),
+                 green, green, (128, 255, 128, 255)])
+    for i, color in enumerate(expected):
+        actual = fixture_pixel(image, 4 + 7 * i, 3)
+        assert max(abs(a - b) for a, b in zip(actual, color)) <= 2, (i, actual, color)
+
+
+@pytest.mark.parametrize("device", [
+    "warp",
+    pytest.param("hardware", marks=pytest.mark.skipif(
+        not HARDWARE, reason="set BRUTEFORCE_TEST_D3D11_HARDWARE=1 for a hardware device")),
+])
+@pytest.mark.parametrize("alias", ["depth", "stencil"])
+def test_mipmaps_preserve_existing_surface_alias_behavior(tmp_path, device, alias):
+    images = []
+    for mips in ("0", "1"):
+        output = tmp_path / f"{alias}-{mips}.raw"
+        probe = "-mip-probe" if alias == "stencil" else ""
+        result = render_compatibility_fixture(
+            f"gpu-{alias}{probe}-{device}", output, RECOMP_GPU_MIPS=mips,
+        )
+        assert result.returncode == 0, result.stderr
+        if mips == "1":
+            assert f"multi-level {alias} alias unsupported; texture rejected" in result.stderr
+        images.append(output.read_bytes())
+    assert images[0] == images[1]
+
+
+@pytest.mark.parametrize("mips", ["0", "1"])
+@pytest.mark.parametrize("decode", ["0", "1"])
+def test_invalid_p8_index_in_final_cube_mip(tmp_path, mips, decode):
+    result = render_compatibility_fixture(
+        "mip-p8-invalid-warp", tmp_path / "unused.raw",
+        RECOMP_GPU_MIPS=mips, RECOMP_GPU_TEX_DECODE=decode,
+    )
+    if mips == "0":
+        assert result.returncode == 0, result.stderr
+        assert "P8 level zero remained valid" in result.stdout
+    else:
+        assert result.returncode != 0
+        assert "P8 index 32 exceeds 32-entry palette at stage 0" in result.stderr
+
+
+@pytest.mark.parametrize("option", ["RECOMP_GPU_MIPS", "RECOMP_GPU_ANISO"])
+def test_invalid_mip_options_are_rejected(tmp_path, option):
+    result = render_compatibility_fixture(
+        "mipmaps-warp", tmp_path / "unused.raw", **{option: "invalid"},
+    )
+    assert result.returncode != 0
+    assert f"{option} must be 0 or 1" in result.stderr
 
 
 @pytest.mark.parametrize("device", [

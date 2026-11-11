@@ -385,7 +385,34 @@ transient copies and GPU resources. One instrumented reviewed campaign
 measured exact comparison at 0.832 ms/flip over fully contained periodic
 intervals; this is diagnostic overhead in one scene, not a general cost
 bound. `RECOMP_GPU_TEX_CACHE_APPROX=1` restores the old approximate checks
-for diagnostics, but can leave rewritten textures stale.
+for diagnostics, but can leave rewritten textures stale. Nonlinear
+multi-level declarations always use exact snapshots, including when a short
+chain falls back to level zero, even when that option is enabled.
+
+Guest mipmaps and anisotropy are separate experimental D3D11 switches; both
+accept only `0` or `1` and default to `0`. They are environment options, not
+launcher settings:
+
+```powershell
+$env:RECOMP_GPU_MIPS = "1"      # upload and sample supported guest mip chains
+$env:RECOMP_GPU_ANISO = "1"     # optional 8x enhancement for eligible mipped samplers
+python tools\build.py run --experimental-tutorial
+Remove-Item Env:\RECOMP_GPU_MIPS, Env:\RECOMP_GPU_ANISO
+```
+
+`RECOMP_GPU_ANISO=1` alone is inactive and reports why. With mips off,
+D3D11 and the unchanged CPU reference continue to sample level zero.
+With mips on, supplied swizzled, P8 and BC 2D/cube chains are sampled using
+the programmed min/mag/mip filters, LOD clamps and bias. This intentionally
+can differ from the CPU reference. No missing levels are generated; linear
+textures and render-target aliases remain at level zero. Depth/stencil
+aliases reject multi-level declarations.
+Unreadable or known-short chains may fall back to level zero if that is safe,
+otherwise they are rejected. `[GPU-MIPS]` reports these fallbacks and
+approximated or unknown filters; `RECOMP_GPU_TEXLOG=1` reports declared
+`levels` and the number `uploaded`. LOD interpretation, title behavior,
+matched xemu images, VRAM and performance remain unverified, so these
+options are not recommended as defaults.
 
 `BRUTEFORCE_PERF_COUNTERS=1` enables detailed title and D3D11 performance
 diagnostics. Approximately every ten seconds, the normal D3D11 statistics

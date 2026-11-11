@@ -69,7 +69,7 @@ and [packed-alias investigation](./FINDINGS.md#packed-depthstencil-aliases-and-s
 | Extended backend interface and vertex-program batches | [patch 0016](../patches/xboxrecomp/0016-extended-render-backend.patch), [patch 0017](../patches/xboxrecomp/0017-gpu-vertex-programs.patch) |
 | D3D11 device, surfaces, state, draws, queries and readback | [d3d11_backend.c](../src/gpu/d3d11_backend.c) |
 | Render-scale authority and GPU seed/readback/final resolves | [render_scale.c](../src/gpu/render_scale.c), [render_scale.h](../src/gpu/render_scale.h) |
-| Texture layout and decode | [texture_decode.c](../src/gpu/texture_decode.c), [d3d11_backend.c](../src/gpu/d3d11_backend.c) |
+| Texture layout, decode and sampling | [texture_decode.c](../src/gpu/texture_decode.c), [texture_sampler.c](../src/gpu/texture_sampler.c), [d3d11_backend.c](../src/gpu/d3d11_backend.c) |
 | Generated vertex and combiner shaders | [vsh_hlsl.c](../src/gpu/vsh_hlsl.c), [rc_hlsl.c](../src/gpu/rc_hlsl.c), [shader_cache.c](../src/gpu/shader_cache.c) |
 | Null renderer and surface-read probe | [null_backend.c](../src/gpu/null_backend.c) |
 | Frame handoff and optional shared presentation | [upstream snapshot synchronization](https://github.com/sp00nznet/xboxrecomp/pull/300), [patch 0024](../patches/xboxrecomp/0024-gpu-shared-presentation.patch), [patch 0028](../patches/xboxrecomp/0028-scaled-gpu-presentation.patch) |
@@ -266,8 +266,8 @@ linear, swizzled, paletted and compressed layouts within their supported
 formats. Eligible DXT blocks are uploaded as BC textures, eligible linear
 32-bit colour data can be uploaded directly, and common formats use compute
 decoding. A CPU decode path remains available as a fallback and for
-comparison. The renderer samples level 0; cube-face spacing accounts for
-the guest's mip layout, but this is not general mip-level sampling.
+comparison. By default the renderer exposes level 0 only, while retaining
+the guest's declared mip padding for cube-face spacing.
 
 Render-target and enabled depth/stencil aliases are checked before the
 ordinary texture cache. For ordinary successful textures, the default cache
@@ -275,7 +275,9 @@ compares retained source bytes and, for P8, palette bytes on each use.
 Retained snapshots have a 128 MiB budget; transient copies, decoded buffers
 and GPU resources are outside that budget. Evicted snapshots require another
 upload. The approximate cache is opt-in and can miss same-frame or sparse
-rewrites, leaving stale textures.
+rewrites, leaving stale textures. Exposed mip chains always use exact
+snapshots even when approximate caching is requested; declared and uploaded
+level counts participate in their cache identity.
 
 P8 binds check page readability and remaining size of known allocations for
 the source and programmed 32-, 64-, 128- or 256-entry palette; sampled
@@ -284,6 +286,53 @@ diagnostic rather than guessing hardware behavior. Exact render-target
 aliases bypass the ordinary path. Page queries and snapshots cannot prevent
 concurrent guest writes or protection changes from racing subsequent reads;
 untracked suballocation boundaries are also not established.
+
+#### Experimental mipmaps and anisotropy
+
+`RECOMP_GPU_MIPS=1` enables the separately validated mip path; `0` or unset
+retains the previous level-zero sampler. It constructs checked 2D or six-face
+layouts for swizzled, P8 and BC data, with each mip at its guest offset.
+D3D11 can expose no more levels than the natural chain through 1x1; declared
+extra 1x1 storage still determines the 128-byte-aligned cube-face stride.
+This spacing is a compatibility assumption, not proven for malformed
+declarations on NV2A hardware. The checked span includes the complete last
+exposed face and level, including face gaps. Dimensions, arithmetic and a
+64 MiB source-span limit are checked before copying. The opt-in path checks
+readability and the remaining size of tracked allocations on each bind; it
+falls back to level zero only if that layout is readable and the cube stride
+remains compatible, otherwise it rejects the texture. P8 validates every
+exposed index against the programmed, separately checked palette range.
+Nonlinear multi-level declarations use exact cache snapshots even if an
+incomplete chain falls back to level zero and approximate caching is enabled.
+Malformed non-power-of-two swizzles are rejected on the mip path. With mips
+off, the legacy CPU decode remains available only when its Morton indices
+stay within the old level-zero source span; unsafe declarations are rejected.
+
+Linear and packed-YUV textures and render-target aliases expose only level
+zero. Depth/stencil aliases support only single-level declarations and
+reject multi-level ones; none has generated mipmaps. On opt-in, packed
+YUV bounds include a complete pair even for odd widths. GPU-compute, direct
+BC and per-level CPU-decoded uploads create all exposed D3D subresources and
+the matching 2D/cube SRV. Failure or approximation paths report bounded
+`[GPU-MIPS]` or `[GPU-D3D11]` diagnostics.
+
+The sampler maps minification, magnification and mip filtering separately.
+Non-mip minification remains at level zero; unknown filters use point and
+convolution filters approximate linear, with diagnostics. For mip filters,
+the implementation interprets CONTROL0's 12-bit min/max fields as unsigned
+4.8 values, bounds them to exposed levels and collapses inverted ranges to
+the maximum. The filter's signed 13-bit bias is divided by 256 and clipped
+to D3D11's representable positive limit. This 4.8 interpretation follows
+NV30 driver evidence, but differs from xemu v0.8.139's raw-integer clamp
+handling and is not yet validated against NV2A hardware. See
+[FINDINGS](./FINDINGS.md#experimental-mipmap-sampling-synthetic-evidence-2026-11-11).
+
+`RECOMP_GPU_ANISO=1` is a separate, default-off 8x enhancement, active only
+when mips are enabled and both spatial filters are linear with a usable mip
+range. D3D11 anisotropy can also change the underlying mip filtering. Full
+effective sampler descriptors, including LOD clamps and bias, key the sampler
+cache. The CPU reference still samples level zero, so enabled mips and
+anisotropy are intentional image differences, not proof of G4 equivalence.
 
 Deterministically unsupported non-P8 CPU decodes, when no GPU decode was
 attempted, receive bounded negative cache entries. Retryable upload failures
@@ -347,7 +396,9 @@ point use.
 stages and register-combiner configuration, including up to eight general
 combiner stages and the final combiner. It follows the current CPU
 implementation, including known gaps: bump-environment and dot-product
-stage modes read zero, and only texture level 0 is sampled. Colours and fog
+stage modes read zero. Texture sampling is level zero by default; the
+experimental mip path above lets the D3D11 sampler select exposed levels.
+Colours and fog
 are interpolated affinely while texture coordinates are perspective-correct.
 The backend caches shader and D3D11 state objects.
 
@@ -440,6 +491,7 @@ setting-to-environment mapping.
 | Renderer | D3D11 hardware | The launcher and graphical `build.py` runs select D3D11 unless `RECOMP_GPU` explicitly selects `cpu` or `null`. CPU remains the correctness reference; `null` is a probe, not a renderer. `RECOMP_D3D11_WARP=1` selects the D3D11 software device. |
 | Internal resolution | 480p guest (`RECOMP_GPU_SCALE=1`) | Native, 2160p, 1440p, 1080p and 720p are available for D3D11. The CPU renderer remains at guest resolution. |
 | Vertex programs / texture decoding | GPU / GPU where supported | CPU fallbacks remain; `RECOMP_GPU_VSH=0` and `RECOMP_GPU_TEX_DECODE=0` are comparison switches. |
+| Guest mipmaps / anisotropy | Off / off | `RECOMP_GPU_MIPS=1` exposes supported supplied chains; `RECOMP_GPU_ANISO=1` separately enhances eligible mipped samplers. |
 | Visibility | Synchronous | `RECOMP_GPU_ZPASS=async` is opt-in. |
 | Persistent pixel-shader cache | Off | `RECOMP_GPU_PSCACHE=1` enables the combiner cache. |
 | Window clip / near plane | Off / HUD-safe | HUD-safe retains non-additive UI and clips zero-depth additive draws. Legacy/inherit and full screen-zero remain comparison modes. Face culling is off unless separately enabled. |
@@ -473,7 +525,9 @@ settings and the scene controlled. Full setup and options are in the
 - [test_d3d11.py](../tests/test_d3d11.py) covers synthetic renderer parity,
   texture rewrites and failures, P8, clear rectangles, aliases, shaders,
   visibility, scale-two readback, render-to-texture and physical clear/clip
-  mapping. [test_present.py](../tests/test_present.py) and
+  mapping. It also checks mip layout, sampled filters and clamps, 2D/cube
+  rewrites and guarded lower levels on WARP and hardware.
+  [test_present.py](../tests/test_present.py) and
   [test_frame_stats.py](../tests/test_frame_stats.py) cover handoff,
   presentation and frame accounting. Fence and pushbuffer fixtures cover
   parts of the guest synchronization contract.
@@ -515,10 +569,10 @@ replace matched gameplay or original-hardware validation.
   established. Blood Wake's newer recovery worker is prior art, but it does
   not by itself define how Brute Force should settle pending PFB flush,
   semaphore, report, flip, shared-present, and guest-readback work.
-- Fixed and native resolution controls have synthetic WARP coverage, not a
-  matched retail gameplay campaign. Performance, VRAM headroom, mip/LOD
-  behavior, 4K display output and hardware-D3D11 scaled rendering remain
-  unvalidated. The launcher therefore keeps 480p as its default.
+- Fixed and native resolution controls and mip sampling have synthetic
+  coverage, not a matched retail gameplay campaign. Performance, VRAM
+  headroom, title mip/LOD behavior, 4K display output and hardware-D3D11
+  scaled gameplay remain unvalidated. The launcher keeps 480p as its default.
 
 Keep disc content, generated game code, screenshots, runtime captures and
 logs local. Use synthetic fixtures for shareable reproduction. Current

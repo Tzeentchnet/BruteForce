@@ -343,7 +343,7 @@ Done before writing renderer code. All evidence stays local.
    moves ahead of the renderer.
 
 6. **Cheap upstream candidates.** Measure the open upstream PRs listed in
-   [UPSTREAM.md](./UPSTREAM.md#open-upstream-work-to-evaluate-for-selection)
+   [UPSTREAM.md](./UPSTREAM.md#open-upstream-work-to-select-or-coordinate-with)
    with the harness:
    - [#273](https://github.com/sp00nznet/xboxrecomp/pull/273), for walk
      cost on either renderer;
@@ -568,9 +568,9 @@ texture. The launcher exposes Native, 2160p, 1440p, 1080p, 720p and the
 unchanged 480p default. Scaled experimental depth/stencil aliases are
 explicitly rejected.
 
-This is not evidence that the performance gates hold. The complete D3D11
-matrix passes 190 hardware cases and 123 WARP cases with 67 hardware cases
-skipped, including CPU-written frames before scaled presentation. Bounded
+This is not evidence that the performance gates hold. The synthetic D3D11
+matrix passes 293 cases with WARP and hardware enabled, including CPU-written
+frames before scaled presentation and the mipmap fixtures below. Bounded
 4.5x retail probes show the Microsoft, Digital Anvil and intro movies, but a
 matched retail gameplay campaign, VRAM headroom, mip/LOD behavior and a native
 4K display remain untested. G4 comparisons continue at scale 1. G5 requires
@@ -578,10 +578,19 @@ the controlled 1080p/4K A/B/A campaign in
 [NEXTSTEPS.md](./NEXTSTEPS.md), and the reported default-settings movement
 regression remains a separate blocker.
 
+NEXTSTEPS B10 now has a default-off mip/anisotropy implementation with
+synthetic WARP and hardware coverage, not a performance result. The CPU
+reference remains level zero; keep both options off for existing G4 baselines
+and list their intentional sampling differences in separate enabled-mode
+comparisons. The title's mip supply, xemu-matched frames, 4K VRAM cost and
+G5 remain open. Measure any performance change with at least A/B/A runs on
+the same generation, scene, scripted input, thread count and options, and
+report distinct world frames separately from flips.
+
 ## True-widescreen correctness workstream
 
 Widescreen is now an active investigation in
-[NEXTSTEPS E](./NEXTSTEPS.md#e-true-hor-widescreen-investigation-complete-implementation-pending),
+[NEXTSTEPS E](./NEXTSTEPS.md#e-true-hor-widescreen-camera-diagnostic-implemented-mode-pending),
 but it is not a performance phase. Success means genuine Hor+ geometry with
 matching title culling, protected 2D and movies, centred guest readback and
 aspect-aware presentation. A wider framebuffer by itself fails that gate.
@@ -612,9 +621,9 @@ semaphore, report or flip synchronization.
   submitted fences complete before their inputs are consumed. FINDINGS
   explains why these are invalid.
 - Direct3D 12, which is deferred.
-- Mipmaps are wanted for the 4K target (NEXTSTEPS B10) and are no longer
-  deferred for scaled modes; other LOD-transition work stays deferred.
-  Preserve existing behavior at scale 1.
+- Mipmaps are an opt-in correctness experiment for the 4K target (NEXTSTEPS
+  B10), not an established performance win; other LOD-transition
+  enhancements stay deferred. Preserve the default scale-1 reference.
 - MSAA and frame interpolation remain deferred. True widescreen is now a
   separate correctness workstream, not a performance optimization. The
   Phase 1–3 architecture makes all three possible, but none may be justified

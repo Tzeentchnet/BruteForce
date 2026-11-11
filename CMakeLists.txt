@@ -36,7 +36,8 @@ target_link_libraries(xbox_apu PUBLIC recomp_xemu_dsp)
 
 file(GLOB RECOMP_SOURCES CONFIGURE_DEPENDS "${BRUTEFORCE_GEN_DIR}/*.c")
 set(BRUTEFORCE_GPU_SOURCES src/gpu/d3d11_backend.c src/gpu/render_scale.c src/gpu/rc_hlsl.c
-    src/gpu/shader_cache.c src/gpu/vsh_hlsl.c src/gpu/texture_decode.c)
+    src/gpu/shader_cache.c src/gpu/vsh_hlsl.c src/gpu/texture_decode.c
+    src/gpu/texture_sampler.c)
 add_executable(bruteforce src/main.c src/recomp_manual.c src/crash_diagnostics.c
     src/perf_counters.c src/profile.c src/gpu/null_backend.c
     ${BRUTEFORCE_GPU_SOURCES} ${RECOMP_SOURCES})
@@ -188,7 +189,7 @@ target_include_directories(bruteforce_gpu_audit_test PRIVATE
 target_link_libraries(bruteforce_gpu_audit_test PRIVATE xboxrecomp)
 
 add_executable(bruteforce_d3d11_test EXCLUDE_FROM_ALL tests/d3d11_test.c
-    tests/d3d11_texture_test.c tests/shader_cache_test.c src/perf_counters.c
+    tests/d3d11_texture_test.c tests/d3d11_mip_test.c tests/shader_cache_test.c src/perf_counters.c
     src/gpu/null_backend.c ${BRUTEFORCE_GPU_SOURCES})
 target_compile_definitions(bruteforce_d3d11_test PRIVATE
     WIN32_LEAN_AND_MEAN NOMINMAX _CRT_SECURE_NO_WARNINGS BRUTEFORCE_D3D11_TESTING)

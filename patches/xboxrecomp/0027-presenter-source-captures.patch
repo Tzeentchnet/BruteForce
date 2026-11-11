@@ -2225,7 +2225,7 @@ index 0000000..71f1ff8
 +    D3D11_MAPPED_SUBRESOURCE mapped;
 +    GpuPresentTrace trace;
 +    HANDLE handle = NULL;
-+    uint32_t source[64], cpu[64], x, y;
++    uint32_t source[64], cpu[64], x, y, width = 0, height = 0;
 +    int held;
 +    HRESULT hr;
 +
@@ -2272,8 +2272,8 @@ index 0000000..71f1ff8
 +
 +    /* With capture off, the same protocol still selects the shared texture. */
 +    REQUIRE(gpu_present_submit_shared(handle, 8, 8, 43));
-+    view = take_shared(1, 43, &held);
-+    REQUIRE(view && held);
++    view = take_shared(1, 43, &held, &width, &height);
++    REQUIRE(view && held && width == 8 && height == 8);
 +    memset(&td, 0, sizeof td);
 +    td.Width = td.Height = 8;
 +    td.MipLevels = td.ArraySize = 1;

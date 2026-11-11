@@ -2601,6 +2601,418 @@ static int test_scale_query(void)
     return 1;
 }
 
+static int test_pipeline_clean(const char *path)
+{
+    uint32_t color = xbox_ContiguousAlloc(B_SIZE * B_SIZE * 4, 4096);
+    BruteforceD3D11PipelineStats stats;
+    FILE *f = fopen(path, "wb");
+    int elide = getenv("RECOMP_GPU_SKIP_CLEAN_READBACK") &&
+                strcmp(getenv("RECOMP_GPU_SKIP_CLEAN_READBACK"), "1") == 0 &&
+                !getenv("RECOMP_FRAME_STATS") && !getenv("RECOMP_FB_DUMP") &&
+                !getenv("RECOMP_FB_DUMP_FLIPS") && !getenv("RECOMP_PRESENTER_CAPTURE");
+
+    REQUIRE(color && f, "initialize clean readback fixture");
+    identity_matrix();
+    surface(color, B_SIZE, 0);
+    clear(0xF0, 0xFF112233u, 0);
+    REQUIRE(save_frame(f, color), "save mirrored full clear");
+    ((uint32_t *)guest(color))[0] = 0xFFABCDEFu;
+    REQUIRE(save_frame(f, color), "save guest-written frame");
+    method(0x030C, 0);
+    method(0x035C, 0);
+    screen_quad(0xFF40A020u);
+    REQUIRE(save_frame(f, color), "save GPU-dirty frame");
+    REQUIRE(save_frame(f, color), "save unchanged GPU frame");
+    REQUIRE(fclose(f) == 0, "close clean readback fixture");
+    REQUIRE(bruteforce_d3d11_test_pipeline(color, 0, &stats), "inspect clean readbacks");
+    elide = elide && !gpu_scale_requested();
+    REQUIRE(stats.coherent == (elide ? 2u : 0u) &&
+            stats.readbacks == (elide ? 2u : 4u),
+            "only proven-coherent frames elide readback");
+    printf("clean readback copies %u coherent %u\n", stats.readbacks, stats.coherent);
+    return 1;
+}
+
+static int test_pipeline_guest_coherence(const char *mode)
+{
+    uint32_t color = xbox_ContiguousAlloc(B_SIZE * B_SIZE * 4, 4096);
+    uint32_t raced;
+    BruteforceD3D11PipelineStats stats;
+
+    REQUIRE(color, "allocate coherence race fixture");
+    identity_matrix();
+    surface(color, B_SIZE, 0);
+    if (strstr(mode, "seed")) {
+        *(uint32_t *)guest(color) = 0xFF112233u;
+        bruteforce_d3d11_test_fail("guest-change-seed", 1);
+        clear(2, 0, 0);
+    } else {
+        if (strstr(mode, "mirror"))
+            bruteforce_d3d11_test_fail("guest-change-mirror", 1);
+        clear(0xF0, 0xFF112233u, 0);
+    }
+    REQUIRE(bruteforce_d3d11_test_pipeline(color, 0, &stats),
+            "inspect clear coherence");
+    if (strstr(mode, "mirror") || strstr(mode, "seed")) {
+        REQUIRE(!stats.guest_exact, "a raced clear mirror or seed is not byte-exact");
+    } else {
+        REQUIRE(stats.guest_exact, "an unchanged clear mirror is byte-exact");
+    }
+    if (strstr(mode, "upload")) {
+        *(uint32_t *)guest(color) ^= 2u;
+        bruteforce_d3d11_test_fail("guest-change-upload", 1);
+    }
+    if (strstr(mode, "wait"))
+        bruteforce_d3d11_test_fail("guest-change-wait", 1);
+    if (strstr(mode, "readback")) {
+        method(0x030C, 0);
+        method(0x035C, 0);
+        screen_quad(0xFF40A020u);
+        bruteforce_d3d11_test_fail("guest-change-readback", 1);
+    }
+    REQUIRE(bruteforce_d3d11_test_readback(color) &&
+            bruteforce_d3d11_test_pipeline(color, 0, &stats),
+            "complete raced surface readback");
+    REQUIRE(stats.readbacks == 1 && stats.coherent == 0,
+            "a raced surface retains the ordinary GPU copy");
+    if (strstr(mode, "readback")) {
+        raced = *(uint32_t *)guest(color);
+        REQUIRE(!stats.guest_exact, "a raced readback shadow is not byte-exact");
+        REQUIRE(bruteforce_d3d11_test_readback(color) &&
+                bruteforce_d3d11_test_pipeline(color, 0, &stats) &&
+                stats.readbacks == 2 && stats.coherent == 0 &&
+                *(uint32_t *)guest(color) == (raced ^ 1u),
+                "the next flip does not trust a raced readback snapshot");
+    } else {
+        uint32_t expected = 0xFF112233u ^ (strstr(mode, "upload") ? 2u : 0u);
+        REQUIRE(*(uint32_t *)guest(color) == expected,
+                "ordinary readback restores the GPU's captured image");
+    }
+    puts("guest coherence race safely fell back");
+    return 1;
+}
+
+static int test_pipeline_16bit(void)
+{
+    uint32_t color = xbox_ContiguousAlloc(B_SIZE * B_SIZE * 4, 4096);
+    BruteforceD3D11PipelineStats stats;
+
+    REQUIRE(color, "allocate 16-bit readback fixture");
+    surface(color, B_SIZE, 0);
+    method(0x0208, 0x123);
+    method(0x020C, B_SIZE * 2);
+    clear(0xF0, 0xFF112233u, 0);
+    REQUIRE(bruteforce_d3d11_test_readback(color) &&
+            bruteforce_d3d11_test_pipeline(color, 0, &stats),
+            "read back a 16-bit surface");
+    REQUIRE(stats.readbacks == 1 && stats.coherent == 0 && !stats.guest_exact,
+            "16-bit conversion is never assumed byte-identical");
+    puts("16-bit readback retained");
+    return 1;
+}
+
+static int test_pipeline_queue(const char *mode, const char *path)
+{
+    uint32_t color = xbox_ContiguousAlloc(B_SIZE * B_SIZE * 4, 4096);
+    BruteforceD3D11PipelineStats stats;
+    FILE *marker = fopen(path, "wb");
+    unsigned i;
+
+    REQUIRE(color && marker, "initialize GPU queue fixture");
+    REQUIRE(fwrite("pending", 1, 7, marker) == 7 && fflush(marker) == 0,
+            "write pending queue marker");
+    surface(color, B_SIZE, 0);
+    if (strstr(mode, "queue-query"))
+        bruteforce_d3d11_test_fail("queue-query", 1);
+    else if (strstr(mode, "queue-wait"))
+        bruteforce_d3d11_test_fail("queue-wait", 1);
+    else if (strstr(mode, "queue-device"))
+        bruteforce_d3d11_test_fail("queue-device", 1);
+    else
+        bruteforce_d3d11_test_pending_work(5);
+    for (i = 0; i < 400; ++i)
+        clear(0xF0, 0xFF000000u | i, 0);
+    REQUIRE(bruteforce_d3d11_test_pipeline(color, 0, &stats), "inspect bounded queue");
+    REQUIRE(stats.work_submitted >= 3 && stats.work_peak == 2 &&
+            stats.work_queued <= 2 && stats.work_operations <= 128 &&
+            stats.work_waits >= 2 && stats.injected_pending == 5,
+            "long pre-flip work is checkpointed and backpressured");
+    bruteforce_d3d11_test_finish_work();
+    REQUIRE(bruteforce_d3d11_test_pipeline(color, 0, &stats) &&
+            stats.work_queued == 0 && stats.work_operations == 0,
+            "finish retires every submitted batch");
+    REQUIRE(bruteforce_d3d11_test_readback(color) &&
+            ((uint32_t *)guest(color))[0] == (0xFF000000u | 399u),
+            "bounded work preserves the final guest-visible clear");
+    REQUIRE(fwrite(" completed", 1, 10, marker) == 10 && fclose(marker) == 0,
+            "write completed queue marker");
+    puts("bounded GPU queue verified");
+    return 1;
+}
+
+static int test_pipeline_readback_failure(const char *mode, const char *path)
+{
+    uint32_t color = xbox_ContiguousAlloc(B_SIZE * B_SIZE * 4, 4096);
+    FILE *marker = fopen(path, "wb");
+
+    REQUIRE(color && marker, "initialize failed readback fixture");
+    REQUIRE(fwrite("pending", 1, 7, marker) == 7 && fflush(marker) == 0,
+            "write pending readback marker");
+    surface(color, B_SIZE, 0);
+    clear(0xF0, 0xFF112233u, 0);
+    screen_quad(0xFF40A020u);
+    bruteforce_d3d11_test_fail(strstr(mode, "loss") ? "readback-loss" : "staging-texture", 1);
+    flip();
+    REQUIRE(fwrite(" completed", 1, 10, marker) == 10 && fclose(marker) == 0,
+            "write completed readback marker");
+    return 1;
+}
+
+static int test_pipeline_state_failure(const char *mode, const char *path)
+{
+    static const Pos full[4] = {{0, 0, 1, 1}, {64, 0, 1, 1},
+                                {64, 64, 1, 1}, {0, 64, 1, 1}};
+    static const uint32_t white[4] = {0xFFFFFFFFu, 0xFFFFFFFFu, 0xFFFFFFFFu, 0xFFFFFFFFu};
+    static const float uv[4][2] = {{0, 0}, {0, 0}, {0, 0}, {0, 0}};
+    uint32_t color = xbox_ContiguousAlloc(B_SIZE * B_SIZE * 4, 4096);
+    uint32_t depth = xbox_ContiguousAlloc(B_SIZE * B_SIZE * 4, 4096);
+    uint32_t vb = xbox_ContiguousAlloc(0x1000, 4096);
+    uint32_t texture = 0;
+    FILE *marker = fopen(path, "wb");
+    const char *failure = strstr(mode, "blend-state") ? "blend-state" :
+                          strstr(mode, "sampler-state") ? "sampler-state" : "depth-state";
+
+    REQUIRE(color && depth && vb && marker, "initialize failed draw state fixture");
+    REQUIRE(fwrite("pending", 1, 7, marker) == 7 && fflush(marker) == 0,
+            "write pending draw state marker");
+    identity_matrix();
+    surface(color, B_SIZE, depth);
+    clear(0xF3, 0xFF112233u, 0x12345678u);
+    if (strstr(mode, "sampler-state")) {
+        texture = xbox_ContiguousAlloc(B_SIZE * B_SIZE * 4, 4096);
+        REQUIRE(texture, "allocate sampler-state texture");
+        memset(guest(texture), 0xFF, B_SIZE * B_SIZE * 4);
+        texture_linear(texture, B_SIZE);
+        if (strstr(mode, "base")) {
+            memcpy(guest(vb + 0x800), uv, sizeof uv);
+            method(0x1744, vb + 0x800 - XBOX_CONTIG_BASE);
+            method(0x1784, 0x0822);
+        }
+    }
+    if (!strstr(mode, "base"))
+        combiners(texture != 0);
+    if (strstr(mode, "vsh"))
+        load_program();
+    bruteforce_d3d11_test_fail(failure, 1);
+    if (strstr(mode, "base"))
+        screen_quad(0xFFFFFFFFu);
+    else
+        draw(8, full, white, uv, 4, vb);
+    REQUIRE(fwrite(" completed", 1, 10, marker) == 10 && fclose(marker) == 0,
+            "write completed draw state marker");
+    return 1;
+}
+
+static int test_pipeline_producer_failure(const char *mode, const char *path)
+{
+    uint32_t color = xbox_ContiguousAlloc(B_SIZE * B_SIZE * 4, 4096);
+    HWND window;
+    FILE *marker = fopen(path, "wb");
+    const char *failure = strstr(mode, "release") ? "shared-producer-release" :
+                          strstr(mode, "loss") ? "shared-producer-loss" :
+                                                "shared-producer-acquire";
+
+    REQUIRE(color && marker && _putenv_s("RECOMP_PRESENT_VSYNC", "0") == 0,
+            "initialize shared producer failure fixture");
+    REQUIRE(fwrite("pending", 1, 7, marker) == 7 && fflush(marker) == 0,
+            "write pending shared producer marker");
+    window = CreateWindowExA(0, "STATIC", "pipeline producer fixture", WS_POPUP,
+                             0, 0, 640, 480, NULL, NULL, GetModuleHandleA(NULL), NULL);
+    REQUIRE(window && gpu_present_init(window, B_SIZE, B_SIZE),
+            "initialize hidden D3D11 presenter");
+    surface(color, B_SIZE, 0);
+    clear(0xF0, 0xFF112233u, 0);
+    bruteforce_d3d11_test_fail(failure, 1);
+    REQUIRE(bruteforce_d3d11_test_readback(color), "read back shared producer frame");
+    REQUIRE(fwrite(" completed", 1, 10, marker) == 10 && fclose(marker) == 0,
+            "write completed shared producer marker");
+    return 1;
+}
+
+static int test_pipeline_stencil(int program)
+{
+    static const Pos full[4] = {{0, 0, 1, 1}, {64, 0, 1, 1},
+                                 {64, 64, 1, 1}, {0, 64, 1, 1}};
+    static const uint32_t white[4] = {0xFFFFFFFFu, 0xFFFFFFFFu, 0xFFFFFFFFu, 0xFFFFFFFFu};
+    static const float uv[4][2] = {{0, 0}, {0, 0}, {0, 0}, {0, 0}};
+    uint32_t color = xbox_ContiguousAlloc(B_SIZE * B_SIZE * 4, 4096);
+    uint32_t depth = xbox_ContiguousAlloc(B_SIZE * B_SIZE * 8, 4096);
+    uint32_t vb = xbox_ContiguousAlloc(0x1000, 4096);
+    BruteforceD3D11PipelineStats before, after;
+    Nv2aTexture texture, bad;
+    unsigned levels;
+    int ambiguous;
+
+    REQUIRE(color && depth && vb, "allocate packed revision fixture");
+    identity_matrix();
+    surface(color, B_SIZE, depth);
+    clear(0xF3, 0xFF000000u, 0xABCDEF12u);
+    texture_packed_depth(depth, B_SIZE, B_SIZE, B_SIZE * 4);
+    memset(&texture, 0, sizeof texture);
+    texture.offset = depth;
+    texture.width = texture.height = B_SIZE;
+    texture.pitch = B_SIZE * 4;
+    texture.color = 0x41;
+    texture.levels = 1;
+    REQUIRE(bruteforce_d3d11_test_texture(&texture, 0, 0, &levels) &&
+            bruteforce_d3d11_test_pipeline(color, depth, &before) &&
+            before.packed_valid && before.packed_revision == before.depth_revision,
+            "first packed alias conversion");
+
+    method(0x030C, 0);
+    method(0x035C, 0);
+    method(0x032C, 0);
+    clear(0xF0, 0xFF000000u, 0);
+    screen_quad(0xFFFFFFFFu);
+    REQUIRE(bruteforce_d3d11_test_pipeline(color, depth, &after) &&
+            after.depth_revision == before.depth_revision,
+            "color clear and base draw do not write depth or stencil");
+
+    if (program)
+        load_program();
+    combiners(0);
+    method(0x032C, 1);
+    method(0x0360, 0);
+    method(0x0364, 0x207);
+    method(0x0368, 0x33);
+    method(0x036C, 0xFF);
+    method(0x0370, 0x1E01);
+    method(0x0374, 0x1E01);
+    method(0x0378, 0x1E01);
+    draw(8, full, white, uv, 4, vb);
+    method(0x0360, 0xFF);
+    method(0x0378, 0x1E00);
+    draw(8, full, white, uv, 4, vb);
+    REQUIRE(bruteforce_d3d11_test_pipeline(color, depth, &after) &&
+            after.depth_revision == before.depth_revision,
+            "zero stencil mask and unreachable operations are read-only");
+    REQUIRE(bruteforce_d3d11_test_texture(&texture, 0, 0, &levels) &&
+            bruteforce_d3d11_test_pipeline(color, depth, &after) &&
+            after.stencil_conversions == before.stencil_conversions,
+            "read-only draws reuse the packed conversion");
+
+    method(0x0378, 0x1E01);
+    draw(8, full, white, uv, 4, vb);
+    REQUIRE(bruteforce_d3d11_test_pipeline(color, depth, &after) &&
+            after.depth_revision == before.depth_revision + 1,
+            "stencil-writing draw advances revision");
+    REQUIRE(bruteforce_d3d11_test_texture(&texture, 0, 0, &levels) &&
+            bruteforce_d3d11_test_pipeline(color, depth, &before) &&
+            before.stencil_conversions == after.stencil_conversions + 1,
+            "stencil write regenerates packed pixels");
+    method(0x032C, 0);
+    method(0x035C, 1);
+    draw(8, full, white, uv, 4, vb);
+    REQUIRE(bruteforce_d3d11_test_pipeline(color, depth, &after) &&
+            after.depth_revision == before.depth_revision + 1,
+            "depth-writing draw advances revision");
+    clear_rect(20, 20, 18, 19);
+    clear(3, 0, 0);
+    REQUIRE(bruteforce_d3d11_test_pipeline(color, depth, &before) &&
+            before.depth_revision == after.depth_revision, "empty depth clear is read-only");
+    clear_rect(0, 0, 31, 31);
+    clear(2, 0, 0x00000044u);
+    REQUIRE(bruteforce_d3d11_test_pipeline(color, depth, &after) &&
+            after.depth_revision == before.depth_revision + 1,
+            "partial stencil clear advances revision");
+
+    bad = texture;
+    bad.offset = depth + 4;
+    REQUIRE(!bruteforce_d3d11_test_texture(&bad, 0, 0, &levels),
+            "reject an alias beginning inside depth");
+    bad.offset = depth - 4;
+    REQUIRE(!bruteforce_d3d11_test_texture(&bad, 0, 0, &levels),
+            "reject an alias beginning before depth");
+    bad = texture;
+    bad.offset = XBOX_TILED_BASE + (depth - XBOX_CONTIG_BASE) + 4;
+    REQUIRE(!bruteforce_d3d11_test_texture(&bad, 0, 0, &levels),
+            "reject partial overlap through the tiled aperture");
+    bad.offset = depth - XBOX_CONTIG_BASE + 4;
+    REQUIRE(!bruteforce_d3d11_test_texture(&bad, 0, 0, &levels),
+            "reject partial overlap through a physical RAM name");
+    bad = texture;
+    bad.offset = XBOX_CONTIG_BASE - 1;
+    REQUIRE(bruteforce_d3d11_test_depth_overlap(&bad, 0, &ambiguous) && ambiguous,
+            "reject texture spans crossing into the contiguous aperture");
+    REQUIRE(!bruteforce_d3d11_test_texture(&bad, 0, 0, &levels),
+            "do not upload across the contiguous aperture boundary");
+    bad.offset = XBOX_TILED_BASE - 1;
+    REQUIRE(bruteforce_d3d11_test_depth_overlap(&bad, 0, &ambiguous) && ambiguous,
+            "reject texture spans crossing into the tiled aperture");
+    REQUIRE(!bruteforce_d3d11_test_texture(&bad, 0, 0, &levels),
+            "do not upload across the tiled aperture boundary");
+    bad = texture;
+    bad.color = 0x06;
+    REQUIRE(!bruteforce_d3d11_test_texture(&bad, 0, 0, &levels),
+            "reject unsupported texture formats over GPU-owned depth");
+    method(0x030C, 0);
+    method(0x035C, 0);
+    method(0x032C, 0);
+    clear_rect(0, 0, 63, 63);
+    clear(0xF0, 0xFFA55A22u, 0);
+    texture_linear_stage(0, depth, B_SIZE, B_SIZE, B_SIZE * 4, 0x06);
+    combiners(1);
+    draw(8, full, white, uv, 4, vb);
+    REQUIRE(bruteforce_d3d11_test_readback(color) &&
+            ((uint32_t *)guest(color))[10 * B_SIZE + 10] == 0xFFA55A22u,
+            "unsupported depth overlap rejects the draw rather than sampling a null texture");
+    bad = texture;
+    REQUIRE(!bruteforce_d3d11_test_texture(&bad, 1, 0, &levels),
+            "reject a cube overlapping depth even if the stage register is not a cube");
+    bad.offset = depth - 4;
+    bad.pitch = 0;
+    REQUIRE(!bruteforce_d3d11_test_texture(&bad, 0, 0, &levels),
+            "reject an indeterminate overlapping layout");
+    surface(color, B_SIZE, depth + 4096);
+    clear_rect(0, 0, 63, 63);
+    clear(3, 0, 0x12345678u);
+    REQUIRE(!bruteforce_d3d11_test_texture(&texture, 0, 0, &levels),
+            "reject two overlapping tracked depth owners");
+    puts("packed revision and overlap guards verified");
+    return 1;
+}
+
+static int test_pipeline_scaled_depth_overlap(void)
+{
+    uint32_t color = xbox_ContiguousAlloc(B_SIZE * B_SIZE * 4, 4096);
+    uint32_t depth = xbox_ContiguousAlloc(B_SIZE * B_SIZE * 4, 4096);
+    Nv2aTexture texture;
+    int ambiguous;
+
+    REQUIRE(color && depth, "allocate scaled depth overlap fixture");
+    surface(color, B_SIZE, depth);
+    clear(0xF3, 0xFF000000u, 0x12345678u);
+    texture_packed_depth(depth, B_SIZE, B_SIZE, B_SIZE * 4);
+    memset(&texture, 0, sizeof texture);
+    texture.offset = depth;
+    texture.width = texture.height = B_SIZE;
+    texture.pitch = B_SIZE * 4;
+    texture.color = 0x41;
+    texture.levels = 1;
+    REQUIRE(bruteforce_d3d11_test_depth_overlap(&texture, 0, &ambiguous) && !ambiguous,
+            "detect exact scaled depth overlap");
+    texture.offset = depth + 63 * B_SIZE * 4;
+    texture.width = texture.height = 1;
+    texture.pitch = 4;
+    REQUIRE(bruteforce_d3d11_test_depth_overlap(&texture, 0, &ambiguous) && !ambiguous,
+            "detect overlap in guest rows beyond the scaled physical height");
+    texture.offset = XBOX_TILED_BASE + (depth - XBOX_CONTIG_BASE) + 63 * B_SIZE * 4;
+    REQUIRE(bruteforce_d3d11_test_depth_overlap(&texture, 0, &ambiguous) && !ambiguous,
+            "detect scaled tail overlap through the tiled aperture");
+    puts("scaled depth guest-range overlap verified");
+    return 1;
+}
+
 int main(int argc, char **argv)
 {
     int perf_mode;
@@ -2650,6 +3062,8 @@ int main(int argc, char **argv)
              _putenv_s("RECOMP_GPU_SCALE", "invalid") != 0) ||
             (strstr(argv[2], "scale2") &&
              _putenv_s("RECOMP_GPU_SCALE", "2") != 0) ||
+            (strstr(argv[2], "scale05") &&
+             _putenv_s("RECOMP_GPU_SCALE", "0.5") != 0) ||
             ((strstr(argv[2], "scale-txn-") || strstr(argv[2], "scale-query") ||
               strstr(argv[2], "scale-small") || strstr(argv[2], "scale-window")) &&
              _putenv_s("RECOMP_GPU_SCALE", "native") != 0) ||
@@ -2684,6 +3098,27 @@ int main(int argc, char **argv)
         return test_scale_window() ? 0 : 1;
     if (strstr(argv[2], "scale-query"))
         return test_scale_query() ? 0 : 1;
+    if (strstr(argv[2], "pipeline-clean"))
+        return test_pipeline_clean(argv[3]) ? 0 : 1;
+    if (strstr(argv[2], "pipeline-coherence"))
+        return test_pipeline_guest_coherence(argv[2]) ? 0 : 1;
+    if (strstr(argv[2], "pipeline-16bit"))
+        return test_pipeline_16bit() ? 0 : 1;
+    if (strstr(argv[2], "pipeline-queue"))
+        return test_pipeline_queue(argv[2], argv[3]) ? 0 : 1;
+    if (strstr(argv[2], "pipeline-readback-failure") ||
+        strstr(argv[2], "pipeline-readback-loss"))
+        return test_pipeline_readback_failure(argv[2], argv[3]) ? 0 : 1;
+    if (strstr(argv[2], "pipeline-depth-state") ||
+        strstr(argv[2], "pipeline-blend-state") ||
+        strstr(argv[2], "pipeline-sampler-state"))
+        return test_pipeline_state_failure(argv[2], argv[3]) ? 0 : 1;
+    if (strstr(argv[2], "pipeline-producer"))
+        return test_pipeline_producer_failure(argv[2], argv[3]) ? 0 : 1;
+    if (strstr(argv[2], "pipeline-scaled-z-overlap"))
+        return test_pipeline_scaled_depth_overlap() ? 0 : 1;
+    if (strstr(argv[2], "pipeline-stencil"))
+        return test_pipeline_stencil(strstr(argv[2], "vsh") != NULL) ? 0 : 1;
     if (strcmp(argv[2], "gpu-cache-keys") == 0)
         return bruteforce_test_shader_cache_keys() ? 0 : 1;
     if (strncmp(argv[2], "gpu-cache-temp-", 15) == 0)

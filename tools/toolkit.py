@@ -13,7 +13,7 @@ ROOT = Path(__file__).resolve().parents[1]
 TOOLKIT_DIR = ROOT / ".deps" / "xboxrecomp"
 TOOLKIT_URL = "https://github.com/sp00nznet/xboxrecomp.git"
 TOOLKIT_BASE = "343b6d8901723b37ce568b2418c5df4e1fe1d223"
-TOOLKIT_TREE = "131abd8d1f4559bb36dba4391e4c644925cff5df"
+TOOLKIT_TREE = "86dcf92c99a87940b3346b3cd3b55b8f6145a881"
 LOCAL_PATCHES = (
     ROOT / "patches" / "xboxrecomp" / "0002-model-wbinvd.patch",
     ROOT / "patches" / "xboxrecomp" / "0003-synchronize-semaphore-target.patch",
@@ -49,6 +49,7 @@ LOCAL_PATCHES = (
     ROOT / "patches" / "xboxrecomp" / "0034-raise-apu-queue-low-water.patch",
     ROOT / "patches" / "xboxrecomp" / "0036-event-driven-pfb-flush-wait.patch",
     ROOT / "patches" / "xboxrecomp" / "0037-report-serial-raster-worker.patch",
+    ROOT / "patches" / "xboxrecomp" / "0038-presenter-device-loss.patch",
 )
 
 # PRs #314, #319, and #320, in their tested application order.
@@ -154,11 +155,15 @@ def setup_toolkit(path=TOOLKIT_DIR):
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--verify", action="store_true", help="verify an existing checkout only")
+    parser.add_argument("--checkout", type=Path, help="checkout to verify (requires --verify)")
     args = parser.parse_args(argv)
+    if args.checkout and not args.verify:
+        parser.error("--checkout requires --verify")
     try:
         if args.verify:
-            verify_toolkit()
-            print(f"Verified xboxrecomp checkout: {TOOLKIT_DIR}")
+            path = args.checkout or TOOLKIT_DIR
+            verify_toolkit(path)
+            print(f"Verified xboxrecomp checkout: {path}")
         else:
             setup_toolkit()
     except (ToolkitError, OSError, subprocess.CalledProcessError) as exc:

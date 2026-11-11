@@ -522,6 +522,7 @@ int gpu_texture_decode(GpuTextureDecoder *decoder, ID3D11Device *device,
     }
     ID3D11DeviceContext_CSSetShaderResources(context, 0, 2, no_views);
     ID3D11DeviceContext_CSSetShader(context, NULL, NULL, 0);
+    gpu_d3d11_check_device(device, S_OK, "submitting texture decode");
     for (level = 0; level < layout->levels; ++level)
         ID3D11UnorderedAccessView_Release(uav[level]);
     if (views[1]) ID3D11ShaderResourceView_Release(views[1]);

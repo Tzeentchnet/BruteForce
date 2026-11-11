@@ -6,11 +6,12 @@ results are in [FINDINGS.md](FINDINGS.md), and framework work is
 tracked in [UPSTREAM.md](UPSTREAM.md). State as of 2026-11-10: the current
 toolkit uses xboxrecomp v0.17.0 at
 `343b6d8901723b37ce568b2418c5df4e1fe1d223`, selected post-release commits
-from #314, #319 and #320, and 34 local patches. Its verified tree is
-`131abd8d1f4559bb36dba4391e4c644925cff5df`.
+from #314, #319 and #320, and 35 local patches. Its isolated verified tree is
+`86dcf92c99a87940b3346b3cd3b55b8f6145a881`.
 
 Supported retail generation `20261111-002138-a9dbc18a` is a Release build on
-that v0.17 tree. Its executable SHA-256 is
+the earlier v0.17 tree `131abd8d1f4559bb36dba4391e4c644925cff5df`;
+it does not contain the new pipeline changes. Its executable SHA-256 is
 `f1bf8622df3b651af6747566b4628a1d8ca18d7a01a4c196df910124cb9f7844`;
 it translated all 22,295 identified functions with zero failures, six
 unresolved direct-call targets and 11 untranslated instruction sites. One
@@ -131,8 +132,9 @@ deferred. See
   unchanged; these synthetic results do not establish hardware equivalence.
 - Renderer-device loss is reported and stops execution instead of silently
   completing outstanding GPU work. Mocked removed/reset/hung/driver and
-  pending-query cases pass; actual device removal, recovery, the separate
-  presenter device and semaphore races are not verified.
+  pending-query cases pass. The separate presenter's loss and resource
+  boundaries are also fault-injection tested; actual device removal,
+  recovery and semaphore races remain unverified.
 - Ordered asynchronous visibility reports pass synthetic WARP and hardware
   fixtures. A new six-leg campaign isolated only
   `RECOMP_GPU_ZPASS=async`, reviewed all 6,903 selected captures, and found
@@ -239,9 +241,21 @@ deferred. See
   ignores stencil.
 - The opt-in `RECOMP_GPU_DIRECT_PRESENT=1` path presents a finished GPU
   snapshot through a one-slot keyed-mutex handoff, with CPU fallback for
-  pinned frames and PVIDEO. It still performs per-flip guest readback and
-  does not limit all GPU work in flight. WARP and hardware synthetic tests
-  cover the alias, pixel transfer, queue ordering and fallback.
+  pinned frames and PVIDEO. WARP and hardware synthetic tests cover the
+  alias, pixel transfer, queue ordering and fallback. Submitted renderer work
+  is now limited to two event-query batches, with checkpoints every 128
+  operations or at flips. Default-off clean-surface readback elision avoids
+  copies only when native-size 32-bit guest bytes are already coherent;
+  tracked-surface flips still wait for GPU completion, and initial seeds,
+  guest uploads, dirty, scaled, 16-bit and diagnostic frames still read back.
+  This is not general on-demand readback.
+- State-aware depth/stencil revision tracking avoids reconversion for
+  read-only draws and rejects ambiguous, partial, scaled and recognized
+  mirrored-RAM overlaps rather than sampling stale guest bytes. Potentially
+  writing draws may invalidate even if no fragment writes; pixel-level
+  write detection is not established. Synthetic device-loss injection
+  covers producer and Windows presenter fail-stop boundaries; automatic
+  recovery and real-driver loss races remain open.
 - The reported blank 4K Microsoft, Digital Anvil and intro movies were
   CPU-decoded Bink frames, not PVIDEO. D3D11 readback had overwritten those
   guest writes with a GPU-only clear. The backend now shadows guest colour
@@ -462,13 +476,14 @@ run, so G4/G5 and the reported default 6 fps remain open.
    isolated in workstream E. Provide `RECOMP_GPU_SCALE=<f>` or an output
    size, default 1. At scale 1 the output must be unchanged from today, bit
    for bit.
-2. **Implemented: keep readback at the guest's size.** The back end reads each presented
-   surface back to guest memory at every flip for the CPU consumers. At 4K
+2. **Implemented: keep readback at the guest's size.** The back end normally
+   reads each presented surface back to guest memory at every flip for the
+   CPU consumers; scaled frames always do so. At 4K
    output, the centered 4:3 picture is 2880×2160; a four-byte-per-pixel read
    would be about 24.9 MB per flip. Average the scaled surface down on the
    GPU first and read that. Separately, present the full-size image directly.
-   This extends the existing shared
-   presentation path, which still performs the per-flip guest readback.
+   This extends the existing shared presentation path. The default-off
+   clean-surface experiment above is a limited unscaled exception.
    CPU-written colour surfaces are detected against a logical shadow and
    uploaded before that readback/presentation boundary.
 3. **Current choice: one global Blood Wake-style scale; validate it per
@@ -506,7 +521,7 @@ run, so G4/G5 and the reported default 6 fps remain open.
    prepare required resources before committing the configuration or epoch;
    ordinary allocation failures retain prior resources and can be retried.
    Busy shared frames defer replacement without skipping the mutex handshake;
-   non-timeout mutex errors disable shared presentation. Colour
+   non-timeout mutex ownership errors stop execution. Colour
    contents migrate, but changed-size depth/stencil contents do not; guest
    reinitialization after resize is not yet verified. A VRAM budget and device
    recovery remain open in D; fixed launcher preset changes require a restart.
@@ -669,15 +684,16 @@ mainly where they gate 4K, widescreen and audio.
   scripted run. Account for excluded pages and the diagnostic's other blind
   spots; a partial run cannot prove that no guest readers exist. Keep output
   local. This determines how much readback B2 can remove.
-- Extend the opt-in shared GPU presenter into a fully GPU-authoritative
-  pipeline: establish guest surface readers, implement safe on-demand
-  readback and bound all GPU work in flight. Retain readback for guest
-  readers, screenshots, frame statistics and other consumers until they have
-  equivalent GPU-aware paths. Do not release fences before their inputs are
-  consumed or skip a flush or flip hold.
+- Extend the opt-in shared GPU presenter only after establishing guest
+  surface readers and a safe on-demand-readback contract. The bounded
+  renderer queue and clean-surface-only copy elision are synthetic-tested;
+  neither makes dirty surfaces generally GPU-authoritative. Retain readback
+  for unproven readers and diagnostic consumers. Do not release fences before
+  their inputs are consumed or skip a flush or flip hold.
 - Inspect the slow combined candidate's high sampled GPU-wait share, the
-  frequent busy shared slot and repeated packed-depth conversions; only avoid
-  conversion when depth and stencil writes are correctly tracked.
+  frequent busy shared slot and remaining packed-depth conversions. The
+  current state-aware guard is conservative for potentially writing draws;
+  prove fragment-level changes before attempting to reuse those conversions.
 - The final rebuilt default renderer now has reviewed world captures,
   caller-attributed profiles and detailed validation/cache counters. First
   isolate synchronous versus ordered asynchronous visibility in an
@@ -697,9 +713,9 @@ mainly where they gate 4K, widescreen and audio.
   NV2A out-of-range palette behavior and preserve palette length through the
   framework's CPU decoder. Validate on the title and additional drivers, and
   compare the new cache's cost with an A/B/A campaign before upstreaming.
-  Implement and test device/resource recreation and loss handling for the
-  separate presenter without violating pending flush, semaphore, report or
-  flip ordering. The current fail-stop behavior is not recovery. Mipmaps are
+  Implement and test device/resource recreation for both devices without
+  violating pending flush, semaphore, report or flip ordering. The synthetic
+  fail-stop paths are not recovery or real-driver fault coverage. Mipmaps are
   now wanted for 4K (B10); LOD-transition enhancements beyond that remain
   deferred.
 - Exercise `RECOMP_GPU_VSH_VERIFY=50` on matched title scenes. WARP and

@@ -28,10 +28,15 @@ retail gameplay and depth/stencil reinitialization after resize remain
 unvalidated. Guest mipmap sampling and 8x anisotropic filtering are separate
 default-off D3D11 experiments with synthetic coverage; title and xemu
 comparisons remain open. See the [user guide](docs/USER_GUIDE.md#d3d11-renderer-and-benchmark-diagnostics).
+Submitted GPU work is bounded and device-loss paths fail explicitly.
+Default-off clean-surface readback elision has synthetic coverage only; dirty
+frames still read back and tracked-surface flips still wait. Retail correctness and
+performance of this experiment are unverified.
 
 The pinned framework has been updated to xboxrecomp v0.17.0 plus selected
 post-release fixes. Fresh Release generation `20261111-002138-a9dbc18a`
-completed focused CPU and D3D11 tutorial/movement bring-up on that tree.
+completed focused CPU and D3D11 tutorial/movement bring-up on the prior
+v0.17 tree, before the current pipeline changes.
 Matched-reference and reviewed performance gates remain open, and the
 published measurements still belong to the previous reviewed generation.
 

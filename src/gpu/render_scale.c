@@ -14,6 +14,7 @@
 #include <string.h>
 
 #include "render_scale.h"
+#include "d3d11_device_status.h"
 
 static int s_configured;
 static int s_requested;
@@ -516,6 +517,7 @@ int gpu_scale_gpu_init(ID3D11Device *device, ID3D11DeviceContext *context)
     return 1;
 
 failed:
+    gpu_d3d11_check_device(device, hr, "creating scaled resolve resources");
     fprintf(stderr, "[GPU-SCALE] GPU resolve resources failed 0x%08lX; configuration not committed\n",
             (unsigned long)hr);
     if (code) ID3D10Blob_Release(code);
@@ -546,6 +548,7 @@ int gpu_scale_blit(ID3D11ShaderResourceView *source, UINT source_width, UINT sou
         !target_width || !target_height || mode < GPU_SCALE_BLIT_BILINEAR ||
         mode > GPU_SCALE_BLIT_CATMULL_ROM)
         return 0;
+    gpu_d3d11_check_device(s_device, S_OK, "starting scaled resolve");
     constants[0] = (float)source_width;
     constants[1] = (float)source_height;
     constants[2] = 1.0f / source_width;
@@ -557,6 +560,7 @@ int gpu_scale_blit(ID3D11ShaderResourceView *source, UINT source_width, UINT sou
     hr = ID3D11DeviceContext_Map(s_context, (ID3D11Resource *)s_constants, 0,
                                  D3D11_MAP_WRITE_DISCARD, 0, &mapped);
     if (FAILED(hr)) {
+        gpu_d3d11_check_device(s_device, hr, "mapping scaled resolve constants");
         fprintf(stderr, "[GPU-SCALE] mapping resolve constants failed 0x%08lX\n",
                 (unsigned long)hr);
         return 0;

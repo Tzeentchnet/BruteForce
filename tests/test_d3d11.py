@@ -1,3 +1,4 @@
+import csv
 import os
 from pathlib import Path
 import re
@@ -428,6 +429,205 @@ def test_visibility_poll_reports_loss_without_completing_work(tmp_path, mode):
     assert result.returncode != 0
     assert "device lost during synthetic visibility poll" in result.stderr
     assert output.read_bytes() == b"pending"
+
+
+@pytest.mark.parametrize("device", [
+    "warp",
+    pytest.param("hardware", marks=pytest.mark.skipif(
+        not HARDWARE, reason="set BRUTEFORCE_TEST_D3D11_HARDWARE=1 for a hardware device")),
+])
+@pytest.mark.parametrize("scale", ["", "-scale2"])
+def test_pipeline_clean_readback_elision_preserves_every_guest_frame(tmp_path, device, scale):
+    images = []
+    for option in ("0", "1"):
+        output = tmp_path / f"clean-{scale}-{device}-{option}.raw"
+        result = render_compatibility_fixture(
+            f"gpu-pipeline-clean{scale}-{device}", output, RECOMP_GPU_SKIP_CLEAN_READBACK=option,
+        )
+        assert result.returncode == 0, result.stderr
+        expected = "copies 2 coherent 2" if option == "1" and not scale else "copies 4 coherent 0"
+        assert expected in result.stdout
+        images.append(output.read_bytes())
+    assert images[0] == images[1]
+    assert len(images[0]) == 4 * SIZE * SIZE * 4
+    if not scale:
+        assert fixture_pixel(images[0][:SIZE * SIZE * 4], 0, 0) == (0x11, 0x22, 0x33, 0xFF)
+        assert fixture_pixel(images[0][SIZE * SIZE * 4:2 * SIZE * SIZE * 4], 0, 0) == (
+            0xAB, 0xCD, 0xEF, 0xFF
+        )
+
+
+@pytest.mark.parametrize("device", [
+    "warp",
+    pytest.param("hardware", marks=pytest.mark.skipif(
+        not HARDWARE, reason="set BRUTEFORCE_TEST_D3D11_HARDWARE=1 for a hardware device")),
+])
+@pytest.mark.parametrize("boundary", ["seed", "upload", "mirror", "wait", "readback"])
+def test_pipeline_coherence_races_force_reference_readback(tmp_path, device, boundary):
+    result = render_compatibility_fixture(
+        f"gpu-pipeline-coherence-{boundary}-{device}", tmp_path / "unused.raw",
+        RECOMP_GPU_SKIP_CLEAN_READBACK="1",
+    )
+    assert result.returncode == 0, result.stderr
+    assert "guest coherence race safely fell back" in result.stdout
+
+
+@pytest.mark.parametrize("debug", ["stats", "dump-gate"])
+def test_pipeline_debug_consumers_force_full_readback(tmp_path, debug):
+    output = tmp_path / "debug.raw"
+    options = {"RECOMP_GPU_SKIP_CLEAN_READBACK": "1"}
+    if debug == "stats":
+        options["RECOMP_FRAME_STATS"] = str(tmp_path / "frames.csv")
+    else:
+        options["RECOMP_FB_DUMP_FLIPS"] = str(tmp_path / "not-present")
+    result = render_compatibility_fixture("gpu-pipeline-clean-warp", output, **options)
+    assert result.returncode == 0, result.stderr
+    assert "copies 4 coherent 0" in result.stdout
+    if debug == "stats":
+        rows = (tmp_path / "frames.csv").read_text().splitlines()
+        assert len(rows) == 5
+        assert all(row.split(",")[4] != "0000000000000000" for row in rows[1:])
+
+
+def test_pipeline_statistics_hashes_and_flip_dumps_match_reference(tmp_path):
+    results = []
+    for option in ("0", "1"):
+        output = tmp_path / f"frames-{option}.raw"
+        stats = tmp_path / f"statistics-{option}.csv"
+        prefix = str(tmp_path / f"dump-{option}-")
+        result = render_compatibility_fixture(
+            "gpu-pipeline-clean-warp", output, RECOMP_GPU_SKIP_CLEAN_READBACK=option,
+            RECOMP_FRAME_STATS=str(stats), RECOMP_FB_DUMP=prefix,
+            RECOMP_FB_DUMP_FLIPS="1", RECOMP_FB_DUMP_FLIP_ID="1",
+        )
+        assert result.returncode == 0, result.stderr
+        assert "copies 4 coherent 0" in result.stdout
+        with stats.open(newline="", encoding="ascii") as stream:
+            rows = [(row["flip"], row["hash"], row["distinct"]) for row in csv.DictReader(stream)]
+        dumps = [path.read_bytes() for path in sorted(tmp_path.glob(f"dump-{option}-*.bmp"))]
+        assert len(rows) == len(dumps) == 4
+        results.append((output.read_bytes(), rows, dumps))
+    assert results[0] == results[1]
+
+
+@pytest.mark.parametrize("device", [
+    "warp",
+    pytest.param("hardware", marks=pytest.mark.skipif(
+        not HARDWARE, reason="set BRUTEFORCE_TEST_D3D11_HARDWARE=1 for a hardware device")),
+])
+def test_pipeline_16bit_readback_is_not_elided(tmp_path, device):
+    result = render_compatibility_fixture(
+        f"gpu-pipeline-16bit-{device}", tmp_path / "unused.raw",
+        RECOMP_GPU_SKIP_CLEAN_READBACK="1",
+    )
+    assert result.returncode == 0, result.stderr
+    assert "16-bit readback retained" in result.stdout
+
+
+def test_pipeline_clean_readback_option_rejects_invalid_values(tmp_path):
+    result = render_compatibility_fixture(
+        "gpu-pipeline-clean-warp", tmp_path / "unused.raw", RECOMP_GPU_SKIP_CLEAN_READBACK="yes",
+    )
+    assert result.returncode != 0
+    assert "RECOMP_GPU_SKIP_CLEAN_READBACK must be 0 or 1" in result.stderr
+
+
+@pytest.mark.parametrize("device", [
+    "warp",
+    pytest.param("hardware", marks=pytest.mark.skipif(
+        not HARDWARE, reason="set BRUTEFORCE_TEST_D3D11_HARDWARE=1 for a hardware device")),
+])
+def test_pipeline_backpressures_work_even_without_flips(tmp_path, device):
+    marker = tmp_path / "queue-marker"
+    result = render_compatibility_fixture(f"gpu-pipeline-queue-{device}", marker)
+    assert result.returncode == 0, result.stderr
+    assert "bounded GPU queue verified" in result.stdout
+    assert marker.read_bytes() == b"pending completed"
+
+
+@pytest.mark.parametrize(("mode", "diagnostic"), [
+    ("queue-query", "CreateQuery(GPU work) failed"),
+    ("queue-wait", "GetData(GPU work) failed"),
+    ("queue-device", "device lost during waiting for GPU work"),
+    ("readback-failure", "cannot make tracked color surface"),
+    ("readback-loss", "device lost during mapping surface readback"),
+])
+def test_pipeline_failure_never_completes_guest_visible_work(tmp_path, mode, diagnostic):
+    marker = tmp_path / "failure-marker"
+    result = render_compatibility_fixture(f"gpu-pipeline-{mode}-warp", marker)
+    assert result.returncode != 0
+    assert diagnostic in result.stderr
+    assert marker.read_bytes() == b"pending"
+
+
+@pytest.mark.parametrize("vertex", ["base", "extended", "vsh"])
+@pytest.mark.parametrize("device", [
+    "warp",
+    pytest.param("hardware", marks=pytest.mark.skipif(
+        not HARDWARE, reason="set BRUTEFORCE_TEST_D3D11_HARDWARE=1 for a hardware device")),
+])
+@pytest.mark.parametrize(("resource", "message"), [
+    ("depth", "refusing to draw with untracked default depth writes"),
+    ("blend", "refusing to draw with a default blend or color mask"),
+    ("sampler", "refusing to draw with a missing sampler"),
+])
+def test_pipeline_draw_state_failure_does_not_draw(tmp_path, vertex, device, resource, message):
+    marker = tmp_path / "draw-state-marker"
+    result = render_compatibility_fixture(
+        f"gpu-pipeline-{resource}-state-{vertex}-{device}", marker
+    )
+    assert result.returncode != 0
+    assert message in result.stderr
+    assert marker.read_bytes() == b"pending"
+
+
+@pytest.mark.parametrize(("failure", "diagnostic"), [
+    ("acquire", "producer shared frame acquire failed"),
+    ("release", "producer shared frame release failed"),
+    ("loss", "device lost during acquiring producer shared frame"),
+])
+@pytest.mark.parametrize("device", [
+    "warp",
+    pytest.param("hardware", marks=pytest.mark.skipif(
+        not HARDWARE, reason="set BRUTEFORCE_TEST_D3D11_HARDWARE=1 for a hardware device")),
+])
+def test_pipeline_shared_producer_ownership_failure_stops(tmp_path, failure, diagnostic, device):
+    marker = tmp_path / "producer-marker"
+    result = render_compatibility_fixture(
+        f"gpu-pipeline-producer-direct-{failure}-{device}", marker
+    )
+    assert result.returncode != 0
+    assert diagnostic in result.stderr
+    assert marker.read_bytes() == b"pending"
+
+
+@pytest.mark.parametrize("device", [
+    "warp",
+    pytest.param("hardware", marks=pytest.mark.skipif(
+        not HARDWARE, reason="set BRUTEFORCE_TEST_D3D11_HARDWARE=1 for a hardware device")),
+])
+@pytest.mark.parametrize("vertex", ["", "-vsh"])
+@pytest.mark.parametrize("mips", ["0", "1"])
+def test_pipeline_packed_revision_and_overlap_guards(tmp_path, device, vertex, mips):
+    result = render_compatibility_fixture(
+        f"gpu-pipeline-stencil{vertex}-{device}", tmp_path / "unused.raw", RECOMP_GPU_MIPS=mips,
+    )
+    assert result.returncode == 0, result.stderr
+    assert "packed revision and overlap guards verified" in result.stdout
+    assert "depth texture alias rejected" in result.stderr
+
+
+@pytest.mark.parametrize("device", [
+    "warp",
+    pytest.param("hardware", marks=pytest.mark.skipif(
+        not HARDWARE, reason="set BRUTEFORCE_TEST_D3D11_HARDWARE=1 for a hardware device")),
+])
+def test_pipeline_scaled_depth_guest_range_covers_all_rows(tmp_path, device):
+    result = render_compatibility_fixture(
+        f"gpu-pipeline-scaled-z-overlap-scale05-{device}", tmp_path / "unused.raw"
+    )
+    assert result.returncode == 0, result.stderr
+    assert "scaled depth guest-range overlap verified" in result.stdout
 
 
 def render_with_shader_cache(tmp_path, device, cache, index, enabled="1", vertex_program=False):

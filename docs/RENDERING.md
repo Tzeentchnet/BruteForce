@@ -27,7 +27,7 @@ resources; it does not replace the game engine with a native PC renderer.
     v
   xboxrecomp PFIFO/PGRAPH and NV2A executor
     |-- CPU reference rasterizer -------> guest colour memory --------+
-    |-- D3D11 backend --> GPU colour --flip readback--> guest memory -+--> window
+    |-- D3D11 backend --> GPU colour --flip sync/readback--> guest memory --> window
     |                    GPU depth/stencil                           |    presenter
     |                       |-- optional shared colour snapshot -----+
     `-- null probe: no rasterization; visibility reported as visible
@@ -173,9 +173,8 @@ replace the shared texture without changing the epoch. An allocation, view
 or migration failure is diagnosed and retains the prior scale and resources
 for retry.
 A pending shared frame defers the transition until the normal keyed-mutex
-handoff permits it. A non-timeout mutex error instead disables shared
-presentation; device loss stops execution, and neither is automatically
-recovered.
+handoff permits it. A non-timeout mutex ownership error or device loss stops
+execution; neither is automatically recovered.
 
 Changed-size depth/stencil targets are recreated, **not migrated**: their
 contents are undefined until the guest clears or regenerates them. Whether
@@ -353,9 +352,15 @@ default-D3D11 movement regression remains unresolved; see the
 - `RECOMP_GPU_STENCIL_ALIAS=1` enables an independent packed D24S8 path when
   a `0x41` texture overlaps a tracked depth surface. Supported exact aliases
   require initialized depth and stencil planes. A compute shader rebuilds
-  filterable depth bytes and stencil alpha, reusing the result until the
-  GPU surface changes. Unsupported overlaps are rejected; ordinary
-  non-alias `0x41` textures keep their normal path.
+  filterable depth bytes and stencil alpha, reusing the result until a
+  depth/stencil-writing clear or potentially writing draw invalidates it.
+  Draw states with no reachable depth/stencil writes do not advance the
+  revision. A potentially writing draw can still produce no fragments, so
+  this is conservative state-based invalidation, not pixel-level proof.
+  Partial and ambiguous overlaps, including recognized RAM/tiled aliases,
+  spans crossing aperture boundaries, and unsupported texture formats over
+  tracked depth, skip the draw with a diagnostic rather than decode stale
+  guest bytes. Ordinary non-alias `0x41` textures keep their normal path.
 
 Both options are off by default. Guest writes to GPU-owned depth, partial
 aliases, depth cubes and multi-level depth aliases are not supported. These
@@ -455,8 +460,22 @@ state. At scale 1, the D3D11 readback callback copies that surface to a
 staging resource. At another scale, it first resolves the physical surface
 into a guest-sized GPU target. It then maps the staging resource and copies
 guest-sized rows to memory before the normal framebuffer handoff and flip
-statistics. If readback is unavailable or fails, guest memory may not contain
-the rendered GPU frame; it must not be treated as a successful readback.
+statistics. A tracked surface that cannot be made guest-visible now stops
+with a fatal diagnostic rather than completing a success-shaped flip.
+Failure or cache exhaustion for a required depth-stencil, blend or sampler
+state also stops before the draw instead of substituting D3D defaults.
+
+The default-off `RECOMP_GPU_SKIP_CLEAN_READBACK=1` elides that copy only for
+an unscaled, native-sized 32-bit surface whose guest bytes are already known
+to match its clean GPU image. Initial seeds, guest uploads, GPU draws, partial
+clears and migration require the ordinary readback before establishing that
+proof. Full-clear mirrors and readbacks validate their snapshots against the
+GPU-bound bytes, and the guest snapshot is checked again after the GPU wait.
+Statistics, frame-dump and presenter-capture settings force the ordinary
+readback. Screenshots and the CPU-composited route still use guest memory. A
+tracked surface flip, including an elided copy, waits for prior GPU work; this
+does not intercept arbitrary guest readers or prove all concurrent guest-write
+timings.
 
 The default window path snapshots and converts guest pixels and can compose
 PVIDEO before presentation. The Windows presenter normally uses a separate
@@ -467,8 +486,11 @@ presenter. Patch 0028 lets that texture have dimensions independent of the
 guest framebuffer and exposes the current 4:3 output-picture size to the
 renderer. Pinned framebuffers and PVIDEO use the CPU-composited path, and
 snapshot IDs prevent an older pending GPU image from replacing a newer frame.
-The shared path still performs per-flip guest readback; its one-slot snapshot
-bound is not a bound on all GPU work in flight.
+The one-slot shared snapshot is separate from the renderer's two-event
+submitted-work bound. The latter checkpoints after at most 128 renderer
+operations or at a flip and applies backpressure before submitting more;
+it also polls ordered visibility reports while waiting. Neither bound
+shortens PFB flush, semaphore, report or flip-hold synchronization.
 
 Window size and fullscreen determine native mode's output picture. The
 point/linear display filter applies to the CPU route and scale-1 fallback;
@@ -493,6 +515,7 @@ setting-to-environment mapping.
 | Vertex programs / texture decoding | GPU / GPU where supported | CPU fallbacks remain; `RECOMP_GPU_VSH=0` and `RECOMP_GPU_TEX_DECODE=0` are comparison switches. |
 | Guest mipmaps / anisotropy | Off / off | `RECOMP_GPU_MIPS=1` exposes supported supplied chains; `RECOMP_GPU_ANISO=1` separately enhances eligible mipped samplers. |
 | Visibility | Synchronous | `RECOMP_GPU_ZPASS=async` is opt-in. |
+| Clean readback elision | Off | `RECOMP_GPU_SKIP_CLEAN_READBACK=1` is an environment-only experiment; dirty and diagnostic frames retain readback. |
 | Persistent pixel-shader cache | Off | `RECOMP_GPU_PSCACHE=1` enables the combiner cache. |
 | Window clip / near plane | Off / HUD-safe | HUD-safe retains non-additive UI and clips zero-depth additive draws. Legacy/inherit and full screen-zero remain comparison modes. Face culling is off unless separately enabled. |
 | Depth alias / stencil alias / shared presentation | Off / off / off at 480p | Scaled modes reject the aliases and enable shared presentation automatically. |
@@ -507,8 +530,9 @@ settings and the scene controlled. Full setup and options are in the
 ## Diagnostics and validation
 
 - The periodic `[GPU-D3D11]` report includes draws, texture paths and
-  unsupported-cache hits, readback time, visibility waits, alias activity
-  and shared-presentation counts. `RECOMP_GPU_TEXLOG=1` logs individual
+  unsupported-cache hits, readback time and coherent-copy elisions, visibility
+  waits, submitted-work batches/backpressure, alias activity and
+  shared-presentation counts. `RECOMP_GPU_TEXLOG=1` logs individual
   texture uploads.
 - `RECOMP_FRAME_STATS` records flip and whole-frame change statistics;
   `RECOMP_GPU_CENSUS` records requested features; `BRUTEFORCE_PROFILE`
@@ -560,13 +584,15 @@ replace matched gameplay or original-hardware validation.
   target widening, centred guest readback and aspect-aware presentation;
   changing the framebuffer dimensions alone is not an acceptable mode.
 - Guest reads and writes of GPU-owned surfaces, concurrent texture changes,
-  generalized fence completion, and safe removal of per-flip readback need
-  further investigation. A clean surface-guard diagnostic alone is
-  insufficient to remove readback.
+  generalized fence completion, and general on-demand readback need further
+  investigation. A clean surface-guard diagnostic alone is insufficient to
+  elide readback for a GPU-dirty surface.
 - Device removal is reported and the renderer stops rather than claiming
-  outstanding GPU work completed. Device/resource recovery, the separate
-  presenter device and loss races at guest-visible synchronization are not
-  established. Blood Wake's newer recovery worker is prior art, but it does
+  outstanding GPU work completed. The separate Windows presenter likewise
+  stops on device loss or unrecoverable runtime resize, present or shared
+  ownership errors. Initial setup and ordinary shared-open failures retain
+  their safe fallback paths. Full device/resource recovery and real-driver
+  loss races are not established. Blood Wake's newer recovery worker is prior art, but it does
   not by itself define how Brute Force should settle pending PFB flush,
   semaphore, report, flip, shared-present, and guest-readback work.
 - Fixed and native resolution controls and mip sampling have synthetic

@@ -438,9 +438,10 @@ The D3D11 P8 path uses the programmed 32, 64, 128 or 256-entry palette and
 rejects unreadable or known-short allocations and out-of-range indices.
 Actual hardware behavior for out-of-range indices, untracked suballocations,
 render-target aliases and concurrent guest writes remain unverified. The CPU
-reference path is unchanged. Device loss in the renderer is reported and
-stops execution rather than reporting GPU work as complete; device recovery
-and the separate presenter device have not been validated.
+reference path is unchanged. Device loss in the renderer or separate
+presenter is reported and stops execution rather than reporting GPU work as
+complete. Synthetic fault injection covers both; actual loss races and
+device recovery have not been validated.
 
 `RECOMP_GPU_SCALE=native` renders the D3D11 path at the current 4:3 picture
 inside the output window. A numeric value selects physical pixels per
@@ -460,9 +461,9 @@ not conflict with a diagnostic Native setting.
 If a native resize cannot allocate its resources, the `[GPU-SCALE]` or
 `[GPU-D3D11]` diagnostics identify the failure; the last working scale and
 resources remain active and a later frame can retry. A busy shared frame
-also defers the change until it is safely released. A non-timeout mutex
-error disables shared presentation, while device loss stops execution;
-neither is automatically recovered. This does not silently lower the
+also defers the change until it is safely released. A non-timeout shared
+mutex ownership error or a removed/reset device stops execution with a
+diagnostic; neither is automatically recovered. This does not silently lower the
 requested scale. Resized colour targets retain their contents, but
 changed-size depth/stencil targets are recreated with undefined contents
 until the guest clears or regenerates them. Native resizing during retail
@@ -541,15 +542,18 @@ partially overlapping aliases, depth cube textures, multiple mip levels,
 other depth formats, and CPU reference decoding are not supported. Draws
 using rejected depth aliases or stage modes are skipped with a diagnostic.
 The option is off by default and has not established original-hardware
-equivalence. It cannot be combined with an active render scale. Per-flip
-guest readback and synchronization are unchanged.
+equivalence. It cannot be combined with an active render scale. The depth
+alias option itself does not change readback or synchronization.
 
 `RECOMP_GPU_STENCIL_ALIAS=1` separately enables experimental packed D24S8
 sampling when a `0x41` texture exactly aliases a tracked GPU depth surface.
 The GPU reconstructs the depth bytes and stencil alpha into a filterable
 texture. Depth and stencil must each be initialized; unsupported overlaps
-are rejected rather than read from stale guest memory. Ordinary `0x41`
-textures are unchanged. Guest writes and partially overlapping aliases
+are rejected rather than read from stale guest memory, including recognized
+physical and tiled RAM aliases and unsupported formats over tracked depth.
+Ordinary non-overlapping `0x41` textures are unchanged. Read-only draw
+states preserve a packed conversion; potentially writing draws invalidate it
+even when no fragment ultimately writes. Guest writes and partially overlapping aliases
 remain unsupported. A synthetic replay of the traced bright-pass state shows
 how stale stencil bytes could exaggerate glow, but the effect on the reported
 gameplay bloom and original-hardware fidelity remain unestablished. It cannot
@@ -558,12 +562,36 @@ be combined with an active render scale.
 `RECOMP_GPU_DIRECT_PRESENT=1` lets the D3D11 renderer hand a finished
 32-bit GPU surface, whose dimensions may differ from the guest framebuffer,
 to the D3D11 window presenter through a bounded shared texture. Pinned
-framebuffers and PVIDEO overlays use the CPU-composited frame instead. Guest
-readback still happens on every flip for guest-visible memory, frame
-statistics and captures, so this does not remove that stall or bound all GPU
-work in flight. CPU-written Bink frames are first synchronized into the GPU
-surface and remain eligible for the scaled shared route. The option is off at
-the default 480p resolution and is enabled automatically for scaled modes.
+framebuffers and PVIDEO overlays use the CPU-composited frame instead. By
+default tracked surfaces still read back on flips. CPU-written Bink frames
+are first synchronized into the GPU surface and remain eligible for the
+scaled shared route. The option is off at the default 480p resolution and
+is enabled automatically for scaled modes.
+
+`RECOMP_GPU_SKIP_CLEAN_READBACK=1` is a separate, default-off environment
+experiment, not a launcher setting. For an unscaled, native-size 32-bit
+surface only, it skips the copy when guest memory is already known to match
+the clean GPU image; dirty surfaces, scaled surfaces and 16-bit surfaces
+still copy. Initial seeds and guest CPU writes also use normal readback after
+the upload; later unchanged frames may elide it. Clear and readback snapshots
+are checked for matching bytes, including a recheck after the GPU wait. Setting
+`RECOMP_FRAME_STATS`, `RECOMP_FB_DUMP`, `RECOMP_FB_DUMP_FLIPS` or
+`RECOMP_PRESENTER_CAPTURE` forces normal readback. CPU presentation and
+screenshots continue to use coherent guest pixels. This is not on-demand
+guest-read interception or a proven title performance improvement: tracked
+surface flips still wait for GPU completion, and arbitrary concurrent guest
+write timing remains unverified. Set the option to `0` or unset it for the
+reference behavior; other values are rejected.
+
+The renderer also limits submitted GPU work to two event-query batches,
+checkpointing at flips or after 128 renderer operations and waiting when
+full. This is separate from the presenter's one-slot shared frame. It does
+not skip PFB flushes, semaphore releases, visibility reports or flip holds.
+Device removal and unrecoverable runtime presenter resource/ownership errors
+are fatal and report the operation and result. Missing or exhausted required
+draw states also stop rather than rendering with incorrect defaults; restart
+rather than relying on automatic recovery. Initialization and non-device
+shared-open failures retain their normal CPU/GDI fallbacks.
 
 The D3D11 renderer respects partial color, depth and stencil clear rectangles
 instead of clearing the whole target for each strip. When a registered backend

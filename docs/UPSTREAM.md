@@ -78,11 +78,15 @@ was copied from the newer revision. Candidate-specific overlap and validation
 requirements are recorded below.
 
 The surviving local stack was rebased onto v0.17.0 plus those selections.
-Thirty-three existing patches apply in order with ordinary
-`git apply --index`; new patch 0037 corrects stale Windows serial-raster worker
-telemetry, for 34 local patches total. The deterministic tree is
-`131abd8d1f4559bb36dba4391e4c644925cff5df`. Clean reconstruction and
-`python tools/toolkit.py --verify` pass. The integrated framework reports
+Thirty-three existing patches applied in order with ordinary
+`git apply --index`; patch 0037 corrects stale Windows serial-raster worker
+telemetry. The earlier 34-patch tree was
+`131abd8d1f4559bb36dba4391e4c644925cff5df` and passed clean reconstruction.
+The corrected 0027 fixture and added presenter-loss patch 0038 produce 35
+local patches and tree `86dcf92c99a87940b3346b3cd3b55b8f6145a881`.
+The isolated checkout's index and working files pass
+`python tools/toolkit.py --verify --checkout build\pipeline-toolkit`; this
+change did not rerun shared setup. The earlier integrated framework reported
 992 Python tests passed, 2 skipped and 134 subtests passed; the Release
 backend-contract, PFB-flush, GPU-audit, raster-batch and EEPROM fixtures also
 pass.
@@ -715,8 +719,10 @@ own GPU back end, an extended interface for it, and its own pacing fixes.
     A keyed mutex and one pending slot bound snapshots; frame IDs prevent a
     stale GPU image from replacing a newer CPU snapshot. Pinned framebuffers
     and PVIDEO overlays drain the slot and use the CPU frame. The producer
-    retains guest readback on every flip; no general frame-in-flight bound
-    or on-demand readback is implemented.
+    retains guest readback by default. A separate default-off project option
+    elides copies only for already-coherent native 32-bit surfaces; every
+    tracked-surface flip still waits. A two-event renderer-work bound now
+    provides backpressure without defining general on-demand readback.
     [0028-scaled-gpu-presentation.patch](../patches/xboxrecomp/0028-scaled-gpu-presentation.patch)
     extends that local protocol for the Blood Wake-derived internal-resolution
     milestone: the shared source may have dimensions independent of the guest
@@ -729,6 +735,8 @@ own GPU back end, an extended interface for it, and its own pacing fixes.
     It defers a busy handoff rather than skipping the keyed-mutex protocol.
     Changed-size depth/stencil is not migrated. This hardening changes no
     framework patch; a generic lifecycle contract remains to be designed.
+    Patch 0038 separately makes unrecoverable Windows presenter/device
+    failures explicit; it does not implement recovery.
     *Tests:* WARP and hardware fixtures check exact shared pixels, busy,
     future and stale slots, arbitrary valid source dimensions, dimension
     propagation, pinned and overlay fallback, and snapshot consistency.
@@ -746,7 +754,7 @@ own GPU back end, an extended interface for it, and its own pacing fixes.
     *Before filing:* separate the generic arbitrary-source contract from the
     project-specific output-size policy; define transactional resource and
     depth-content behavior across backends; investigate the variable combined
-    title performance and frequent busy slots; test device loss, other
+    title performance and frequent busy slots; test real device loss, other
     drivers and window lifecycles; establish guest readers before eliminating
     readback; and reconcile the presentation interface with #184 and #285.
     *Status:* experimental local framework patch and project back end.
@@ -1215,7 +1223,9 @@ own GPU back end, an extended interface for it, and its own pacing fixes.
     GPU and SDL capture, protects existing outputs and rejects incomplete or
     inconsistent captures. It does not claim visibility, scanout or pixel
     identity with a guest dump.
-    *Tests:* 17 synthetic capture cases passed on MSVC, including WARP and
+    *Tests:* The stale fixture call to `take_shared` was corrected to pass
+    its width and height outputs. The original 17 synthetic capture cases
+    passed on MSVC, including WARP and
     hardware shared rejection, CPU-upload readback, concurrent snapshots,
     repeat/skip alignment, overlays and error paths. Capture-off project
     presentation fixtures, four framework CTests and 174 integrated project
@@ -1228,7 +1238,7 @@ own GPU back end, an extended interface for it, and its own pacing fixes.
     [#156](https://github.com/sp00nznet/xboxrecomp/pull/156) covers flip
     dumps, [#220](https://github.com/sp00nznet/xboxrecomp/pull/220) PVIDEO,
     and [#215](https://github.com/sp00nznet/xboxrecomp/pull/215) the Windows
-    presenter. Open [#285](https://github.com/sp00nznet/xboxrecomp/pull/285)
+    presenter. Merged [#285](https://github.com/sp00nznet/xboxrecomp/pull/285)
     covers backend readback and [#184](https://github.com/sp00nznet/xboxrecomp/pull/184)
     tracks the GPU series.
     *Before filing:* review lifecycle, portability, disk usage and statistics
@@ -1677,6 +1687,36 @@ own GPU back end, an extended interface for it, and its own pacing fixes.
     generic recovery from title/DSP policy, and validate on multiple Windows
     versions and endpoint types.
     *Status:* deferred framework candidate; no patch or upstream action.
+
+45. **Stop safely when the Windows presenter loses its device or resources.**
+    *Problem:* the separate presenter device could encounter removal/reset or
+    fail a resize, present, or keyed-mutex ownership transition without a
+    deterministic boundary for outstanding GPU work and shared frames.
+    *Evidence:* source review identified those independent producer and
+    presenter boundaries. Fault-injected synthetic Windows tests exercise
+    them; no retail device-loss incident or automatic recovery is claimed.
+    *Change:* [0038-presenter-device-loss.patch](../patches/xboxrecomp/0038-presenter-device-loss.patch)
+    is a generic, default-on correctness fix: it reports the operation,
+    HRESULT and device-removed reason and fails closed on device loss or
+    unrecoverable runtime presenter/ownership errors. Non-device initial
+    setup and shared-open errors retain GDI/CPU fallback. Fault injection is
+    compiled into the fixture only. Project-side producer checks and its
+    bounded work queue remain in `src/`; neither patch skips synchronization.
+    *Tests:* 19 presenter-capture fixture cases passed with WARP and the
+    available hardware adapter, including injected initialization, shared
+    open/acquire/release, resize, back-buffer, render-target and Present
+    failures. Pending/completed markers verify fatal paths do not resume.
+    Existing capture-off presentation paths also run. These simulations do
+    not test driver removal races, other adapters or device recreation.
+    *Overlap:* the last recorded read-only check on 2026-11-11 identified
+    merged #215's Windows presenter, #220's PVIDEO work, #285's snapshot
+    ordering and #306's backend contract under tracking index #184.
+    No new upstream contact was made for this work.
+    *Before filing:* recheck current upstream and prior art, split and review
+    fail-stop policy from any future recovery design, and test actual loss,
+    resizing, shutdown and pending guest-visible work on multiple drivers.
+    Request approval before filing or commenting.
+    *Status:* local framework patch; synthetic-tested, not prepared or filed.
 
 ### Open upstream work to select or coordinate with
 

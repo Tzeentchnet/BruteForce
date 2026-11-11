@@ -22,6 +22,14 @@ python -m pytest -q tools
 Pop-Location
 ```
 
+For an already prepared isolated checkout, verify it instead:
+
+```powershell
+python tools\toolkit.py --verify --checkout build\pipeline-toolkit
+```
+
+The `--checkout` option is verify-only; it cannot install or modify a checkout.
+
 The direct MSVC differential cases require the Visual Studio 2022 x86 C/C++
 tools. The focused native fixtures that cover the current selected backend
 contract, EEPROM options, GPU audit, PFB wait, and raster diagnostic can be
@@ -124,6 +132,45 @@ rewrites, including guarded base-level fallback under approximate-cache mode.
 Rendered 2D and cube scenes exercise supplied levels, stage-specific clamps,
 the disabled path and 2x physical-scale LOD selection. It does not prove title
 image equivalence, hardware NV2A behavior, resource budgets or performance.
+
+For the GPU pipeline, synchronization and presenter failure boundaries:
+
+```powershell
+cmake --build build\smoke --config Release --target bruteforce_d3d11_test `
+  bruteforce_fence_test bruteforce_frame_stats_test bruteforce_present_test `
+  bruteforce_gpu_shared_present_test bruteforce_pushbuffer_test
+$env:BRUTEFORCE_TEST_D3D11 = "$PWD\build\smoke\Release\bruteforce_d3d11_test.exe"
+$env:BRUTEFORCE_TEST_FENCE = "$PWD\build\smoke\Release\bruteforce_fence_test.exe"
+$env:BRUTEFORCE_TEST_FRAME_STATS = "$PWD\build\smoke\Release\bruteforce_frame_stats_test.exe"
+$env:BRUTEFORCE_TEST_PRESENT = "$PWD\build\smoke\Release\bruteforce_present_test.exe"
+$env:BRUTEFORCE_TEST_GPU_SHARED_PRESENT = "$PWD\build\smoke\Release\bruteforce_gpu_shared_present_test.exe"
+$env:BRUTEFORCE_TEST_PUSHBUFFER = "$PWD\build\smoke\Release\bruteforce_pushbuffer_test.exe"
+$env:BRUTEFORCE_TEST_D3D11_HARDWARE = "1" # omit to use WARP only
+python -m pytest -q --basetemp build\smoke\pytest-pipeline tests\test_d3d11.py -k pipeline_
+python -m pytest -q --basetemp build\smoke\pytest-sync tests\test_fence.py `
+  tests\test_frame_stats.py tests\test_present.py tests\test_pushbuffer.py tests\test_toolkit.py
+```
+
+The pipeline fixture compares every guest frame with elision off/on, forces
+diagnostic and 16-bit readback, exercises queue saturation and failure,
+checks state-aware packed-depth invalidation and rejected overlapping or
+scaled aliases and synthetic guest writes at coherence boundaries, and injects
+producer and required draw-state failures before completion.
+Hardware presenter tests require a usable Windows D3D11 adapter. Run the
+framework `nv2a_pfb_flush` and `nv2a_ffp_backend` CTests above as well.
+
+From a VS 2022 x64 developer prompt, the isolated framework's capture and
+presenter-device fixture can be built without retail data:
+
+```powershell
+& build\pipeline-toolkit\tests\presenter_capture\run_windows.ps1 `
+  -ProjectTests "$PWD\tests"
+```
+
+Its hidden-window and WARP/hardware tests inject presenter loss and resource
+errors and verify fail-stop markers; add `-SkipHardware` when no hardware
+adapter is available. Tests do not simulate actual driver loss or prove
+retail guest-reader coverage, image parity or throughput.
 
 Project-owned source is MIT-licensed. The linked executable includes xemu's
 GPL-2.0-or-later DSP interpreter and is distributed, if at all, under

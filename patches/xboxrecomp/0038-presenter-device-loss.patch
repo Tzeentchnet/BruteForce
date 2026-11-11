@@ -1,0 +1,506 @@
+diff --git a/src/video/gpu_present.c b/src/video/gpu_present.c
+index 04364a2..13b25a9 100644
+--- a/src/video/gpu_present.c
++++ b/src/video/gpu_present.c
+@@ -49,6 +49,54 @@ static ID3D11ShaderResourceView *s_shared_srv;
+ static IDXGIKeyedMutex          *s_shared_mutex;
+ static uint32_t                  s_shared_width, s_shared_height;
+ 
++#ifdef RECOMP_PRESENT_TESTING
++static const char *s_present_test_stage;
++static HRESULT s_present_test_result, s_present_test_reason;
++static HRESULT present_test_result(const char *stage, HRESULT result)
++{
++    if (s_present_test_stage && strcmp(s_present_test_stage, stage) == 0) {
++        s_present_test_stage = NULL;
++        return s_present_test_result;
++    }
++    return result;
++}
++#else
++static HRESULT present_test_result(const char *stage, HRESULT result)
++{
++    (void)stage;
++    return result;
++}
++#endif
++
++static void present_check_device(HRESULT result, const char *operation)
++{
++    HRESULT reason = s_dev ? ID3D11Device_GetDeviceRemovedReason(s_dev) : S_OK;
++#ifdef RECOMP_PRESENT_TESTING
++    if (FAILED(s_present_test_reason))
++        reason = s_present_test_reason;
++#endif
++    if (FAILED(reason) || result == DXGI_ERROR_DEVICE_REMOVED ||
++        result == DXGI_ERROR_DEVICE_RESET || result == DXGI_ERROR_DEVICE_HUNG ||
++        result == DXGI_ERROR_DRIVER_INTERNAL_ERROR) {
++        fprintf(stderr, "  [D3D] presenter device lost during %s: result 0x%08lX,"
++                        " removed reason 0x%08lX; recovery is not implemented,"
++                        " stopping rather than completing a shared frame\n",
++                operation, (unsigned long)result, (unsigned long)reason);
++        fflush(stderr);
++        abort();
++    }
++}
++
++static void present_fatal(HRESULT result, const char *operation)
++{
++    present_check_device(result, operation);
++    fprintf(stderr, "  [D3D] presenter %s failed 0x%08lX;"
++                    " resource recovery is not implemented, stopping\n",
++            operation, (unsigned long)result);
++    fflush(stderr);
++    abort();
++}
++
+ /* A triangle covering the viewport, from the vertex id; uv 0..1. */
+ static const char s_hlsl[] =
+     "Texture2D t : register(t0); SamplerState s : register(s0);\n"
+@@ -79,9 +127,15 @@ static int make_rtv(void)
+ {
+     ID3D11Texture2D *back = NULL;
+     HRESULT hr = IDXGISwapChain_GetBuffer(s_chain, 0, &IID_ID3D11Texture2D, (void **)&back);
+-    if (FAILED(hr))
++    hr = present_test_result("back-buffer", hr);
++    present_check_device(hr, "getting back buffer");
++    if (FAILED(hr)) {
++        if (back) ID3D11Texture2D_Release(back);
+         return 0;
++    }
+     hr = ID3D11Device_CreateRenderTargetView(s_dev, (ID3D11Resource *)back, NULL, &s_rtv);
++    hr = present_test_result("render-target", hr);
++    present_check_device(hr, "creating back-buffer view");
+     ID3D11Texture2D_Release(back);
+     return SUCCEEDED(hr);
+ }
+@@ -129,6 +183,7 @@ int gpu_present_init(HWND hwnd, uint32_t width, uint32_t height)
+     hr = D3D11CreateDeviceAndSwapChain(NULL, D3D_DRIVER_TYPE_HARDWARE, NULL, 0,
+                                        NULL, 0, D3D11_SDK_VERSION, &sd,
+                                        &s_chain, &s_dev, NULL, &s_ctx);
++    present_check_device(hr, "creating device and swap chain");
+     if (FAILED(hr)) {
+         fprintf(stderr, "  [D3D] device/swap chain failed (0x%08lX); staying on GDI\n",
+                 (unsigned long)hr);
+@@ -138,8 +193,11 @@ int gpu_present_init(HWND hwnd, uint32_t width, uint32_t height)
+         /* Alt+Enter is the window's (borderless fullscreen, fb_present.c),
+          * not DXGI's exclusive mode at 640x480. */
+         IDXGIFactory *fac = NULL;
+-        if (SUCCEEDED(IDXGISwapChain_GetParent(s_chain, &IID_IDXGIFactory, (void **)&fac))) {
+-            IDXGIFactory_MakeWindowAssociation(fac, hwnd, DXGI_MWA_NO_ALT_ENTER);
++        hr = IDXGISwapChain_GetParent(s_chain, &IID_IDXGIFactory, (void **)&fac);
++        present_check_device(hr, "querying swap-chain factory");
++        if (SUCCEEDED(hr)) {
++            hr = IDXGIFactory_MakeWindowAssociation(fac, hwnd, DXGI_MWA_NO_ALT_ENTER);
++            present_check_device(hr, "associating presenter window");
+             IDXGIFactory_Release(fac);
+         }
+     }
+@@ -154,20 +212,30 @@ int gpu_present_init(HWND hwnd, uint32_t width, uint32_t height)
+     smp.MaxLOD = D3D11_FLOAT32_MAX;
+     vsb = compile("vs", "vs_4_0");
+     psb = compile("ps", "ps_4_0");
+-    if (!vsb || !psb || !make_rtv()
+-        || FAILED(ID3D11Device_CreateTexture2D(s_dev, &td, NULL, &s_frame))
+-        || FAILED(ID3D11Device_CreateShaderResourceView(s_dev, (ID3D11Resource *)s_frame, NULL, &s_srv))
+-        || FAILED(ID3D11Device_CreateSamplerState(s_dev, &smp, &s_samp))
+-        || FAILED(ID3D11Device_CreateVertexShader(s_dev, ID3D10Blob_GetBufferPointer(vsb),
+-                                                  ID3D10Blob_GetBufferSize(vsb), NULL, &s_vs))
+-        || FAILED(ID3D11Device_CreatePixelShader(s_dev, ID3D10Blob_GetBufferPointer(psb),
+-                                                 ID3D10Blob_GetBufferSize(psb), NULL, &s_ps))) {
+-        fprintf(stderr, "  [D3D] present resources failed; staying on GDI\n");
+-        if (vsb) ID3D10Blob_Release(vsb);
+-        if (psb) ID3D10Blob_Release(psb);
+-        gpu_present_shutdown();
+-        return 0;
+-    }
++    if (!vsb || !psb || !make_rtv())
++        goto failed;
++    hr = ID3D11Device_CreateTexture2D(s_dev, &td, NULL, &s_frame);
++    hr = present_test_result("init-frame", hr);
++    present_check_device(hr, "creating CPU frame texture");
++    if (FAILED(hr)) goto failed;
++    hr = ID3D11Device_CreateShaderResourceView(s_dev, (ID3D11Resource *)s_frame, NULL, &s_srv);
++    hr = present_test_result("init-view", hr);
++    present_check_device(hr, "creating CPU frame view");
++    if (FAILED(hr)) goto failed;
++    hr = ID3D11Device_CreateSamplerState(s_dev, &smp, &s_samp);
++    hr = present_test_result("init-sampler", hr);
++    present_check_device(hr, "creating presenter sampler");
++    if (FAILED(hr)) goto failed;
++    hr = ID3D11Device_CreateVertexShader(s_dev, ID3D10Blob_GetBufferPointer(vsb),
++                                         ID3D10Blob_GetBufferSize(vsb), NULL, &s_vs);
++    hr = present_test_result("init-vs", hr);
++    present_check_device(hr, "creating presenter vertex shader");
++    if (FAILED(hr)) goto failed;
++    hr = ID3D11Device_CreatePixelShader(s_dev, ID3D10Blob_GetBufferPointer(psb),
++                                        ID3D10Blob_GetBufferSize(psb), NULL, &s_ps);
++    hr = present_test_result("init-ps", hr);
++    present_check_device(hr, "creating presenter pixel shader");
++    if (FAILED(hr)) goto failed;
+     ID3D10Blob_Release(vsb);
+     ID3D10Blob_Release(psb);
+     fprintf(stderr, "  [D3D] presenting through D3D11 (%ux%u frame, vsync %s, %s filter)\n",
+@@ -175,6 +243,13 @@ int gpu_present_init(HWND hwnd, uint32_t width, uint32_t height)
+             smp.Filter == D3D11_FILTER_MIN_MAG_MIP_POINT ? "point" : "linear");
+     InterlockedExchange(&s_shared_ready, 1);
+     return 1;
++
++failed:
++    fprintf(stderr, "  [D3D] present resources failed; staying on GDI\n");
++    if (vsb) ID3D10Blob_Release(vsb);
++    if (psb) ID3D10Blob_Release(psb);
++    gpu_present_shutdown();
++    return 0;
+ }
+ 
+ int gpu_present_shared_ready(uint32_t width, uint32_t height)
+@@ -269,12 +344,16 @@ static ID3D11ShaderResourceView *take_shared(int allow_shared, uint64_t frame_id
+         release_shared_resources();
+         hr = ID3D11Device_OpenSharedResource(s_dev, handle, &IID_ID3D11Texture2D,
+                                             (void **)&s_shared_texture);
++        hr = present_test_result("shared-open", hr);
++        present_check_device(hr, "opening shared frame");
+         if (SUCCEEDED(hr))
+             hr = ID3D11Texture2D_QueryInterface(s_shared_texture, &IID_IDXGIKeyedMutex,
+                                                 (void **)&s_shared_mutex);
++        present_check_device(hr, "querying shared-frame mutex");
+         if (SUCCEEDED(hr))
+             hr = ID3D11Device_CreateShaderResourceView(s_dev, (ID3D11Resource *)s_shared_texture,
+                                                        NULL, &s_shared_srv);
++        present_check_device(hr, "creating shared-frame view");
+         if (SUCCEEDED(hr)) {
+             D3D11_TEXTURE2D_DESC td;
+             ID3D11Texture2D_GetDesc(s_shared_texture, &td);
+@@ -296,6 +375,8 @@ static ID3D11ShaderResourceView *take_shared(int allow_shared, uint64_t frame_id
+     } else if (pending_width != s_shared_width || pending_height != s_shared_height)
+         dimensions_match = 0;
+     hr = IDXGIKeyedMutex_AcquireSync(s_shared_mutex, 1, 0);
++    hr = present_test_result("shared-acquire", hr);
++    present_check_device(hr, "acquiring shared frame");
+     if (hr == WAIT_TIMEOUT) {
+         AcquireSRWLockExclusive(&s_shared_lock);
+         if (!s_pending_shared && InterlockedCompareExchange(&s_shared_ready, 0, 0)) {
+@@ -308,25 +389,25 @@ static ID3D11ShaderResourceView *take_shared(int allow_shared, uint64_t frame_id
+         return NULL;
+     }
+     if (hr != S_OK) {
+-        fprintf(stderr, "  [D3D] shared frame acquire failed 0x%08lX; using CPU frames\n",
+-                (unsigned long)hr);
+-        InterlockedExchange(&s_shared_ready, 0);
+-        return NULL;
++        present_fatal(hr, "shared frame acquire");
+     }
+     if (!dimensions_match) {
+         fprintf(stderr, "  [D3D] shared frame dimensions changed without a new resource;"
+                         " using CPU frames\n");
+-        IDXGIKeyedMutex_ReleaseSync(s_shared_mutex, 0);
++        hr = IDXGIKeyedMutex_ReleaseSync(s_shared_mutex, 0);
++        hr = present_test_result("shared-release", hr);
++        present_check_device(hr, "releasing mismatched shared frame");
++        if (hr != S_OK)
++            present_fatal(hr, "shared frame release");
+         InterlockedExchange(&s_shared_ready, 0);
+         return NULL;
+     }
+     if (!allow_shared || frame_id != pending_id) {
+         hr = IDXGIKeyedMutex_ReleaseSync(s_shared_mutex, 0);
+-        if (FAILED(hr)) {
+-            fprintf(stderr, "  [D3D] shared frame release failed 0x%08lX; using CPU frames\n",
+-                    (unsigned long)hr);
+-            InterlockedExchange(&s_shared_ready, 0);
+-        }
++        hr = present_test_result("shared-release", hr);
++        present_check_device(hr, "releasing discarded shared frame");
++        if (hr != S_OK)
++            present_fatal(hr, "shared frame release");
+         return NULL;
+     }
+     *held = 1;
+@@ -353,6 +434,7 @@ static int gpu_present_frame_impl(const uint32_t *pixels, int allow_shared,
+         memset(trace, 0, sizeof *trace);
+         trace->stage = GPU_PRESENT_NO_SURFACE;
+     }
++    present_check_device(S_OK, "starting frame");
+     if (!s_rtv || !pixels)
+         return 0;
+     client_size(&cw, &ch);
+@@ -362,17 +444,19 @@ static int gpu_present_frame_impl(const uint32_t *pixels, int allow_shared,
+         ID3D11RenderTargetView_Release(s_rtv);
+         s_rtv = NULL;
+         hr = IDXGISwapChain_ResizeBuffers(s_chain, 0, cw, ch, DXGI_FORMAT_UNKNOWN, 0);
++        hr = present_test_result("resize", hr);
+         if (FAILED(hr)) {
+             if (trace) {
+                 trace->stage = GPU_PRESENT_RESIZE_FAILED;
+                 trace->result = hr;
+             }
+-            return 0;
++            present_fatal(hr, "swap-chain resize");
+         }
++        present_check_device(hr, "resizing swap chain");
+         if (!make_rtv()) {
+             if (trace)
+                 trace->stage = GPU_PRESENT_TARGET_FAILED;
+-            return 0;
++            present_fatal(E_FAIL, "back-buffer recreation");
+         }
+         s_bw = cw; s_bh = ch;
+     }
+@@ -383,8 +467,10 @@ static int gpu_present_frame_impl(const uint32_t *pixels, int allow_shared,
+         ID3D11DeviceContext_PSSetShaderResources(s_ctx, 0, 1, &none);
+         ID3D11DeviceContext_Flush(s_ctx);
+         trace->shared_release = IDXGIKeyedMutex_ReleaseSync(s_shared_mutex, 0);
+-        if (FAILED(trace->shared_release))
+-            InterlockedExchange(&s_shared_ready, 0);
++        trace->shared_release = present_test_result("shared-release", trace->shared_release);
++        present_check_device(trace->shared_release, "releasing captured shared frame");
++        if (trace->shared_release != S_OK)
++            present_fatal(trace->shared_release, "shared frame release");
+         return 0;
+     }
+     if (!frame) {
+@@ -415,6 +501,10 @@ static int gpu_present_frame_impl(const uint32_t *pixels, int allow_shared,
+     /* Paced only when Present waited for the vblank: with RECOMP_PRESENT_VSYNC=0
+      * the caller keeps its own 16 ms sleep instead of spinning a core. */
+     present_hr = IDXGISwapChain_Present(s_chain, (UINT)s_vsync, 0);
++    present_hr = present_test_result("present", present_hr);
++    present_check_device(present_hr, "presenting frame");
++    if (FAILED(present_hr))
++        present_fatal(present_hr, "Present");
+     if (trace) {
+         trace->stage = GPU_PRESENT_CALLED;
+         trace->result = present_hr;
+@@ -427,11 +517,10 @@ static int gpu_present_frame_impl(const uint32_t *pixels, int allow_shared,
+         ID3D11DeviceContext_PSSetShaderResources(s_ctx, 0, 1, &none);
+         ID3D11DeviceContext_Flush(s_ctx);
+         hr = IDXGIKeyedMutex_ReleaseSync(s_shared_mutex, 0);
+-        if (FAILED(hr)) {
+-            fprintf(stderr, "  [D3D] shared frame release failed 0x%08lX; using CPU frames\n",
+-                    (unsigned long)hr);
+-            InterlockedExchange(&s_shared_ready, 0);
+-        }
++        hr = present_test_result("shared-release", hr);
++        present_check_device(hr, "releasing presented shared frame");
++        if (hr != S_OK)
++            present_fatal(hr, "shared frame release");
+     }
+     return present_hr == S_OK && s_vsync;
+ }
+@@ -451,6 +540,7 @@ int gpu_present_frame_capture(const uint32_t *pixels, int allow_shared,
+ 
+ void gpu_present_shutdown(void)
+ {
++    present_check_device(S_OK, "shutting down presenter");
+     InterlockedExchange(&s_shared_ready, 0);
+     AcquireSRWLockExclusive(&s_shared_lock);
+     s_pending_shared = NULL;
+diff --git a/tests/presenter_capture/device_loss_test.c b/tests/presenter_capture/device_loss_test.c
+new file mode 100644
+index 0000000..0ecb83e
+--- /dev/null
++++ b/tests/presenter_capture/device_loss_test.c
+@@ -0,0 +1,127 @@
++#define COBJMACROS
++#define RECOMP_PRESENT_TESTING
++#include <windows.h>
++#include <d3d11.h>
++#include <dxgi.h>
++#include <stdint.h>
++#include <stdio.h>
++#include <string.h>
++
++#include "video/gpu_present.c"
++
++#define REQUIRE(c) do { if (!(c)) { fprintf(stderr, "FAIL %d: %s\n", __LINE__, #c); return 1; } } while (0)
++
++static void inject(const char *stage, int loss)
++{
++    s_present_test_stage = stage;
++    s_present_test_result = loss ? DXGI_ERROR_DEVICE_REMOVED : E_OUTOFMEMORY;
++}
++
++static int shared_test(const char *stage, int loss, int hardware)
++{
++    D3D_FEATURE_LEVEL feature = D3D_FEATURE_LEVEL_11_0, obtained;
++    D3D_DRIVER_TYPE driver = hardware ? D3D_DRIVER_TYPE_HARDWARE : D3D_DRIVER_TYPE_WARP;
++    ID3D11Device *producer = NULL;
++    ID3D11DeviceContext *context = NULL;
++    ID3D11Texture2D *texture = NULL;
++    IDXGIResource *resource = NULL;
++    IDXGIKeyedMutex *mutex = NULL;
++    D3D11_TEXTURE2D_DESC td;
++    HANDLE handle = NULL;
++    uint32_t width = 0, height = 0;
++    int held = 0;
++    ID3D11ShaderResourceView *view;
++
++    REQUIRE(SUCCEEDED(D3D11CreateDevice(NULL, driver, NULL, 0, &feature, 1,
++                                        D3D11_SDK_VERSION, &producer, &obtained, &context)));
++    REQUIRE(SUCCEEDED(D3D11CreateDevice(NULL, driver, NULL, 0, &feature, 1,
++                                        D3D11_SDK_VERSION, &s_dev, &obtained, &s_ctx)));
++    memset(&td, 0, sizeof td);
++    td.Width = td.Height = 8;
++    td.MipLevels = td.ArraySize = 1;
++    td.Format = DXGI_FORMAT_B8G8R8A8_UNORM;
++    td.SampleDesc.Count = 1;
++    td.Usage = D3D11_USAGE_DEFAULT;
++    td.BindFlags = D3D11_BIND_SHADER_RESOURCE | D3D11_BIND_RENDER_TARGET;
++    td.MiscFlags = D3D11_RESOURCE_MISC_SHARED_KEYEDMUTEX;
++    REQUIRE(SUCCEEDED(ID3D11Device_CreateTexture2D(producer, &td, NULL, &texture)));
++    REQUIRE(SUCCEEDED(ID3D11Texture2D_QueryInterface(texture, &IID_IDXGIResource,
++                                                      (void **)&resource)));
++    REQUIRE(SUCCEEDED(IDXGIResource_GetSharedHandle(resource, &handle)) && handle);
++    REQUIRE(SUCCEEDED(ID3D11Texture2D_QueryInterface(texture, &IID_IDXGIKeyedMutex,
++                                                      (void **)&mutex)));
++    REQUIRE(IDXGIKeyedMutex_AcquireSync(mutex, 0, 0) == S_OK);
++    ID3D11DeviceContext_Flush(context);
++    REQUIRE(IDXGIKeyedMutex_ReleaseSync(mutex, 1) == S_OK);
++    REQUIRE(IDXGIKeyedMutex_AcquireSync(mutex, 1, 5000) == S_OK);
++    REQUIRE(IDXGIKeyedMutex_ReleaseSync(mutex, 1) == S_OK);
++    s_w = s_h = 8;
++    InterlockedExchange(&s_shared_ready, 1);
++    REQUIRE(gpu_present_submit_shared(handle, 8, 8, 1));
++    inject(stage, loss);
++    view = take_shared(strcmp(stage, "shared-release") != 0, 1, &held, &width, &height);
++    REQUIRE(!view && !held && strcmp(stage, "shared-open") == 0 && !loss &&
++            !gpu_present_shared_ready(8, 8));
++    IDXGIKeyedMutex_Release(mutex);
++    IDXGIResource_Release(resource);
++    ID3D11Texture2D_Release(texture);
++    ID3D11DeviceContext_Release(context);
++    ID3D11Device_Release(producer);
++    gpu_present_shutdown();
++    puts("shared open falls back to CPU");
++    return 0;
++}
++
++static int window_test(const char *stage, int loss)
++{
++    HWND window;
++    uint32_t pixels[64] = {0};
++    int init_stage = strncmp(stage, "init-", 5) == 0;
++
++    window = CreateWindowA("STATIC", "synthetic presenter loss", WS_OVERLAPPEDWINDOW,
++                           0, 0, 200, 200, NULL, NULL, GetModuleHandleA(NULL), NULL);
++    REQUIRE(window);
++    _putenv_s("RECOMP_FB_VA", "");
++    _putenv_s("RECOMP_PRESENT_VSYNC", "0");
++    if (init_stage)
++        inject(stage, loss);
++    if (!gpu_present_init(window, 8, 8)) {
++        REQUIRE(init_stage && !loss);
++        DestroyWindow(window);
++        puts("initial resource failure falls back to GDI");
++        return 0;
++    }
++    if (strcmp(stage, "reason") == 0)
++        s_present_test_reason = DXGI_ERROR_DEVICE_REMOVED;
++    else
++        inject(stage, loss);
++    if (strcmp(stage, "resize") == 0 || strcmp(stage, "back-buffer") == 0 ||
++        strcmp(stage, "render-target") == 0)
++        REQUIRE(SetWindowPos(window, NULL, 0, 0, 300, 240,
++                             SWP_NOMOVE | SWP_NOZORDER | SWP_NOACTIVATE));
++    gpu_present_frame(pixels, 0, 1);
++    gpu_present_shutdown();
++    DestroyWindow(window);
++    return 1;
++}
++
++int main(int argc, char **argv)
++{
++    FILE *marker;
++    int result, loss;
++
++    SetErrorMode(SEM_NOGPFAULTERRORBOX | SEM_FAILCRITICALERRORS);
++    if (argc != 5)
++        return 2;
++    loss = strcmp(argv[2], "loss") == 0;
++    marker = fopen(argv[4], "wb");
++    REQUIRE(marker && fwrite("pending", 1, 7, marker) == 7 && fflush(marker) == 0);
++    if (strncmp(argv[1], "shared-", 7) == 0)
++        result = shared_test(argv[1], loss, strcmp(argv[3], "hardware") == 0);
++    else
++        result = window_test(argv[1], loss);
++    if (result)
++        return result;
++    REQUIRE(fwrite(" completed", 1, 10, marker) == 10 && fclose(marker) == 0);
++    return 0;
++}
+diff --git a/tests/presenter_capture/run_windows.ps1 b/tests/presenter_capture/run_windows.ps1
+index 305c6ba..5898d23 100644
+--- a/tests/presenter_capture/run_windows.ps1
++++ b/tests/presenter_capture/run_windows.ps1
+@@ -45,6 +45,9 @@ try {
+     Invoke-Checked "cl.exe" ($compile + @(
+         (Join-Path $PSScriptRoot "shared_gpu_capture_test.c"),
+         "/Fe:shared_gpu_capture_test.exe") + $gpuLibs)
++    Invoke-Checked "cl.exe" ($compile + @(
++        (Join-Path $PSScriptRoot "device_loss_test.c"),
++        "/Fe:device_loss_test.exe") + $gpuLibs)
+     Invoke-Checked "cl.exe" ($compile + @(
+         (Join-Path $PSScriptRoot "real_presenter_test.c"),
+         "/Fe:real_presenter_test.exe", "gdi32.lib") + $gpuLibs)
+diff --git a/tests/presenter_capture/test_present_capture.py b/tests/presenter_capture/test_present_capture.py
+index 241f99b..7b7da50 100644
+--- a/tests/presenter_capture/test_present_capture.py
++++ b/tests/presenter_capture/test_present_capture.py
+@@ -310,6 +310,57 @@ class PresenterCaptureTests(unittest.TestCase):
+             with self.subTest(mode=mode):
+                 self.run_exe("shared_gpu_capture_test", mode)
+ 
++    def test_presenter_shared_loss_and_nonfatal_open_fallback(self):
++        devices = ["warp"]
++        if os.environ.get("PRESCAP_TEST_SKIP_HARDWARE") != "1":
++            devices.append("hardware")
++        for device in devices:
++            for stage in ("shared-open", "shared-acquire", "shared-release"):
++                with self.subTest(device=device, stage=stage, failure="loss"):
++                    marker = self.work / ("loss-" + uuid.uuid4().hex)
++                    result = self.run_exe("device_loss_test", stage, "loss", device, marker,
++                                          succeeds=False)
++                    self.assertIn("presenter device lost", result.stderr)
++                    self.assertIn("recovery is not implemented", result.stderr)
++                    self.assertEqual(marker.read_bytes(), b"pending")
++            for stage in ("shared-acquire", "shared-release"):
++                with self.subTest(device=device, stage=stage, failure="resource"):
++                    marker = self.work / ("failure-" + uuid.uuid4().hex)
++                    result = self.run_exe("device_loss_test", stage, "error", device, marker,
++                                          succeeds=False)
++                    self.assertIn("resource recovery is not implemented", result.stderr)
++                    self.assertEqual(marker.read_bytes(), b"pending")
++            marker = self.work / ("fallback-" + uuid.uuid4().hex)
++            result = self.run_exe("device_loss_test", "shared-open", "error", device, marker)
++            self.assertIn("falls back to CPU", result.stdout)
++            self.assertEqual(marker.read_bytes(), b"pending completed")
++
++    @unittest.skipIf(os.environ.get("PRESCAP_TEST_SKIP_HARDWARE") == "1",
++                     "hardware D3D11 testing explicitly disabled")
++    def test_presenter_loss_and_resource_recreation_fail_stop(self):
++        stages = ("present", "resize", "back-buffer", "render-target", "reason",
++                  "init-frame", "init-view", "init-sampler", "init-vs", "init-ps")
++        for stage in stages:
++            with self.subTest(stage=stage, failure="loss"):
++                marker = self.work / ("loss-" + uuid.uuid4().hex)
++                result = self.run_exe("device_loss_test", stage, "loss", "hardware", marker,
++                                      succeeds=False)
++                self.assertIn("presenter device lost", result.stderr)
++                self.assertEqual(marker.read_bytes(), b"pending")
++        for stage in ("present", "resize", "back-buffer", "render-target"):
++            with self.subTest(stage=stage, failure="resource"):
++                marker = self.work / ("failure-" + uuid.uuid4().hex)
++                result = self.run_exe("device_loss_test", stage, "error", "hardware", marker,
++                                      succeeds=False)
++                self.assertIn("resource recovery is not implemented", result.stderr)
++                self.assertEqual(marker.read_bytes(), b"pending")
++        for stage in ("init-frame", "init-view", "init-sampler", "init-vs", "init-ps"):
++            with self.subTest(stage=stage, failure="resource"):
++                marker = self.work / ("fallback-" + uuid.uuid4().hex)
++                result = self.run_exe("device_loss_test", stage, "error", "hardware", marker)
++                self.assertIn("falls back to GDI", result.stdout)
++                self.assertEqual(marker.read_bytes(), b"pending completed")
++
+     @unittest.skipUnless(os.environ.get("PRESCAP_TEST_HAVE_LEGACY") == "1",
+                          "project's separate existing fixtures were not supplied")
+     def test_existing_project_fixtures_capture_off(self):

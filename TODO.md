@@ -13,7 +13,7 @@ source or palette comparison. A default-on index and diagnostic linear
 reference are now available in the same executable. Retained audit evidence
 also establishes material index-word dispatch volume, and patch 0046 adds a
 separate default-off exact batching candidate with synthetic coverage. The
-next active performance gates are the two independent matched A/B/A
+next evidence gates are the two independent operator-reviewed matched A/B/A
 comparisons; do not combine them or promote the shader cache or any Phase 4
 switch without its separate correctness and measurement gates.
 
@@ -71,10 +71,11 @@ switch without its separate correctness and measurement gates.
 - [x] Evaluate G3 and PFB/KickOff waiting: G3 is 69.1% and the PFB flush poll
   dominates, so Phase 4 is the first new mechanism after existing-option
   isolation.
-- [ ] If executor dispatch, exact texture checks, or redundant D3D11 state
-  dominates, continue Phase 5 first.
-- [ ] If a combined milestone regresses, isolate its existing switches rather
-  than accepting an unattributed result.
+- [ ] **Conditional on the next reviewed profile:** if executor dispatch,
+  exact texture checks, or redundant D3D11 state dominates, continue Phase 5
+  first.
+- [ ] **Conditional on a measured regression:** isolate a combined milestone's
+  existing switches rather than accepting an unattributed result.
 
 ## Phase 3: readback and presentation
 

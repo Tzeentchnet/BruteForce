@@ -119,8 +119,18 @@ measurement gates.
 
 - [ ] Reprofile before choosing state caching, constant-buffer dirty tracking,
   or executor batching.
-- [ ] Batch `ARRAY_ELEMENT16/32` runs only if the Brute Force census shows
-  material volume.
+- [x] Establish the Brute Force `ARRAY_ELEMENT16/32` census: retained complete
+  audit evidence counted 73,787,237 16-bit words and 115,904 32-bit words,
+  expanding to 147,690,378 indices exactly matching the requested and
+  buffered totals. This proves material dispatch volume, not a speedup.
+- [x] Add default-off `RECOMP_PB_INDEX_RUNS=1` in patch 0046 for the staged
+  and segment walkers. Exact scalar/run state, CALL, physical wrap, packet
+  split, audit fallback, capacity and invalid-option cases pass
+  synthetically; audit mode remains scalar.
+- [ ] Compare scalar and run modes at matched CPU/D3D11 rendered frames, then
+  collect a separate reviewed six-attempt A/B/A campaign at the same Basic
+  Controls state. Hold `RECOMP_GPU_TEX_INDEX=0` in both variants so this is
+  not combined with the texture-index candidate.
 - [ ] Measure `/GL` and LTCG independently.
 - [ ] Treat `/arch:AVX2` as an optional compatibility-reducing build, not a
   default assumption.

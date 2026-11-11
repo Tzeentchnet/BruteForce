@@ -31,8 +31,8 @@ Before the runtime-only Phase 4 fix, integrated v0.17 Release generation
 `20261111-084222-7bdb6e56`'s codegen-identical executable completed one CPU
 and one D3D11 scripted movement bring-up without retries. The post-deadlock
 executable later completed the fixed-tree Phase 4 smokes described below.
-The current texture-index rebuild has synthetic validation only and no retail
-run. Representative captures from the preceding executables show gameplay
+The current texture-index and default-off index-word-run rebuild has synthetic
+validation only and no retail run. Representative captures from the preceding executables show gameplay
 without the controls panel or a cinematic, but the 116 CPU and 1,929 D3D11
 movement flips do not have continuous reviewed world labels. The reported
 2.919 and 48.231 whole-picture changes/s are therefore not distinct-world
@@ -56,6 +56,16 @@ detects changed clean/dirty guest snapshots and rejects conflicting ownership,
 and window-clip fixtures cover additional depth/stencil and scaled cases.
 These are not new gameplay, throughput, A/B/A or original-hardware evidence.
 G4 and the existing Phase 5 exit remain open.
+
+Retained complete A1 evidence now establishes material index-word dispatch
+volume: 73,787,237 `ARRAY_ELEMENT16` words plus 115,904
+`ARRAY_ELEMENT32` words expand to 147,690,378 indices, exactly matching the
+requested and buffered totals. Patch 0046 adds default-off
+`RECOMP_PB_INDEX_RUNS=1` across both selected walkers. Exact executor state,
+CALL, physical-wrap, packet/segment split and audit-scalar cases pass
+synthetically. This is not a rendered-output comparison or Brute Force timing
+result, so promotion remains open and separate from the texture-index
+campaign.
 
 Patch 0045 now supplies bounded event acknowledgement, an independent idle
 wait, and guarded segment-at-a-time PUT consumption behind separate
@@ -640,8 +650,14 @@ phases when it is on the critical path:
   `RECOMP_GPU_TEX_INDEX=0/1` comparison to separate descriptor probes, exact
   source and palette comparison spans, snapshot copies, rewrites and evictions
   before selecting the next cache change.
-  Any run API must preserve scalar CPU-reference behavior, packet boundaries,
-  audit counts, overflow handling and backend output.
+  The retained Brute Force census now establishes material
+  `ARRAY_ELEMENT16/32` volume, and patch 0046 implements the default-off run
+  API for both selected walkers. Scalar/run executor state, audit counts,
+  overflow behavior, packet/PUT/segment/wrap boundaries, CALL/RETURN and
+  staged walking pass synthetic tests. Matched CPU/D3D11 rendered output and
+  an independent reviewed six-attempt A/B/A comparison remain required.
+  Hold `RECOMP_GPU_TEX_INDEX=0` in both variants so the texture-index
+  candidate is not combined with this measurement.
 - **Generated code:** `/O2` is already active. Measure `/GL` with LTCG and an
   optional `/arch:AVX2` build independently by A/B; AVX2 narrows host
   compatibility and is not an assumed default. Also check guest memory-access

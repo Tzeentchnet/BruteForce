@@ -295,6 +295,8 @@ def test_parse_runtime_diagnostics():
         '1024 palette bytes, 0.700 ms; snapshots 10 copies, 8192 bytes, '
         '0.100 ms; rewrites 4, entry evictions 1, snapshot evictions 2, '
         'failed-upload discards 3, unsupported hits 5\n'
+        '[PB-INDEX-RUN] non-incrementing index runs enabled\n'
+        '[PB-INDEX-RUN] calls=12 words16=345 words32=6 indices_buffered=696\n'
     )
     assert diagnostics["device"] == {
         "adapter": "Test Adapter",
@@ -332,6 +334,14 @@ def test_parse_runtime_diagnostics():
     assert diagnostics["texture_intervals"][0]["probes"] == 450
     assert diagnostics["texture_intervals"][0]["exact_ms"] == 0.7
     assert diagnostics["texture_intervals"][0]["snapshot_evictions"] == 2
+    assert diagnostics["index_runs"] == {
+        "enabled": True,
+        "audit_scalar": False,
+        "snapshots": [{
+            "calls": 12, "words16": 345, "words32": 6,
+            "indices_buffered": 696,
+        }],
+    }
     assert diagnostics["shader_cache"] == {
         "compiled": {"count": 2, "total_ms": 19.75, "max_ms": 12.5},
         "hits": {"count": 1, "total_ms": 0.375, "max_ms": 0.375},

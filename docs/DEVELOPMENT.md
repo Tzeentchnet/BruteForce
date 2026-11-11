@@ -45,7 +45,9 @@ $fixtures = @(
   "nv2a_pfb_flush",
   "nv2a_idle_wait",
   "nv2a_segments",
-  "nv2a_raster_batch"
+  "nv2a_raster_batch",
+  "nv2a_pb_constants",
+  "nv2a_pb_walk"
 )
 foreach ($fixture in $fixtures) {
   $build = "build\xboxrecomp-$fixture"
@@ -104,7 +106,7 @@ cmake --build build\smoke --config Release --parallel 4 --target `
   bruteforce bruteforce_fence_test bruteforce_camera_trace_test `
   bruteforce_read_trace_test `
   bruteforce_present_test bruteforce_usb_test bruteforce_interrupt_test `
-  bruteforce_crash_test bruteforce_memory_stats_test `
+  bruteforce_crash_test bruteforce_memory_stats_test bruteforce_pfb_flush_test `
   bruteforce_pushbuffer_test bruteforce_pgraph_test bruteforce_window_clip_test `
   bruteforce_color_unpack_test bruteforce_texture_math_test `
   bruteforce_frame_stats_test bruteforce_gpu_audit_test `
@@ -118,6 +120,7 @@ $env:BRUTEFORCE_TEST_USB = "$PWD\build\smoke\Release\bruteforce_usb_test.exe"
 $env:BRUTEFORCE_TEST_INTERRUPT = "$PWD\build\smoke\Release\bruteforce_interrupt_test.exe"
 $env:BRUTEFORCE_TEST_CRASH = "$PWD\build\smoke\Release\bruteforce_crash_test.exe"
 $env:BRUTEFORCE_TEST_MEMORY_STATS = "$PWD\build\smoke\Release\bruteforce_memory_stats_test.exe"
+$env:BRUTEFORCE_TEST_PFB_FLUSH = "$PWD\build\smoke\Release\bruteforce_pfb_flush_test.exe"
 $env:BRUTEFORCE_TEST_PUSHBUFFER = "$PWD\build\smoke\Release\bruteforce_pushbuffer_test.exe"
 $env:BRUTEFORCE_TEST_PGRAPH = "$PWD\build\smoke\Release\bruteforce_pgraph_test.exe"
 $env:BRUTEFORCE_TEST_WINDOW_CLIP = "$PWD\build\smoke\Release\bruteforce_window_clip_test.exe"
@@ -291,6 +294,22 @@ scaled aliases and synthetic guest writes at coherence boundaries, and injects
 producer and required draw-state failures before completion.
 Hardware presenter tests require a usable Windows D3D11 adapter. Run the
 framework `nv2a_pfb_flush` and `nv2a_ffp_backend` CTests above as well.
+
+The pushbuffer fixture covers default-off index-word runs in staged and
+guarded-segment walkers, including split packets, CALL/RETURN, physical wrap,
+other-subchannel and increasing-packet fallback. The framework
+`nv2a_pb_constants` fixture compares complete scalar/run executor state, final
+method values, exact capacity and audit counts; `nv2a_pb_walk` covers DMA
+boundaries and fail-closed streams. For the focused index-word patch plus
+benchmark metadata:
+
+```powershell
+cmake --build build\smoke --config Release --target bruteforce_pushbuffer_test
+$env:BRUTEFORCE_TEST_PUSHBUFFER = "$PWD\build\smoke\Release\bruteforce_pushbuffer_test.exe"
+python -m pytest -q tests\test_pushbuffer.py tests\test_bench.py `
+  tests\test_bench_performance.py tests\test_toolkit.py
+python tools\toolkit.py --verify
+```
 
 From a VS 2022 x64 developer prompt, the isolated framework's capture and
 presenter-device fixture can be built without retail data:

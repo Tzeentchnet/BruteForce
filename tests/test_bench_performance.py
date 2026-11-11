@@ -270,7 +270,16 @@ def test_owned_controls_and_performance_collection_requirements(tmp_path):
             "BRUTEFORCE_PERF_COUNTERS": "1", "RECOMP_GPU_TEX_INDEX": "1",
         }),
     ], args)
+    bench.validate_performance_variants([
+        ("base", {
+            "BRUTEFORCE_PERF_COUNTERS": "1", "RECOMP_PB_INDEX_RUNS": "0",
+        }),
+        ("test", {
+            "BRUTEFORCE_PERF_COUNTERS": "1", "RECOMP_PB_INDEX_RUNS": "1",
+        }),
+    ], args)
     assert "RECOMP_GPU_TEX_INDEX" in bench.RUNTIME_OPTION_KEYS
+    assert "RECOMP_PB_INDEX_RUNS" in bench.RUNTIME_OPTION_KEYS
 
 
 def test_event_wait_profile_attribution_and_incomplete_stack(tmp_path):

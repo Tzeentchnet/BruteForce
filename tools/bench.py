@@ -130,11 +130,13 @@ RUNTIME_OPTION_KEYS = (
     "RECOMP_GPU_AUDIT", "RECOMP_GPU_AUDIT_FILE",
     "RECOMP_PROGRAM_NEAR_ZERO", "RECOMP_PFB_FLUSH_WAIT",
     "RECOMP_NV2A_IDLE_WAIT", "RECOMP_NV2A_SEGMENTS", "RECOMP_PB_WALK",
-    "RECOMP_PB_EXEC", "RECOMP_PGRAPH_IRQ", "RECOMP_VBLANK", "RECOMP_AUDIO",
-    "BRUTEFORCE_PERF_COUNTERS", "BRUTEFORCE_PROFILE_CALLERS",
+    "RECOMP_PB_EXEC", "RECOMP_PB_INDEX_RUNS", "RECOMP_PGRAPH_IRQ",
+    "RECOMP_VBLANK", "RECOMP_AUDIO", "BRUTEFORCE_PERF_COUNTERS",
+    "BRUTEFORCE_PROFILE_CALLERS",
 )
 PERFORMANCE_SWITCHES = frozenset(("RECOMP_PFB_FLUSH_WAIT", "RECOMP_NV2A_IDLE_WAIT",
-                                  "RECOMP_NV2A_SEGMENTS", "RECOMP_GPU_TEX_INDEX"))
+                                  "RECOMP_NV2A_SEGMENTS", "RECOMP_GPU_TEX_INDEX",
+                                  "RECOMP_PB_INDEX_RUNS"))
 OWNED_ENV = frozenset((
     "RECOMP_RASTER_THREADS", "RECOMP_PAD_SCRIPT", "RECOMP_PAD_LIVE",
     "RECOMP_FRAME_STATS", "RECOMP_WATCHDOG_SECS", "BRUTEFORCE_PROFILE",
@@ -218,6 +220,10 @@ SEGMENT_RE = re.compile(
 SEGMENT_CALLER_RE = re.compile(
     r"^\[NV2A-SEGMENT-CALLER\] caller=(?P<caller>[0-9A-Fa-f]{8}) "
     r"published=(?P<published>\d+) completed=(?P<completed>\d+)$", re.MULTILINE)
+INDEX_RUN_RE = re.compile(
+    r"^\[PB-INDEX-RUN\] calls=(?P<calls>\d+) words16=(?P<words16>\d+) "
+    r"words32=(?P<words32>\d+) indices_buffered=(?P<indices_buffered>\d+)$",
+    re.MULTILINE)
 
 
 class BenchError(Exception):
@@ -602,6 +608,13 @@ def parse_runtime_diagnostics(text):
             "enabled": "[NV2A-SEGMENT] guarded per-PUT queue enabled" in text,
             "snapshots": [], "callers": [],
         },
+        "index_runs": {
+            "enabled": "[PB-INDEX-RUN] non-incrementing index runs enabled" in text,
+            "audit_scalar": (
+                "[PB-INDEX-RUN] scalar dispatch retained while GPU audit is enabled" in text
+            ),
+            "snapshots": [],
+        },
     }
     for match in SUBMIT_PERF_RE.finditer(text):
         item = match.groupdict()
@@ -630,6 +643,9 @@ def parse_runtime_diagnostics(text):
             "caller": match["caller"].upper(), "published": int(match["published"]),
             "completed": int(match["completed"]),
         })
+    for match in INDEX_RUN_RE.finditer(text):
+        diagnostics["index_runs"]["snapshots"].append(
+            {key: int(value) for key, value in match.groupdict().items()})
     match = D3D11_DEVICE_RE.search(text)
     if match:
         values = match.groupdict()

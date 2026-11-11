@@ -103,18 +103,27 @@ Patch [0045](../patches/xboxrecomp/0045-bounded-nv2a-segments-and-waits.patch)
 adds a 42nd local patch. Its initial separately reconstructed tree was
 `64ce266664a875084be63cb32148b3ae78c55185`; the PGRAPH/PFB deadlock fix
 supersedes it with independently replayed tree
-`3164795a5ed52658abb41f2630ed8153e6b2cce0`. The shared local toolkit uses
-the latter tree. Generated title output `20261111-084222-7bdb6e56` has the
+`3164795a5ed52658abb41f2630ed8153e6b2cce0`. That was the shared local tree
+before patch 0046. Generated title output `20261111-084222-7bdb6e56` has the
 same `tools` and `templates` fingerprints, so it was rebuilt against the
 runtime-only fix without regenerating unchanged title code. Integrated
 validation also corrected patch 0039's
 presenter script so each direct `fb_present.c` consumer links
 `display_awake.c`. The framework tools report 995 passed, 2 skipped and 134
 subtests passed on the fixed tree; the project suite reports 969 passed with
-WARP and the available hardware adapter; nine focused framework groups report
-41 CTests passed; and the presenter suite reports 19 passed. The Phase 4
+WARP and the available hardware adapter; the presenter suite reports 19
+passed. The Phase 4
 subset comprises 22 CTests, generated-store coverage reports 3 passed, and 67
 title-side synchronization/toolkit cases pass.
+
+Patch [0046](../patches/xboxrecomp/0046-index-word-runs.patch) adds the 43rd
+local patch and produces independently replayed tree
+`3e3ae3600802d2bf4446d86fc546322d60849047`, now used by the shared toolkit.
+The framework tool result remains 995 passed, 2 skipped and 134 subtests; the
+fully provisioned project suite reports 969 passed with WARP and the available
+hardware adapter. Eleven focused framework groups report 47 CTests passed.
+The patch is runtime-only, so the existing generated title retains identical
+`tools` and `templates` fingerprints.
 
 ### Bounded acknowledgement, idle waiting and guarded PUT segments
 
@@ -2193,27 +2202,40 @@ it does not defer a frame until the title releases `VOICE_LOCK`.
 - **Problem:** both selected pushbuffer walkers still dispatch each
   `ARRAY_ELEMENT16` or `ARRAY_ELEMENT32` parameter word separately, even when
   one non-incrementing packet contains thousands of index words.
-- **Evidence:** JSRF-PC commit
-  [`e81e29c`](https://github.com/spriteice/JSRF-PC/commit/e81e29ce594e34d5a89b57b69a605f8f6ce0a4ad)
-  reports about seven million index words per second in one JSRF scene and an
-  isolated renderer reduction from roughly 14 ns to under 2 ns per word. Its
-  executor hunk applies but its walker and OpenGL renderer integration do not;
-  Brute Force uses different walker, audit, CPU-rasterizer, and D3D11 paths.
-- **Change:** add a generic run-level executor entry only after the method has
-  been classified as a subchannel-0, non-incrementing index packet. Preserve a
-  word-at-a-time reference path and make the run update audit, limits, overflow
-  and backend state exactly as repeated calls do.
-- **Tests:** compare run and scalar execution byte-for-byte across 16/32-bit
-  indices, packet splits, CALLs, wraps, other subchannels, full index buffers,
-  audit enabled/disabled, CPU reference output and D3D11 batch output.
-- **Overlap:** #273 accelerates constant uploads and #231 pipelines the CPU
-  rasterizer; neither is the same dispatch reduction. No exact upstream PR or
-  issue was found in the targeted 2026-10-31 search.
-- **Before filing:** use the Brute Force audit/census to establish index-word
-  volume, then run alternating A/B/A. Report distinct world frames and
-  per-thread time, not JSRF's title numbers.
-- **Status:** planned Phase 0/5 performance candidate; concept to adapt, not a
-  patch to cherry-pick.
+- **Evidence:** retained complete Brute Force audit generation
+  `20261111-002138-a9dbc18a` counted 73,787,237
+  `ARRAY_ELEMENT16` words and 115,904 `ARRAY_ELEMENT32` words. They expand to
+  147,690,378 indices, exactly matching `ARRAY_REQUESTED` and
+  `ARRAY_BUFFERED`; no `DRAW_ARRAYS` method row was present. This proves
+  material dispatch volume, not a speedup or reviewed scene identity.
+- **Change:** patch
+  [0046](../patches/xboxrecomp/0046-index-word-runs.patch) adds exact
+  default-off `RECOMP_PB_INDEX_RUNS=1` handling to both selected walkers and
+  the executor. It batches only eligible subchannel-zero non-incrementing
+  index runs, respects packet, PUT, segment and physical-wrap boundaries,
+  preserves final method state and exact capacity behavior, and forces scalar
+  dispatch while GPU audit is active.
+- **Tests:** project coverage exercises staged and segment walks, split
+  packets, CALL/RETURN, physical wrap, other subchannels and increasing
+  fallback. Framework fixtures cover complete scalar/run executor-state
+  equality, capacity and inactive primitives, exact audit counts, invalid
+  options and fail-closed stream handling. The directly affected CTests
+  passed 2/2, 4/4 and 9/9; the fully provisioned project suite passed 969;
+  framework tools passed 995 plus 134 subtests with two skips; and a fresh
+  complete replay verified tree
+  `3e3ae3600802d2bf4446d86fc546322d60849047`.
+- **Overlap:** the old JSRF commit `e81e29c` was force-removed. Its surviving
+  replacement,
+  [`bf59dcf`](https://github.com/spriteice/JSRF-PC/commit/bf59dcfcbb9d78813e572007ee64b76d77a68d90),
+  reports JSRF-specific volume and renderer-side timing and remains prior art
+  only. No code was copied. The complete xboxrecomp PR list and tracking index
+  #184 were checked on 2026-11-11; no exact xboxrecomp candidate was found.
+- **Before filing:** compare scalar and run modes at matched CPU/D3D11
+  rendered frames, then collect a separate reviewed A/B/A timing campaign with
+  `RECOMP_GPU_TEX_INDEX=0` held in both variants. Document the default-off
+  interface and attributable Brute Force result.
+- **Status:** local patch 0046; synthetic-tested, default-off, not filed. No
+  upstream interaction was performed and no Brute Force speedup is claimed.
 
 ### J6. Stress the local vblank acknowledgement against a concurrent raise
 

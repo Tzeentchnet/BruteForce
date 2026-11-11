@@ -67,6 +67,7 @@ and [packed-alias investigation](./FINDINGS.md#packed-depthstencil-aliases-and-s
 | Renderer selection and tutorial startup | [main.c](../src/main.c), [build.py](../tools/build.py), [launcher.py](../tools/launcher.py) |
 | Staged pushbuffer walking and PGRAPH handling | [patch 0008](../patches/xboxrecomp/0008-experimental-pgraph-and-staged-walker.patch), [recomp_manual.c](../src/recomp_manual.c) |
 | Bounded PFB acknowledgement, idle waiting and guarded PUT segments | [patch 0045](../patches/xboxrecomp/0045-bounded-nv2a-segments-and-waits.patch), [recomp_manual.c](../src/recomp_manual.c) |
+| Default-off exact index-word run dispatch | [patch 0046](../patches/xboxrecomp/0046-index-word-runs.patch), [bench.py](../tools/bench.py) |
 | Extended backend interface and vertex-program batches | [patch 0016](../patches/xboxrecomp/0016-extended-render-backend.patch), [patch 0017](../patches/xboxrecomp/0017-gpu-vertex-programs.patch) |
 | D3D11 device, surfaces, state, draws, queries and readback | [d3d11_backend.c](../src/gpu/d3d11_backend.c) |
 | Render-scale authority and GPU seed/readback/final resolves | [render_scale.c](../src/gpu/render_scale.c), [render_scale.h](../src/gpu/render_scale.h) |
@@ -88,6 +89,18 @@ walker, PGRAPH interrupts, vblank, USB, the pushbuffer executor and a
 framebuffer window. The walker handles the submitted method stream and its
 JUMP and CALL/RETURN control flow; the executor maintains NV2A state and
 dispatches clear, draw, report and flip operations.
+
+`RECOMP_PB_INDEX_RUNS=1` is a default-off host dispatch optimization, not a
+new synchronization mode. Both selected walkers may group only contiguous
+pieces of non-incrementing, subchannel-zero `ARRAY_ELEMENT16/32` packets.
+They stop at packet, PUT, segment and physical-memory-wrap boundaries; CALL,
+RETURN and later methods remain ordered by the walker. The executor leaves
+its initialization word scalar, expands 16-bit words low half first, and
+preserves the final method register and index-buffer capacity behavior of
+repeated scalar calls. GPU audit deliberately forces scalar method dispatch
+so per-word values and counts remain exact. The option never advances GET
+past a pending boundary, consumes no extra segment, and does not acknowledge
+PGRAPH/PFB work, release a semaphore or alter flip holds.
 
 The base backend interface supplies clears, screen-space draws and flips.
 The extended interface supplies transformed batches, four texture stages

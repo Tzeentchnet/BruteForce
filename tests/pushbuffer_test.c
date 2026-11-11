@@ -10,6 +10,8 @@ static struct { uint32_t method, value; } seen[64];
 static unsigned seen_count;
 static volatile uint32_t dma_get = 0x12345678u;
 static volatile uint32_t dma_subroutine;
+static unsigned index_run_calls, index_run_words;
+static int index_runs_enabled = 1;
 
 ptrdiff_t xbox_GetMemoryOffset(void)
 {
@@ -42,6 +44,22 @@ int nv2a_pb_exec_constant_word(uint32_t method, uint32_t value)
     (void)method;
     (void)value;
     return 0;
+}
+
+int nv2a_pb_exec_index_runs_enabled(void)
+{
+    return index_runs_enabled;
+}
+
+int nv2a_pb_exec_index_run(uint32_t method, const uint32_t *params, uint32_t count)
+{
+    uint32_t i;
+
+    ++index_run_calls;
+    index_run_words += count;
+    for (i = 0; i < count; i++)
+        nv2a_pb_exec_method(0, method, params[i]);
+    return 1;
 }
 
 void nv2a_pb_exec_report(void) {}
@@ -273,6 +291,68 @@ int main(int argc, char **argv)
     REQUIRE(seen_count == 33 && observed(31, 0x0100, 0x67u) &&
             observed(32, 0x0430, 214) && dma_subroutine == 0x2510u,
             "RETURN uses a guest-updated subroutine address");
+
+    {
+        unsigned seen_before = seen_count, calls_before = index_run_calls;
+        unsigned words_before = index_run_words;
+
+        put(0x3700, 0x40000000u | (4u << 18) | 0x1800u);
+        put(0x3704, 0x00020001u);
+        put(0x3708, 0x00040003u);
+        put(0x370C, 0x00060005u);
+        put(0x3710, 0x00080007u);
+        scan(0x3700, 0x370C);
+        scan(0x370C, 0x3714);
+        REQUIRE(seen_count == seen_before + 4 &&
+                observed(seen_before + 0, 0x1800, 0x00020001u) &&
+                observed(seen_before + 1, 0x1800, 0x00040003u) &&
+                observed(seen_before + 2, 0x1800, 0x00060005u) &&
+                observed(seen_before + 3, 0x1800, 0x00080007u),
+                "segment index runs preserve split packet words");
+        REQUIRE(index_run_calls == calls_before + 2 &&
+                index_run_words == words_before + 4,
+                "segment index runs retain packet split boundaries");
+    }
+
+    {
+        unsigned seen_before = seen_count, calls_before = index_run_calls;
+
+        put(0x3720, 0x40000000u | (2u << 18) | (1u << 13) | 0x1808u);
+        put(0x3724, 301);
+        put(0x3728, 302);
+        put(0x372C, (2u << 18) | 0x1800u);
+        put(0x3730, 303);
+        put(0x3734, 304);
+        scan(0x3720, 0x3738);
+        REQUIRE(index_run_calls == calls_before &&
+                seen_count == seen_before + 4 &&
+                observed(seen_before + 0, 0x1808, 301) &&
+                observed(seen_before + 1, 0x1808, 302) &&
+                observed(seen_before + 2, 0x1800, 303) &&
+                observed(seen_before + 3, 0x1804, 304),
+                "other subchannels and increasing packets stay scalar");
+    }
+
+    {
+        unsigned seen_before = seen_count, calls_before = index_run_calls;
+        unsigned words_before = index_run_words;
+
+        put(0x3800, 0x40000000u | (3u << 18) | 0x1808u);
+        put(0x3804, 401);
+        put(0x3808, 402);
+        put(0x380C, 403);
+        nv2a_pb_resync(0x3800);
+        nv2a_pb_scan_staged(0x3810);
+        REQUIRE(seen_count == seen_before + 3 &&
+                observed(seen_before + 0, 0x1808, 401) &&
+                observed(seen_before + 1, 0x1808, 402) &&
+                observed(seen_before + 2, 0x1808, 403),
+                "staged index run preserves all words");
+        REQUIRE(index_run_calls == calls_before + 1 &&
+                index_run_words == words_before + 3,
+                "staged walker batches the contiguous index run");
+    }
+
     REQUIRE(VirtualFree(memory, 0, MEM_RELEASE), "free synthetic physical memory");
     puts("pushbuffer segment decoding passed");
     return 0;

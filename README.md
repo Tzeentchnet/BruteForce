@@ -87,6 +87,14 @@ cinematic, but none of those single attempts is an A/B/A performance result.
 Matched-reference and reviewed performance gates remain open, and the
 published measurements still belong to the previous reviewed generation.
 
+Retained audit evidence also establishes material `ARRAY_ELEMENT16/32`
+dispatch volume. Patch 0046 adds `RECOMP_PB_INDEX_RUNS=1` as a separate,
+default-off exact batching candidate across both selected pushbuffer walkers.
+Synthetic scalar/run equivalence, CALL, physical-wrap and audit-fallback
+coverage pass, but no Brute Force speedup or matched rendered-output result
+has been established. Its reviewed A/B/A campaign remains separate from the
+texture-index comparison.
+
 The pre-fix executable also completed one additional D3D11 attempt at the 4K
 preset with mipmaps and anisotropy enabled. It confirms the 2880x2160 4:3
 render path can run on the available hardware, but the observed tutorial

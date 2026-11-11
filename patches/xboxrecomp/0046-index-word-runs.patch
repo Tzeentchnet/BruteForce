@@ -1,0 +1,702 @@
+diff --git a/docs/runtime/environment-variables.md b/docs/runtime/environment-variables.md
+index f7378e450192fdd0e57ffcd53276a2cfc89bcf64..abd6c8040fb69df8b1d64b6185bf0a02e34ade85 100644
+--- a/docs/runtime/environment-variables.md
++++ b/docs/runtime/environment-variables.md
+@@ -93,6 +93,7 @@ The executor is itself opt-in: set `RECOMP_PB_EXEC=1` to execute the pushbuffer.
+ | `RECOMP_PB_REPORT_MS=N` | 10000 | Milliseconds between `[GPU]` reports (minimum 100). | `xbox_memory_layout.c` |
+ | `RECOMP_PB_EXEC_VERBOSE` | off | Per-batch trace. | `nv2a_pb_exec.c` |
+ | `RECOMP_PB_UNHANDLED_ALL` | top 10 | Lists every method the executor does not model, not only the top ten. | `nv2a_pb_exec.c` |
++| `RECOMP_PB_INDEX_RUNS=1` | off | Hands subchannel-0 non-incrementing `ARRAY_ELEMENT16/32` packet words to the initialized executor as a run. GPU audit mode retains exact scalar dispatch. Invalid values abort. | `nv2a_pb_scan.c`, `nv2a_pb_exec.c` |
+ | `RECOMP_VBLANK[=paced]` | no vblanks | Raises vblanks: a ~50 Hz tick, or `paced` for the 60 Hz schedule. `0` or empty is off. | `kernel_bridge.c` |
+ | `RECOMP_FLIP_PACING[=edge]` | off | Holds each flip to the vblank count. | `nv2a_pb_exec.c` |
+ | `RECOMP_FFP_FLIP_NORMALS` | off | Lights the side of a fixed-function mesh that faces the viewer. Not hardware behaviour. | `nv2a_pb_exec.c` |
+diff --git a/docs/technical/pushbuffer-executor.md b/docs/technical/pushbuffer-executor.md
+index 0267a9830c80366a1a672ffacbda68f273f2eddc..4184a8aa062076bd21860c80770a571b8e15f0cf 100644
+--- a/docs/technical/pushbuffer-executor.md
++++ b/docs/technical/pushbuffer-executor.md
+@@ -101,6 +101,22 @@ survey's and the unhandled-method ranking) are indexed by method instead of
+ searched: the survey's search was about 40% of the thread in a *X-Men Legends*
+ level.
+ 
++## Optional Index-Word Runs
++
++`RECOMP_PB_INDEX_RUNS=1` lets either pushbuffer walker hand a contiguous
++subchannel-0, non-incrementing `ARRAY_ELEMENT16` or `ARRAY_ELEMENT32` packet
++run to the initialized executor in one call. Packet splits, PUT boundaries,
++ring wraps, CALLs, other subchannels, increasing packets and the executor's
++first word retain scalar dispatch. The run path leaves the method register at
++the final word and applies the same index-buffer limit as repeated method
++calls.
++
++The switch is off by default. `RECOMP_GPU_AUDIT=1` forces the scalar path so
++the audit still observes every method word and value. Periodic reports emit
++`[PB-INDEX-RUN]` cumulative call, 16-bit-word, 32-bit-word and buffered-index
++counts for an attributable comparison. Values other than `0` and `1` abort
++rather than selecting an implicit mode.
++
+ ## Fixed-Function Transform
+ 
+ Batches drawn with `SET_TRANSFORM_EXECUTION_MODE` (`0x1E94`) on "fixed" used to
+@@ -276,6 +292,7 @@ All audit tables have bounded capacity and report overflow.
+ | `RECOMP_PB_EXEC` | execute it |
+ | `RECOMP_PB_WALK=dma` | walk the pushbuffer like the DMA engine (JUMPs, wraps, GET per command, the `0x0310` latch) instead of scanning each submitted segment; see [The DMA Walk Is Opt-In](#the-dma-walk-is-opt-in) |
+ | `RECOMP_PB_EXEC_VERBOSE` | per-batch trace |
++| `RECOMP_PB_INDEX_RUNS` | `1` batches non-incrementing subchannel-0 `ARRAY_ELEMENT16/32` packet words after executor initialization; off by default and forced back to scalar dispatch by the GPU audit |
+ | `RECOMP_FFP_TRACE` | composite matrix and sample vertices of the first fixed-function batches |
+ | `RECOMP_TEX_BILINEAR` | the CPU rasteriser blends the four nearest texels of every textured pixel instead of taking the nearest one, whatever `SET_TEXTURE_FILTER` asked for. All three sampling paths: pixel-position batches, the perspective path and the register-combiner stages. Off by default: nearest texel. No mip levels, so a minified texture is not blurred by level. A GPU back end has its own filtering and is not affected |
+ | `RECOMP_TEX_ANISO` | `8` or `16`: anisotropic filtering on the CPU rasteriser, implies `RECOMP_TEX_BILINEAR`. Up to that many bilinear taps along the longer of a pixel's two texel gradients, so a floor or wall seen at a slant averages along its stretched axis instead of aliasing. Any other value leaves it off. Gradients are exact per triangle for pixel-position batches and taken one pixel over on the perspective path, which costs two more texture-coordinate evaluations per pixel, so it is slower. No mip levels. Off by default |
+diff --git a/src/kernel/nv2a_pb_exec.c b/src/kernel/nv2a_pb_exec.c
+index 6e3f6f54e0c15656b8bd8320a64186727c9d8a71..ec23df93bbeda34235c166a6f122687975445095 100644
+--- a/src/kernel/nv2a_pb_exec.c
++++ b/src/kernel/nv2a_pb_exec.c
+@@ -242,6 +242,7 @@ enum {
+ #define NV097_FLIP_INCREMENT_WRITE        0x012C
+ #define NV097_FLIP_STALL                  0x0130
+ #define NV097_ARRAY_ELEMENT16             0x1800
++#define NV097_ARRAY_ELEMENT32             0x1808
+ /* Draw a run of vertices straight out of the arrays, with no index list:
+  * bits 0..23 are the first vertex, bits 24..31 the count minus one. It may
+  * appear several times inside one BEGIN_END to draw a longer run. */
+@@ -5483,6 +5484,82 @@ static void flip_hold_report(void)
+ }
+ 
+ static int s_exec_inited;
++static uint64_t s_index_run_calls;
++static uint64_t s_index_run_words16;
++static uint64_t s_index_run_words32;
++static uint64_t s_index_run_indices;
++
++int nv2a_pb_exec_index_runs_enabled(void)
++{
++    static int enabled = -1;
++
++    if (enabled < 0) {
++        const char *value = getenv("RECOMP_PB_INDEX_RUNS");
++
++        if (!value || !*value || strcmp(value, "0") == 0) {
++            enabled = 0;
++        } else if (strcmp(value, "1") == 0) {
++            enabled = 1;
++        } else {
++            fprintf(stderr, "[PB-INDEX-RUN] RECOMP_PB_INDEX_RUNS must be 0 or 1\n");
++            abort();
++        }
++        if (enabled && nv2a_gpu_audit_enabled()) {
++            enabled = 0;
++            fprintf(stderr, "[PB-INDEX-RUN] scalar dispatch retained while GPU audit is enabled\n");
++        } else if (enabled) {
++            fprintf(stderr, "[PB-INDEX-RUN] non-incrementing index runs enabled\n");
++        }
++    }
++    return enabled;
++}
++
++/* ARRAY_ELEMENT16/32 non-incrementing packet words after the executor has
++ * initialized. The general dispatcher has no observable per-word work for
++ * these methods beyond the register's final value and appending indices:
++ * verbose output ignores them and frame-method tracing excludes the whole
++ * bulk range. The audit requires every method word, so it disables this path.
++ */
++int nv2a_pb_exec_index_run(uint32_t method, const uint32_t *params,
++                           uint32_t count)
++{
++    uint32_t i, buffered;
++
++    if (!nv2a_pb_exec_index_runs_enabled() || !s_exec_inited || !count ||
++        (method != NV097_ARRAY_ELEMENT16 &&
++         method != NV097_ARRAY_ELEMENT32))
++        return 0;
++
++    s_index_run_calls++;
++    s_reg[(method & 0x1FFCu) / 4] = params[count - 1];
++    if (method == NV097_ARRAY_ELEMENT16)
++        s_index_run_words16 += count;
++    else
++        s_index_run_words32 += count;
++
++    if (!s_gpu.prim)
++        return 1;
++    if (method == NV097_ARRAY_ELEMENT16) {
++        buffered = (NV_MAX_INDICES - s_gpu.idx_count) / 2;
++        if (buffered > count)
++            buffered = count;
++        for (i = 0; i < buffered; i++) {
++            uint32_t word = params[i];
++            s_gpu.idx[s_gpu.idx_count++] = (uint16_t)(word & 0xFFFFu);
++            s_gpu.idx[s_gpu.idx_count++] = (uint16_t)(word >> 16);
++        }
++        s_index_run_indices += (uint64_t)buffered * 2;
++    } else {
++        buffered = NV_MAX_INDICES - s_gpu.idx_count;
++        if (buffered > count)
++            buffered = count;
++        memcpy(s_gpu.idx + s_gpu.idx_count, params,
++               (size_t)buffered * sizeof *params);
++        s_gpu.idx_count += buffered;
++        s_index_run_indices += buffered;
++    }
++    return 1;
++}
+ 
+ /* SET_TRANSFORM_CONSTANT(i), 0x0B80..0x0BFC on the 3D subchannel, without
+  * the general dispatch. A title that skins or animates on the GPU uploads
+@@ -5954,7 +6031,7 @@ void nv2a_pb_exec_method(uint32_t subch, uint32_t method, uint32_t param)
+         }
+         break;
+ 
+-    case 0x1808:                            /* ARRAY_ELEMENT32: one index */
++    case NV097_ARRAY_ELEMENT32:             /* one index per parameter word */
+         if (s_gpu.prim)
+             GPU_AUDIT(nv2a_gpu_audit_input(NV2A_AUDIT_ARRAY, 1,
+                                            s_gpu.idx_count < NV_MAX_INDICES));
+@@ -6290,6 +6367,42 @@ void nv2a_pb_exec_method(uint32_t subch, uint32_t method, uint32_t param)
+     }
+ }
+ 
++#ifdef NV2A_PB_INDEX_RUNS_TEST
++uint32_t nv2a_pb_exec_index_run_test(uint32_t method, const uint32_t *params,
++                                     uint32_t count, uint32_t initial_count,
++                                     int active, int run, uint32_t *indices,
++                                     uint32_t capacity, uint32_t *last_register)
++{
++    uint32_t i, copied, result;
++
++    if (initial_count > NV_MAX_INDICES)
++        return UINT32_MAX;
++    s_gpu.prim = active ? 5 : 0;
++    s_gpu.idx_count = initial_count;
++    for (i = 0; i < initial_count; i++)
++        s_gpu.idx[i] = 0xF0000000u | i;
++    if (run) {
++        if (!nv2a_pb_exec_index_run(method, params, count)) {
++            result = UINT32_MAX;
++            goto done;
++        }
++    } else {
++        for (i = 0; i < count; i++)
++            nv2a_pb_exec_method(0, method, params[i]);
++    }
++    copied = s_gpu.idx_count < capacity ? s_gpu.idx_count : capacity;
++    if (copied)
++        memcpy(indices, s_gpu.idx, (size_t)copied * sizeof *indices);
++    if (last_register)
++        *last_register = s_reg[(method & 0x1FFCu) / 4];
++    result = s_gpu.idx_count;
++done:
++    s_gpu.prim = 0;
++    s_gpu.idx_count = 0;
++    return result;
++}
++#endif
++
+ /* Find where the title actually wrote its quad.
+  *
+  * The GPU is pointed at a buffer that stays zero, which says the data went
+@@ -6473,6 +6586,13 @@ void nv2a_pb_exec_report(void)
+     flip_hold_report();
+     nv2a_census_write();
+     GPU_AUDIT(nv2a_gpu_audit_write());
++    if (nv2a_pb_exec_index_runs_enabled())
++        fprintf(stderr, "[PB-INDEX-RUN] calls=%llu words16=%llu words32=%llu"
++                        " indices_buffered=%llu\n",
++                (unsigned long long)s_index_run_calls,
++                (unsigned long long)s_index_run_words16,
++                (unsigned long long)s_index_run_words32,
++                (unsigned long long)s_index_run_indices);
+     if (s_frame_stats_on > 0) {
+         uint32_t flips, distinct, unknown;
+         nv2a_frame_stats_take_report(&s_frame_stats, &flips, &distinct, &unknown);
+diff --git a/src/kernel/nv2a_pb_scan.c b/src/kernel/nv2a_pb_scan.c
+index ce1d93c15fea448ca2293ca9e01195fe1ba4a5d3..e9e04ca01bd8da3d387c1d87e40206dfb851fab2 100644
+--- a/src/kernel/nv2a_pb_scan.c
++++ b/src/kernel/nv2a_pb_scan.c
+@@ -44,9 +44,15 @@ static uint32_t s_tot_calls;
+  * the executor writes to guest memory. */
+ extern void nv2a_pb_exec_method(uint32_t subch, uint32_t method, uint32_t param);
+ extern int nv2a_pb_exec_constant_word(uint32_t method, uint32_t param);
++extern int nv2a_pb_exec_index_runs_enabled(void);
++extern int nv2a_pb_exec_index_run(uint32_t method, const uint32_t *params,
++                                  uint32_t count);
+ extern void nv2a_pb_exec_report(void);
+ extern void nv2a_pb_exec_walk_begin(void);
+ 
++#define NV097_ARRAY_ELEMENT16 0x1800u
++#define NV097_ARRAY_ELEMENT32 0x1808u
++
+ /* One word to the executor. SET_TRANSFORM_CONSTANT words, the bulk of a
+  * skinning title's stream, take the executor's short path (see
+  * nv2a_pb_exec_constant_word). */
+@@ -83,12 +89,14 @@ static int pb_walk_enabled(void)
+  * (about 40% of its thread in X-Men Legends' levels). */
+ static uint16_t s_seen_slot[8][0x2000 / 4];
+ 
+-static void note(uint32_t subch, uint32_t method)
++static void note_n(uint32_t subch, uint32_t method, uint32_t count)
+ {
+     uint16_t *slot = &s_seen_slot[subch & 7][(method & 0x1FFC) / 4];
+ 
++    if (!count)
++        return;
+     if (*slot) {
+-        s_seen[*slot - 1].count++;
++        s_seen[*slot - 1].count += count;
+         return;
+     }
+     if (s_seen_count >= PB_MAX_METHODS) {
+@@ -105,12 +113,28 @@ static void note(uint32_t subch, uint32_t method)
+     if (s_seen_count < PB_MAX_METHODS) {
+         s_seen[s_seen_count].method = method;
+         s_seen[s_seen_count].subch  = subch;
+-        s_seen[s_seen_count].count  = 1;
++        s_seen[s_seen_count].count  = count;
+         s_seen_count++;
+         *slot = (uint16_t)s_seen_count;
+     }
+ }
+ 
++static void note(uint32_t subch, uint32_t method)
++{
++    note_n(subch, method, 1);
++}
++
++static uint32_t exec_index_run(uint32_t subch, uint32_t method,
++                               const uint32_t *params, uint32_t count)
++{
++    if (subch != 0 || !count ||
++        (method != NV097_ARRAY_ELEMENT16 &&
++         method != NV097_ARRAY_ELEMENT32) ||
++        !nv2a_pb_exec_index_runs_enabled())
++        return 0;
++    return nv2a_pb_exec_index_run(method, params, count) ? count : 0;
++}
++
+ /* NV097 (Kelvin 3D class) methods worth naming. The point of the survey is to
+  * decide what a translator has to implement, and a bare method number does not
+  * answer that -- "0x1818 x412" only means something once it reads
+@@ -303,6 +327,27 @@ static void pb_consume(const uint8_t *mem, uint32_t put, uint32_t *words)
+     while (s_pend_left && s_get < PB_RAM_BYTES && s_get != put) {
+         uint32_t m = s_pend_noninc ? s_pend_method : s_pend_method + s_pend_i * 4;
+         uint32_t param = *(const uint32_t *)(mem + (0x80000000u | s_get));
++        uint32_t run = 0;
++
++        if (s_exec_enabled && s_pend_noninc) {
++            uint32_t available = s_pend_left;
++            uint32_t contiguous = s_get < put ? (put - s_get) / 4
++                                              : (PB_RAM_BYTES - s_get) / 4;
++            if (available > contiguous)
++                available = contiguous;
++            run = exec_index_run(s_pend_subch, m,
++                    (const uint32_t *)(mem + (0x80000000u | s_get)), available);
++        }
++        if (run) {
++            note_n(s_pend_subch, m, run);
++            s_in_call = (*s_dma_subroutine & NV2A_DMA_SUBROUTINE_STATE) != 0;
++            s_get = (s_get + run * 4) & PB_PHYS_MASK;
++            s_pend_i += run;
++            s_pend_left -= run;
++            *words += run;
++            s_in_call = (*s_dma_subroutine & NV2A_DMA_SUBROUTINE_STATE) != 0;
++            continue;
++        }
+ 
+         note(s_pend_subch, m);
+         /* Same walk, two consumers: the survey counts, the executor
+@@ -579,6 +624,28 @@ static void pb_segment_consume(const uint8_t *mem, uint32_t *va, uint32_t end_va
+     while (packet->left && *va < end_va && *words < 0x100000u) {
+         uint32_t m = packet->noninc ? packet->method
+                                     : packet->method + packet->index * 4;
++        uint32_t run = 0;
++
++        if (s_exec_enabled && packet->noninc) {
++            uint32_t available = packet->left;
++            uint32_t in_segment = (end_va - *va) / 4;
++            uint32_t in_limit = 0x100000u - *words;
++            if (available > in_segment)
++                available = in_segment;
++            if (available > in_limit)
++                available = in_limit;
++            run = exec_index_run(packet->subch, m,
++                    (const uint32_t *)(mem + *va), available);
++        }
++        if (run) {
++            note_n(packet->subch, m, run);
++            *va += run * 4;
++            *words += run;
++            packet->index += run;
++            packet->left -= run;
++            continue;
++        }
++
+         note(packet->subch, m);
+         if (s_exec_enabled)
+             exec_word(packet->subch, m, *(const uint32_t *)(mem + *va));
+diff --git a/tests/nv2a_pb_constants/CMakeLists.txt b/tests/nv2a_pb_constants/CMakeLists.txt
+index f4431769e2bbda408a4ea2344706cb72c77f7844..b3aa1b70a5a0bc34cd96140b00ebcb72956462c8 100644
+--- a/tests/nv2a_pb_constants/CMakeLists.txt
++++ b/tests/nv2a_pb_constants/CMakeLists.txt
+@@ -5,11 +5,16 @@ add_executable(nv2a-pb-constants-test nv2a_pb_constants_test.c
+     ../../src/kernel/nv2a_pb_exec.c
+     ../../src/kernel/nv2a_vsh_interp.c
+     ../../src/kernel/nv2a_combiner.c
+-    ../../src/kernel/nv2a_flip_hold.c)
++    ../../src/kernel/nv2a_frame_stats.c
++    ../../src/kernel/nv2a_census.c
++    ../../src/kernel/nv2a_flip_hold.c
++    ../../src/kernel/nv2a_gpu_audit.c)
+ target_include_directories(nv2a-pb-constants-test PRIVATE ../../src/kernel ../../src)
++target_compile_definitions(nv2a-pb-constants-test PRIVATE NV2A_PB_INDEX_RUNS_TEST=1)
+ if(MSVC)
+     target_compile_definitions(nv2a-pb-constants-test PRIVATE _CRT_SECURE_NO_WARNINGS)
+ elseif(NOT WIN32)
+     target_link_libraries(nv2a-pb-constants-test PRIVATE m pthread)
+ endif()
+ add_test(NAME nv2a-pb-constants COMMAND nv2a-pb-constants-test)
++add_test(NAME nv2a-pb-index-runs-audit COMMAND nv2a-pb-constants-test audit)
+diff --git a/tests/nv2a_pb_constants/nv2a_pb_constants_test.c b/tests/nv2a_pb_constants/nv2a_pb_constants_test.c
+index 8c08104df3cbc54d41be791f61cedb615b01225f..e76a5db474e7c007f51624a8c59171a85583d7c9 100644
+--- a/tests/nv2a_pb_constants/nv2a_pb_constants_test.c
++++ b/tests/nv2a_pb_constants/nv2a_pb_constants_test.c
+@@ -16,9 +16,17 @@
+ #include <stdlib.h>
+ #include <string.h>
+ #include "nv2a_backend.h"
++#ifdef _WIN32
++#include <windows.h>
++#include "../../src/video/present_provenance.h"
++#if defined(_MSC_VER)
++#include <crtdbg.h>
++#endif
++#endif
+ 
+ #define MEM_BYTES 0x10000u
+ static uint8_t s_mem[MEM_BYTES];
++static uint32_t scalar_indices[65536], run_indices[65536];
+ 
+ /* ---- what the executor expects the runtime to provide ------------------ */
+ ptrdiff_t xbox_GetMemoryOffset(void) { return (ptrdiff_t)s_mem; }
+@@ -33,7 +41,14 @@ int nv2a_pb_dma_walk(void) { return 1; }             /* RECOMP_PB_WALK=dma: 0x03
+ void xbox_FramebufferWindowStart(void) {}
+ void xbox_FramebufferWindowFrameStats(uint32_t draws) { (void)draws; }
+ void xbox_FramebufferWindowPresent(uint32_t va, uint32_t pitch) { (void)va; (void)pitch; }
++#ifdef _WIN32
++void xbox_FramebufferWindowPresentTagged(uint32_t va, uint32_t pitch,
++                                         const RecompPresentTag *tag)
++{ (void)va; (void)pitch; (void)tag; }
++#endif
+ void xbox_Nv2aFrameCounterFlip(void) {}
++int xbox_Nv2aGraphSoftwareTrap(uint32_t subch, uint32_t method, uint32_t data)
++{ (void)subch; (void)method; (void)data; return 0; }
+ /* The flip hold (nv2a_flip_hold.c, linked in). No vblank moves here, so the
+  * executor never holds a flip; the walk is never inside a pushbuffer CALL. */
+ int nv2a_pb_scan_in_call(void) { return 0; }
+@@ -52,6 +67,13 @@ volatile uint32_t *xbox_Nv2aRegPtr(uint32_t offset)
+ 
+ extern void nv2a_pb_exec_method(uint32_t subch, uint32_t method, uint32_t param);
+ extern int nv2a_pb_exec_constant_word(uint32_t method, uint32_t param);
++extern int nv2a_pb_exec_index_runs_enabled(void);
++extern int nv2a_pb_exec_index_run(uint32_t method, const uint32_t *params,
++                                  uint32_t count);
++extern uint32_t nv2a_pb_exec_index_run_test(
++    uint32_t method, const uint32_t *params, uint32_t count,
++    uint32_t initial_count, int active, int run, uint32_t *indices,
++    uint32_t capacity, uint32_t *last_register);
+ 
+ static int s_fail;
+ #define CHECK(c) do { if (!(c)) { printf("FAIL line %d: %s\n", __LINE__, #c); s_fail = 1; } } while (0)
+@@ -79,9 +101,100 @@ static void upload(uint32_t at, uint32_t rows, float base, int fast)
+     }
+ }
+ 
+-int main(void)
++static int set_option(const char *name, const char *value)
++{
++#ifdef _WIN32
++    return _putenv_s(name, value);
++#else
++    return value && *value ? setenv(name, value, 1) : unsetenv(name);
++#endif
++}
++
++static void check_index_runs(void)
++{
++    const uint32_t words16[] = {0x00020001u, 0xFFFE8000u, 0x1234ABCDu};
++    const uint32_t words32[] = {7, 8, 9, 10};
++    uint32_t scalar_count, run_count, scalar_register, run_register;
++
++    scalar_count = nv2a_pb_exec_index_run_test(
++        0x1800, words16, 3, 3, 1, 0, scalar_indices, 65536, &scalar_register);
++    run_count = nv2a_pb_exec_index_run_test(
++        0x1800, words16, 3, 3, 1, 1, run_indices, 65536, &run_register);
++    CHECK(scalar_count == 9 && run_count == scalar_count);
++    CHECK(!memcmp(scalar_indices, run_indices, run_count * sizeof *run_indices));
++    CHECK(run_indices[3] == 1 && run_indices[4] == 2);
++    CHECK(run_indices[5] == 0x8000 && run_indices[6] == 0xFFFE);
++    CHECK(run_indices[7] == 0xABCD && run_indices[8] == 0x1234);
++    CHECK(scalar_register == words16[2] && run_register == scalar_register);
++
++    scalar_count = nv2a_pb_exec_index_run_test(
++        0x1800, words16, 3, 65533, 1, 0,
++        scalar_indices, 65536, &scalar_register);
++    run_count = nv2a_pb_exec_index_run_test(
++        0x1800, words16, 3, 65533, 1, 1,
++        run_indices, 65536, &run_register);
++    CHECK(scalar_count == 65535 && run_count == scalar_count);
++    CHECK(!memcmp(scalar_indices, run_indices, run_count * sizeof *run_indices));
++    CHECK(scalar_register == words16[2] && run_register == scalar_register);
++
++    scalar_count = nv2a_pb_exec_index_run_test(
++        0x1808, words32, 4, 65534, 1, 0,
++        scalar_indices, 65536, &scalar_register);
++    run_count = nv2a_pb_exec_index_run_test(
++        0x1808, words32, 4, 65534, 1, 1,
++        run_indices, 65536, &run_register);
++    CHECK(scalar_count == 65536 && run_count == scalar_count);
++    CHECK(!memcmp(scalar_indices, run_indices, run_count * sizeof *run_indices));
++    CHECK(scalar_register == words32[3] && run_register == scalar_register);
++
++    scalar_count = nv2a_pb_exec_index_run_test(
++        0x1808, words32, 4, 4, 0, 0,
++        scalar_indices, 65536, &scalar_register);
++    run_count = nv2a_pb_exec_index_run_test(
++        0x1808, words32, 4, 4, 0, 1,
++        run_indices, 65536, &run_register);
++    CHECK(scalar_count == 4 && run_count == scalar_count);
++    CHECK(!memcmp(scalar_indices, run_indices, run_count * sizeof *run_indices));
++    CHECK(scalar_register == words32[3] && run_register == scalar_register);
++    CHECK(!nv2a_pb_exec_index_run(0x1810, words32, 4));
++}
++
++int main(int argc, char **argv)
+ {
+     uint32_t r, k;
++    const char *mode = argc == 2 ? argv[1] : "";
++
++#ifdef _WIN32
++    SetErrorMode(SEM_NOGPFAULTERRORBOX | SEM_FAILCRITICALERRORS);
++#if defined(_MSC_VER)
++    _set_abort_behavior(0, _WRITE_ABORT_MSG | _CALL_REPORTFAULT);
++#endif
++#endif
++    if (set_option("RECOMP_PB_INDEX_RUNS",
++                   strcmp(mode, "invalid") == 0 ? "invalid" : "1") != 0)
++        return 2;
++    if (strcmp(mode, "audit") == 0) {
++        if (set_option("RECOMP_GPU_AUDIT", "1") != 0 ||
++            set_option("RECOMP_GPU_AUDIT_FILE",
++#ifdef _WIN32
++                       "NUL"
++#else
++                       "/dev/null"
++#endif
++                       ) != 0)
++            return 2;
++        CHECK(!nv2a_pb_exec_index_runs_enabled());
++        if (!s_fail)
++            printf("nv2a index runs retain scalar GPU audit dispatch\n");
++        return s_fail;
++    }
++    if (strcmp(mode, "invalid") == 0) {
++        (void)nv2a_pb_exec_index_runs_enabled();
++        return 2;
++    }
++    if (*mode)
++        return 2;
++    CHECK(nv2a_pb_exec_index_runs_enabled());
+ 
+     /* Nothing has reached the dispatcher yet: the short path declines. */
+     CHECK(nv2a_pb_exec_constant_word(0x0B80, 0) == 0);
+@@ -126,8 +239,9 @@ int main(void)
+         printf("constant words: dispatcher %.2f ns a word, short path %.2f ns a word (%.1fx)\n",
+                td * 1e9 / n, tf * 1e9 / n, td / tf);
+     }
++    check_index_runs();
+ 
+     if (!s_fail)
+-        printf("nv2a constant short path: ok\n");
++        printf("nv2a constant short path and index runs: ok\n");
+     return s_fail;
+ }
+diff --git a/tests/nv2a_pb_walk/CMakeLists.txt b/tests/nv2a_pb_walk/CMakeLists.txt
+index 1dbe6b399487409c5b7a989ddfb196c2f8e4ca59..08413f42c210e2e6d4e4f54f11364ec353cee7f0 100644
+--- a/tests/nv2a_pb_walk/CMakeLists.txt
++++ b/tests/nv2a_pb_walk/CMakeLists.txt
+@@ -7,3 +7,8 @@ if(MSVC)
+     target_compile_definitions(nv2a-pb-walk-test PRIVATE _CRT_SECURE_NO_WARNINGS)
+ endif()
+ add_test(NAME nv2a-pushbuffer-walk COMMAND nv2a-pb-walk-test)
++foreach(mode bad-jump nested loop)
++    add_test(NAME nv2a-pushbuffer-walk-${mode} COMMAND ${CMAKE_COMMAND}
++        -DPROGRAM=$<TARGET_FILE:nv2a-pb-walk-test> -DMODE=${mode}
++        -P ${CMAKE_CURRENT_SOURCE_DIR}/check_error.cmake)
++endforeach()
+diff --git a/tests/nv2a_pb_walk/check_error.cmake b/tests/nv2a_pb_walk/check_error.cmake
+new file mode 100644
+index 0000000000000000000000000000000000000000..551ff88c6be51f64e492fa744802ac352c4541ce
+--- /dev/null
++++ b/tests/nv2a_pb_walk/check_error.cmake
+@@ -0,0 +1,16 @@
++execute_process(COMMAND "${PROGRAM}" "${MODE}" RESULT_VARIABLE result
++                OUTPUT_VARIABLE output ERROR_VARIABLE error TIMEOUT 8)
++if(result STREQUAL "0" OR result MATCHES "timeout")
++    message(FATAL_ERROR "${MODE} did not fail promptly: ${result}\n${output}\n${error}")
++endif()
++if(MODE STREQUAL "bad-jump")
++    set(expected "bad target")
++elseif(MODE STREQUAL "nested")
++    set(expected "nested CALL")
++else()
++    set(expected "walk limit reached")
++endif()
++if(NOT error MATCHES "${expected}" OR
++   NOT error MATCHES "pusher stopped without consuming PUT")
++    message(FATAL_ERROR "${MODE} did not report ${expected}: ${result}\n${error}")
++endif()
+diff --git a/tests/nv2a_pb_walk/nv2a_pb_walk_test.c b/tests/nv2a_pb_walk/nv2a_pb_walk_test.c
+index 25e3fd504ba1afcd2a3529f2266b8ec80443b734..0332d2e1968f7afe05a24ed11bc338f56f46b6f7 100644
+--- a/tests/nv2a_pb_walk/nv2a_pb_walk_test.c
++++ b/tests/nv2a_pb_walk/nv2a_pb_walk_test.c
+@@ -23,10 +23,15 @@ ptrdiff_t xbox_GetMemoryOffset(void)
+ 
+ /* DMA_GET, as the walk publishes it. */
+ static volatile uint32_t s_get_reg;
++static volatile uint32_t s_subroutine_reg;
+ 
+ volatile uint32_t *xbox_Nv2aRegPtr(uint32_t offset)
+ {
+-    return offset == 0x800044u ? &s_get_reg : NULL;
++    if (offset == 0x800044u)
++        return &s_get_reg;
++    if (offset == 0x00324Cu)
++        return &s_subroutine_reg;
++    return NULL;
+ }
+ 
+ static struct { uint32_t subch, method, param, get; } s_seen[64];
+@@ -53,6 +58,12 @@ int nv2a_pb_exec_constant_word(uint32_t method, uint32_t param)
+     (void)method; (void)param;
+     return 0;
+ }
++int nv2a_pb_exec_index_runs_enabled(void) { return 0; }
++int nv2a_pb_exec_index_run(uint32_t method, const uint32_t *params, uint32_t count)
++{
++    (void)method; (void)params; (void)count;
++    return 0;
++}
+ void nv2a_pb_exec_report(void) {}
+ void xbox_Nv2aAckBusyBits(void) {}
+ void nv2a_pb_exec_walk_begin(void) {}       /* the flip hold's vblank sample */
+@@ -84,8 +95,9 @@ static void title_sets_get(uint32_t get)
+     nv2a_pb_resync(get);
+ }
+ 
+-int main(void)
++int main(int argc, char **argv)
+ {
++    const char *mode = argc == 2 ? argv[1] : "";
+ #ifdef _WIN32
+     _putenv_s("RECOMP_PB_EXEC", "1");
+     _putenv_s("RECOMP_PB_WALK", "dma");
+@@ -94,6 +106,28 @@ int main(void)
+     setenv("RECOMP_PB_WALK", "dma", 1);
+ #endif
+ 
++    if (*mode) {
++        if (strcmp(mode, "bad-jump") == 0) {
++            put(0x900, 0xFFFFFFFCu | 1u);
++            title_sets_get(0x900);
++            nv2a_pb_scan(0x904);
++        } else if (strcmp(mode, "nested") == 0) {
++            put(0xD00, 0xD40u | 2u);
++            put(0xD40, 0xD80u | 2u);
++            title_sets_get(0xD00);
++            nv2a_pb_scan(0xD04);
++        } else if (strcmp(mode, "loop") == 0) {
++            put(0xE00, 0xE00u | 1u);
++            title_sets_get(0xE00);
++            nv2a_pb_scan(0xE04);
++        } else {
++            fprintf(stderr, "Unknown mode: %s\n", mode);
++            return 2;
++        }
++        fprintf(stderr, "Expected invalid pushbuffer to stop\n");
++        return 2;
++    }
++
+     /* 0x100: two methods, then CALL 0x200 (one method, RETURN), one more
+      * method, JUMP 0x400 (one method). PUT is the end of that. */
+     title_sets_get(0x100);
+@@ -159,17 +193,6 @@ int main(void)
+     expect(10, 0x0408, 33);
+     CHECK(s_get_reg == 0xB08);
+ 
+-    /* A jump out of RAM means the walk is reading data as commands: GET snaps
+-     * to PUT and nothing past it is executed. */
+-    put(0x900, 0xFFFFFFFCu | 1u);                          /* JUMP 0xFFFFFFFC */
+-    title_sets_get(0x900);
+-    nv2a_pb_scan(0x904);
+-    CHECK(s_n == 11);
+-    put(0x904, hdr(1, 0, 0x0318)); put(0x908, 22);
+-    nv2a_pb_scan(0x90C);                                   /* in step again */
+-    CHECK(s_n == 12);
+-    expect(11, 0x0318, 22);
+-
+     /* A method whose parameters run past PUT stops at PUT, and finishes when
+      * PUT moves. Header at 0xC00 promises four parameters and PUT is after the
+      * first. The walk must neither carry on through what the ring held before
+@@ -202,39 +225,6 @@ int main(void)
+         expect(n0 + 4, 0x0700, 71);
+     }
+ 
+-    /* A CALL inside a CALL is an error on the hardware, and the walk stops at
+-     * PUT rather than overwrite the return address. */
+-    {
+-        int n0 = s_n;
+-
+-        title_sets_get(0xD00);
+-        put(0xD00, 0xD40u | 2u);                           /* CALL 0xD40 */
+-        put(0xD04, hdr(1, 0, 0x0708)); put(0xD08, 53);     /* after the call */
+-        put(0xD40, hdr(1, 0, 0x0700)); put(0xD44, 51);
+-        put(0xD48, 0xD80u | 2u);                           /* CALL inside CALL */
+-        put(0xD80, hdr(1, 0, 0x0704)); put(0xD84, 52);     /* never reached */
+-        put(0xD88, 0x00020000u);
+-        nv2a_pb_scan(0xD0C);
+-        CHECK(s_n == n0 + 1);
+-        expect(n0, 0x0700, 51);
+-        CHECK(s_get_reg == 0xD0C);
+-    }
+-
+-    /* A jump to itself never reaches PUT; the runaway guard ends the walk. */
+-    {
+-        int n0 = s_n;
+-
+-        title_sets_get(0xE00);
+-        put(0xE00, 0xE00u | 1u);                           /* JUMP 0xE00 */
+-        nv2a_pb_scan(0xE04);
+-        CHECK(s_n == n0);
+-        CHECK(s_get_reg == 0xE04);
+-        put(0xE04, hdr(1, 0, 0x0710)); put(0xE08, 61);
+-        nv2a_pb_scan(0xE0C);                               /* in step again */
+-        CHECK(s_n == n0 + 1);
+-        expect(n0, 0x0710, 61);
+-    }
+-
+     if (!s_fail)
+         printf("nv2a pushbuffer walk: ok\n");
+     return s_fail;
+diff --git a/tests/nv2a_segments/test_main.c b/tests/nv2a_segments/test_main.c
+index e5d8e45e1474d8e8cf38e52962437d8973be36d7..cfaa4ac85562a250f170cb14d2b1074f679219b9 100644
+--- a/tests/nv2a_segments/test_main.c
++++ b/tests/nv2a_segments/test_main.c
+@@ -35,6 +35,12 @@ void nv2a_pb_exec_walk_begin(void) {}
+ void xbox_Nv2aAckBusyBits(void) {}
+ int nv2a_pb_exec_constant_word(uint32_t method, uint32_t value)
+ { (void)method; (void)value; return 0; }
++int nv2a_pb_exec_index_runs_enabled(void) { return 0; }
++int nv2a_pb_exec_index_run(uint32_t method, const uint32_t *params, uint32_t count)
++{
++    (void)method; (void)params; (void)count;
++    return 0;
++}
+ void nv2a_pb_exec_method(uint32_t subchannel, uint32_t method, uint32_t value)
+ {
+     (void)subchannel; (void)method;

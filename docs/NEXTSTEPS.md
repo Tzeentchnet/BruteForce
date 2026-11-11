@@ -6,11 +6,11 @@ results are in [FINDINGS.md](FINDINGS.md), and framework work is
 tracked in [UPSTREAM.md](UPSTREAM.md). The current
 toolkit uses xboxrecomp v0.17.0 at
 `343b6d8901723b37ce568b2418c5df4e1fe1d223`, selected post-release commits
-from #314, #319 and #320, and 42 local patches. Its isolated and independently
-replayed tree is `3164795a5ed52658abb41f2630ed8153e6b2cce0`.
+from #314, #319 and #320, and 43 local patches. Its isolated and independently
+replayed tree is `3e3ae3600802d2bf4446d86fc546322d60849047`.
 The framework tools on that tree report 995 passed, 2 skipped and 134
 subtests passed; the project suite reports 969 passed with WARP and the
-available hardware adapter; nine focused framework groups report 41 CTests
+available hardware adapter; eleven focused framework groups report 47 CTests
 passed; and the presenter suite reports 19 passed. The Phase 4 subset
 comprises 22 of those CTests, while generated-store coverage reports 3 passed
 and the title-side fence, pushbuffer, PGRAPH, interrupt and toolkit selection
@@ -18,11 +18,11 @@ reports 67 passed. The validation includes the runtime PGRAPH/PFB deadlock
 fix and its segment-ordering fixture.
 
 Supported retail generation `20261111-084222-7bdb6e56` is a Release build on
-the current runtime tree `3164795a5ed52658abb41f2630ed8153e6b2cce0`; the
-generation's `tools` and `templates` fingerprints exactly match that tree, so
+the current runtime tree `3e3ae3600802d2bf4446d86fc546322d60849047`; its
+recorded and current `tools` and `templates` fingerprints are identical, so
 no unchanged title code was regenerated. Its
-current 37,577,216-byte executable SHA-256 is
-`1d4da20c37be04347ed4e7f5f01b3752e0813c564ae87dc6c2e128cca87c5527`;
+current 37,578,240-byte executable SHA-256 is
+`9112b0f836f94c9ab87b23a4a83bfdde95acaf32b5dae4d62636893b627144bd`;
 it translated all 22,295 identified functions with zero failures, six
 unresolved direct-call targets and 11 untranslated instruction sites. Before
 the runtime-only fix, the codegen-identical executable completed one
@@ -36,7 +36,10 @@ controls panel, a cinematic or a solid-black frame. The post-deadlock
 then completed the two fixed-tree Phase 4 smokes described below. The current
 texture-index rebuild includes the default indexed path and an exact
 same-binary linear reference for measurement; it has synthetic validation
-only and no retail run. The earlier `20261111-002138-a9dbc18a` generation
+only and no retail run. The same current executable includes default-off
+`RECOMP_PB_INDEX_RUNS=1`; its scalar/run executor state and both walker paths
+pass synthetic equivalence, but it has no matched rendered-output or
+performance result. The earlier `20261111-002138-a9dbc18a` generation
 remains the exact xemu-matched reference because the reference comparison
 predates the integrated pipeline.
 
@@ -796,6 +799,21 @@ These are synthetic results, not a title comparison.
   mandatory. The earlier roughly 76-probe/lookup title measurements predate
   the index; run the Milestone 2 matched A/B/A campaign before claiming a
   speedup or changing another cache policy.
+- Retained complete audit generation `20261111-002138-a9dbc18a` counted
+  73,787,237 `ARRAY_ELEMENT16` words and 115,904 `ARRAY_ELEMENT32` words.
+  Their 147,690,378 expanded indices exactly match `ARRAY_REQUESTED` and
+  `ARRAY_BUFFERED`; there was no `DRAW_ARRAYS` method row. This establishes
+  material dispatch volume, not performance or reviewed scene identity.
+  Patch 0046 adds default-off `RECOMP_PB_INDEX_RUNS=1` for eligible
+  non-incrementing subchannel-zero runs in both selected walkers. It preserves
+  packet, PUT, segment and physical-wrap boundaries, final method state and
+  exact index capacity; GPU audit and all ineligible paths remain scalar.
+  Scalar/run executor state, CALL, wrap, packet/segment split, staged-walk,
+  audit and invalid-value tests pass. Before promotion, compare matched
+  CPU/D3D11 rendered frames and run a separate reviewed six-attempt A/B/A
+  campaign with `RECOMP_GPU_TEX_INDEX=0` held in both variants. Do not combine
+  this measurement with the texture-index candidate or infer speedup from the
+  census.
 - The fixed segment-only and all-three bring-up smokes reached reviewed
   movement once each without retry. The 24-run isolation/combined campaign is
   deferred; do not schedule the three poll/event pairs or the idle, segment

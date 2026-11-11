@@ -907,6 +907,37 @@ framework identity, and records the exact runtime options. Collection remains
 inconclusive until every captured interval, input sequence and presentation
 state is reviewed. Do not infer distinct-world cadence from flips alone.
 
+## Index-word batching comparison
+
+`RECOMP_PB_INDEX_RUNS=1` enables the separate, default-off pushbuffer
+index-word candidate. Unset, empty or `0` retains scalar dispatch; any other
+value stops with an explicit diagnostic. Eligible non-incrementing
+subchannel-zero `ARRAY_ELEMENT16/32` runs are grouped only within the current
+packet, PUT, segment and physical-wrap boundary. The first executor word, GPU
+audit, other methods/subchannels and increasing packets stay scalar. Startup
+prints `[PB-INDEX-RUN] non-incrementing index runs enabled`; audit prints the
+scalar-fallback notice; periodic snapshots report calls, 16-bit words, 32-bit
+words and buffered indices.
+
+Synthetic scalar/run state equivalence passes, but no matched rendered-output
+or performance result exists. When an operator is available, collect this as
+its own six-attempt native campaign at the same Basic Controls state. Keep the
+texture-descriptor candidate in exact linear mode in both variants so only
+index-word batching changes:
+
+```powershell
+python tools\bench.py --performance --scene movement --readiness manual `
+  --ready-state "Basic Controls popup fully visible at the initial tutorial spawn; no cinematic or briefing" `
+  --no-auto-panels --capture-world --profile-callers --runs 3 --retries 0 `
+  --variant "scalar:BRUTEFORCE_PERF_COUNTERS=1,RECOMP_GPU_TEX_INDEX=0,RECOMP_PB_INDEX_RUNS=0" `
+  --variant "runs:BRUTEFORCE_PERF_COUNTERS=1,RECOMP_GPU_TEX_INDEX=0,RECOMP_PB_INDEX_RUNS=1"
+```
+
+The operator must skip cinematics and the mission briefing, verify every
+ready-state token, and review captured intervals and matched CPU/D3D11 frames.
+Do not run this simultaneously with the texture-index comparison or report
+the retained census as a speedup.
+
 ## Experimental NV2A wait and segment options
 
 The current default-off Phase 4 implementation can replace the title's busy

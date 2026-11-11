@@ -11,12 +11,12 @@ in [UPSTREAM.md](./UPSTREAM.md).
 
 ## Integrated synthetic validation boundary
 
-The complete 42-patch v0.17 framework stack independently replayed to tree
-`3164795a5ed52658abb41f2630ed8153e6b2cce0` and passed
+The complete 43-patch v0.17 framework stack independently replayed to tree
+`3e3ae3600802d2bf4446d86fc546322d60849047` and passed
 `python tools/toolkit.py --verify`. The framework tools reported 995 passed,
 2 skipped and 134 subtests passed. The production-style project suite
-reported 969 passed with WARP and the available hardware adapter. Nine
-focused framework fixture groups reported 41 CTests passed, and the Windows
+reported 969 passed with WARP and the available hardware adapter. Eleven
+focused framework fixture groups reported 47 CTests passed, and the Windows
 presenter suite reported 19 passed. The Phase 4 subset comprises 7
 bounded-PFB, 6 idle-wait and 9 guarded-segment CTests; three generated
 store-hook tests and 67 title-side fence, pushbuffer, PGRAPH, interrupt and
@@ -174,16 +174,19 @@ promoted into a performance claim.
 - Current supported generation `20261111-084222-7bdb6e56` was generated from
   the same v0.17.0 base on integrated toolkit tree
   `64ce266664a875084be63cb32148b3ae78c55185`, then rebuilt against the
-  runtime-only fixed tree `3164795a5ed52658abb41f2630ed8153e6b2cce0`.
+  runtime-only fixed tree `3e3ae3600802d2bf4446d86fc546322d60849047`.
   The recorded and current `tools`/`templates` fingerprints are identical, so
   [build.py](../tools/build.py) accepted the existing generated code while
   pinning the full runtime tree in build metadata. It translated all 22,295
   identified functions with zero failures, six unresolved direct-call
   targets and 11 untranslated instruction sites. After the project-side exact
-  texture-descriptor index and its exact same-binary linear reference were
-  added, the supported workflow rebuilt the same generated title and
-  framework tree into a 37,577,216-byte executable with SHA-256
-  `1d4da20c37be04347ed4e7f5f01b3752e0813c564ae87dc6c2e128cca87c5527`.
+  texture-descriptor index, its exact same-binary linear reference and
+  default-off exact index-word runs were added, the supported workflow rebuilt
+  the same generated title against the current framework tree into a
+  37,578,240-byte executable with SHA-256
+  `9112b0f836f94c9ab87b23a4a83bfdde95acaf32b5dae4d62636893b627144bd`.
+  Its 36,474,880-byte PDB has SHA-256
+  `563b5da9b21e265fb5d1cf0e9922f2f2d1bf7476b8c8c93fb3db355f84df5614`.
   This current executable has synthetic coverage but no retail run. The
   preceding index-only 37,576,192-byte executable also had no retail run and
   had SHA-256
@@ -2304,6 +2307,54 @@ linear-reference output test is byte-identical to the indexed WARP rewrite
 fixture, and invalid switch values fail initialization. No
 retail run, matched A/B/A comparison, distinct-world measurement, or G2/G3
 result was collected; the old probe counts remain the only title evidence.
+
+### Material index-word census and default-off run executor
+
+The retained complete D3D11 audit report
+`analysis\bench\v017-reference-diagnostics-20261111-002138\run02-d3d11-audit\gpu_audit.csv`
+provides an independent Phase 5 census. Its generation is
+`20261111-002138-a9dbc18a`, toolkit tree
+`131abd8d1f4559bb36dba4391e4c644925cff5df`, and executable SHA-256
+`f1bf8622df3b651af6747566b4628a1d8ca18d7a01a4c196df910124cb9f7844`.
+The report was complete and included a confirmed post-window snapshot.
+
+- `ARRAY_ELEMENT16`: 73,787,237 parameter words, expanding to 147,574,474
+  indices.
+- `ARRAY_ELEMENT32`: 115,904 parameter words and indices.
+- Combined: 73,903,141 words and 147,690,378 indices, exactly equal to both
+  `ARRAY_REQUESTED` and `ARRAY_BUFFERED`.
+- No `DRAW_ARRAYS` method row was present.
+
+This is material dispatch volume. It is not performance evidence: the
+retained scene and presentation state were not reviewed for an attributable
+comparison.
+
+Patch [0046](../patches/xboxrecomp/0046-index-word-runs.patch) adds exact
+`RECOMP_PB_INDEX_RUNS=1` handling behind a default-off switch. The DMA/staged
+and guarded-segment walkers batch only contiguous, non-incrementing
+subchannel-zero `ARRAY_ELEMENT16/32` packet pieces. The executor leaves the
+first initialization word scalar, preserves final method-register and exact
+index-capacity behavior, expands 16-bit words low half first, and retains
+scalar dispatch for GPU audit, other methods/subchannels, increasing packets
+and every ineligible boundary. Packet, PUT, segment and physical-wrap limits
+are not crossed by a run.
+
+Synthetic validation covers scalar/run internal-state equality, inactive and
+capacity-limited primitives, exact audit counts, CALL/RETURN, physical wrap,
+packet and segment splits, staged walking, invalid values and fail-closed
+streams. The three directly affected framework fixture groups passed 2/2,
+4/4 and 9/9 CTests; the project pushbuffer fixture and structured benchmark
+diagnostics passed. The fully provisioned project suite passed 969 tests with
+WARP and the available hardware adapter, the framework tool suite passed 995
+tests plus 134 subtests with two skips, and a fresh v0.17 reconstruction
+applied the full stack and verified tree
+`3e3ae3600802d2bf4446d86fc546322d60849047`.
+
+No game, xemu or performance run was made for this implementation. A matched
+CPU/D3D11 rendered-output comparison and a separate reviewed scalar/run A/B/A
+campaign remain required. That campaign must hold
+`RECOMP_GPU_TEX_INDEX=0` in both variants so the two Phase 5 candidates are
+not combined. No Brute Force speedup is claimed.
 
 ### Synthetic D3D11 compatibility hardening
 

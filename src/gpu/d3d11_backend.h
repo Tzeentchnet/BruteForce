@@ -47,6 +47,7 @@ void bruteforce_d3d11_test_finish_work(void);
 void bruteforce_d3d11_test_flip(void);
 ID3D11Device *bruteforce_d3d11_test_device(void);
 ID3D11DeviceContext *bruteforce_d3d11_test_context(void);
+int bruteforce_d3d11_test_texture_index(void);
 ID3D11ShaderResourceView *bruteforce_d3d11_test_texture(const Nv2aTexture *texture,
                                                          int cube, unsigned stage,
                                                          unsigned *levels);

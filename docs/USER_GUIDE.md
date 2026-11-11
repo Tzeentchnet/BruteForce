@@ -540,7 +540,7 @@ error because a guest-sized CPU frame cannot carry the higher-resolution
 result. Experimental depth and packed-stencil aliases are also rejected in
 scaled modes; their guest-layout seed and sampling semantics have not been
 defined at physical resolution. The CPU renderer remains at guest resolution.
-The complete synthetic D3D11 matrix passes 377 cases with WARP and RTX 5070
+The complete synthetic D3D11 matrix passes 392 cases with WARP and RTX 5070
 hardware enabled, including CPU-written frames with and without a GPU overlay
 at scale 1 and scale 2.
 Focused synthetic WARP and hardware fixtures also exercise native resize

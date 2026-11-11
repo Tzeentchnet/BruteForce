@@ -29,15 +29,16 @@ next steps are in [NEXTSTEPS.md](./NEXTSTEPS.md).
 
 Before the runtime-only Phase 4 fix, integrated v0.17 Release generation
 `20261111-084222-7bdb6e56`'s codegen-identical executable completed one CPU
-and one D3D11 scripted movement bring-up without retries. The current rebuilt
+and one D3D11 scripted movement bring-up without retries. The post-deadlock
 executable later completed the fixed-tree Phase 4 smokes described below.
-Representative captures show gameplay without the controls panel or a
-cinematic, but the 116 CPU and 1,929 D3D11 movement flips do not have
-continuous reviewed world labels. The reported 2.919 and 48.231
-whole-picture changes/s are therefore not distinct-world rates or a
-performance comparison. All reviewed phase measurements below remain tied to
-their explicitly named older generation until a fresh alternating campaign
-is complete.
+The current texture-index rebuild has synthetic validation only and no retail
+run. Representative captures from the preceding executables show gameplay
+without the controls panel or a cinematic, but the 116 CPU and 1,929 D3D11
+movement flips do not have continuous reviewed world labels. The reported
+2.919 and 48.231 whole-picture changes/s are therefore not distinct-world
+rates or a performance comparison. All reviewed phase measurements below
+remain tied to their explicitly named older generation until a fresh
+alternating campaign is complete.
 
 A native 640x480 xemu Basic Controls frame is now matched by content to the
 preceding `20261111-002138-a9dbc18a` reference generation. A focused
@@ -141,6 +142,12 @@ each ordinary use; the old approximate checks are a diagnostic opt-in.
 Failed uploads no longer accumulate unkeyed cache slots, and deterministic
 unsupported decodes are negatively cached after alias checks. A P8 page-query
 reuse experiment recorded no hits in three candidate runs and was removed.
+The former linear descriptor scan is now a 4,096-bucket exact index for the
+2,048-entry cache. Synthetic coverage exercises collisions, all key fields,
+rewrite/rekey, failed-upload discard relocation, full-cache LRU replacement,
+cube levels and mip levels. Exact source and palette comparison is unchanged.
+The recorded roughly 76 probes per lookup predates this index; no title A/B/A
+or performance result has been collected for it.
 The current texture and colour-shadow paths instead use checked copies,
 rechecking mapping and allocation identities, with optional explicit
 suballocation bounds. Guard, reprotection, lifecycle, colour-alias and

@@ -3886,6 +3886,8 @@ int main(int argc, char **argv)
         return bruteforce_test_shader_cache_publication(strstr(argv[2], "readonly") != NULL,
                                                         strstr(argv[2], "different") != NULL,
                                                         strstr(argv[2], "corrupt") != NULL) ? 0 : 1;
+    if (strcmp(argv[2], "gpu-texture-index") == 0)
+        return bruteforce_d3d11_test_texture_index() ? 0 : 1;
     if (perf_mode)
         return scene_perf_counters(argv[3]) ? 0 : 1;
     if (strstr(argv[2], "vsh-packed") ?

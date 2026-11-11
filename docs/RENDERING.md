@@ -309,6 +309,14 @@ rewrites, leaving stale textures. Exposed mip chains always use exact
 snapshots even when approximate caching is requested; declared and uploaded
 level counts participate in their cache identity.
 
+The 2,048-entry cache uses a 4,096-bucket exact descriptor index rather than a
+linear scan. Buckets chain collisions and still compare the complete
+descriptor key before reuse. Rewrites, failed-upload discards, compacting
+entry moves and LRU replacement update the index explicitly; an index
+invariant failure stops instead of falling back to an unverified entry.
+Indexing only selects a candidate and never replaces the checked source,
+palette, allocation-lifetime or exact-byte validation above.
+
 P8 binds validate sampled indices against the programmed 32-, 64-, 128- or
 256-entry palette. Framework texture metadata carries this length into both
 backend interfaces and the CPU reference; zero on manually constructed

@@ -21,8 +21,8 @@ Supported retail generation `20261111-084222-7bdb6e56` is a Release build on
 the current runtime tree `3164795a5ed52658abb41f2630ed8153e6b2cce0`; the
 generation's `tools` and `templates` fingerprints exactly match that tree, so
 no unchanged title code was regenerated. Its
-37,575,168-byte executable SHA-256 is
-`132bece507c1773c41eeaa6549687d2c493a121c2c102452a10465d5a584f073`;
+current 37,576,192-byte executable SHA-256 is
+`4635a8522a44ba99e676cdbf1f3db7b64a8b0da0e4b9718cbacd683d5bb427c0`;
 it translated all 22,295 identified functions with zero failures, six
 unresolved direct-call targets and 11 untranslated instruction sites. Before
 the runtime-only fix, the codegen-identical executable completed one
@@ -30,10 +30,13 @@ audio-off, four-thread CPU run and one D3D11 run through the scripted tutorial
 world, stationary hold and movement window without retry, generated stub,
 untranslated-instruction hit, ICALL failure, renderer-device error or crash.
 Reviewed sample captures show gameplay, the character and HUD without the
-controls panel, a cinematic or a solid-black frame. The rebuilt executable
-then completed the two fixed-tree Phase 4 smokes described below. The earlier
-`20261111-002138-a9dbc18a` generation remains the exact xemu-matched reference
-because the reference comparison predates the integrated pipeline.
+controls panel, a cinematic or a solid-black frame. The post-deadlock
+37,575,168-byte executable at
+`132bece507c1773c41eeaa6549687d2c493a121c2c102452a10465d5a584f073`
+then completed the two fixed-tree Phase 4 smokes described below. The current
+texture-index rebuild has synthetic validation only and no retail run. The
+earlier `20261111-002138-a9dbc18a` generation remains the exact xemu-matched
+reference because the reference comparison predates the integrated pipeline.
 
 The reviewed performance campaigns still use old generation
 `20261103-145850-21e3091e` on tree
@@ -738,7 +741,7 @@ Stereo remains the acceptance target.
 The directly implementable texture, P8, checked-copy, diagnostic and
 display-awake candidates below are synthetic-tested; their external
 correctness and measurement gates remain open. The complete D3D11 matrix
-passed 377 cases with WARP and the RTX 5070 hardware adapter; the framework
+passed 392 cases with WARP and the RTX 5070 hardware adapter; the framework
 memory, decoder, PFB and display-awake fixtures passed 17 cases, and the
 separate synchronization, presenter, pushbuffer and toolkit suite passed 61.
 These are synthetic results, not a title comparison.
@@ -774,6 +777,13 @@ These are synthetic results, not a title comparison.
   current implementation on one generation with matched scene/input and
   alternating A/B/A runs; retain an uninstrumented baseline because detailed
   counters add overhead.
+- Ordinary texture descriptors now use a 4,096-bucket exact index instead of
+  scanning as many as 2,048 entries. A synthetic invariant fixture covers
+  exact fields, collisions, rewrite/rekey, failed-upload discard relocation
+  and full-cache LRU replacement. Exact source and palette snapshots remain
+  mandatory. The earlier roughly 76-probe/lookup title measurements predate
+  the index; run the Milestone 2 matched A/B/A campaign before claiming a
+  speedup or changing another cache policy.
 - The fixed segment-only and all-three bring-up smokes reached reviewed
   movement once each without retry. The 24-run isolation/combined campaign is
   deferred; do not schedule the three poll/event pairs or the idle, segment

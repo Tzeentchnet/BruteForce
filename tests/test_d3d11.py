@@ -311,6 +311,14 @@ def test_texture_cache_observes_same_frame_and_unsampled_rewrites(tmp_path, devi
         assert fixture_pixel(image, 19, 21) == (0, 0, 255, 255)
 
 
+def test_texture_descriptor_index_handles_lifecycle_and_collisions(tmp_path):
+    result = render_compatibility_fixture(
+        "gpu-texture-index", tmp_path / "unused.raw"
+    )
+    assert result.returncode == 0, result.stderr
+    assert "texture descriptor index passed" in result.stdout
+
+
 def test_approximate_cache_is_opt_in_and_warns_about_stale_textures(tmp_path):
     output = tmp_path / "approximate-cache.raw"
     result = render_compatibility_fixture(

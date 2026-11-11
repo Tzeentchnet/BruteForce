@@ -697,8 +697,9 @@ own GPU back end, an extended interface for it, and its own pacing fixes.
     *Change:* a general back end with:
     - GPU-authoritative colour and depth surfaces;
     - render-to-texture without readback;
-    - a snapshot-validated texture cache, direct BC uploads, and GPU compute decoding
-      of common swizzled, linear, and P8 formats;
+    - an exact descriptor-indexed, snapshot-validated texture cache, direct BC
+      uploads, and GPU compute decoding of common swizzled, linear, and P8
+      formats;
     - state-object caches;
     - pixel shaders from combiner state and vertex shaders from vertex
       programs, matching the framework's CPU evaluators rule for rule;
@@ -732,20 +733,26 @@ own GPU back end, an extended interface for it, and its own pacing fixes.
     unchanged. The stationary captures were visually matched but not
     byte-identical or frame-locked, so strict title output identity remains
     open and the cache remains default-off.
+    The texture descriptor index has separate synthetic coverage for every
+    key field, deliberate hash collisions, rewrite/rekey, compacting discard
+    relocation and full 2,048-entry LRU replacement. The complete WARP-capable
+    D3D11 Python matrix reported 392 passed with WARP and the available
+    hardware adapter enabled.
     *Overlap:* #184's D3D11 back end, and
     [#274](https://github.com/sp00nznet/xboxrecomp/pull/274) (compile once
     per HLSL text), which applies the same keying idea to the D3D8 layer;
     overlap checked 2026-10-31.
     Ordinary cache use now compares retained texture and palette snapshots,
     addressing the synthetic same-frame and sparse-hash rewrite cases. The
-    optional approximate mode can still miss those rewrites. Failed uploads
-    now release their slots; deterministic unsupported decodes have bounded
-    negative entries, checked after surface aliases. A P8 page-query reuse
-    experiment had no hits in the recorded candidate runs and was removed.
-    Synthetic failure, alias and reprotection fixtures cover these paths;
-    untracked allocations, concurrent protection/write races and gameplay
-    cost remain unresolved. Coordinate with #184 and Blood Wake's authors
-    before preparing anything.
+    descriptor candidate is selected through an exact collision-safe index,
+    while the optional approximate mode can still miss byte rewrites. Failed
+    uploads now release their slots; deterministic unsupported decodes have
+    bounded negative entries, checked after surface aliases. A P8 page-query
+    reuse experiment had no hits in the recorded candidate runs and was
+    removed. Synthetic index, failure, alias and reprotection fixtures cover
+    these paths; untracked allocations, concurrent protection/write races and
+    gameplay cost remain unresolved. Coordinate with #184 and Blood Wake's
+    authors before preparing anything.
 
     Blood Wake v0.3.1 adds another relevant but title-coupled layer:
     `bw_vshpre.c` observes every vertex shader created by known boot-time

@@ -70,11 +70,13 @@ post-release fixes. Integrated Release generation
 `20261111-084222-7bdb6e56` uses the final runtime tree. Before the
 runtime-only Phase 4 fix, its codegen-identical executable completed one
 audio-off CPU and one D3D11 tutorial/movement bring-up without retries. The
-rebuilt executable completed the two reviewed Phase 4 smokes described
-above. Reviewed sample frames show gameplay without the controls panel or a
-cinematic, but none of these single attempts is an A/B/A performance result.
-Matched-reference and reviewed performance gates remain open, and the
-published measurements still belong to the previous reviewed generation.
+post-deadlock executable completed the two reviewed Phase 4 smokes described
+above. The current texture-index rebuild has synthetic validation only and
+has not been run on retail content. Reviewed samples from the preceding
+executables show gameplay without the controls panel or a cinematic, but none
+of those single attempts is an A/B/A performance result. Matched-reference
+and reviewed performance gates remain open, and the published measurements
+still belong to the previous reviewed generation.
 
 The pre-fix executable also completed one additional D3D11 attempt at the 4K
 preset with mipmaps and anisotropy enabled. It confirms the 2880x2160 4:3

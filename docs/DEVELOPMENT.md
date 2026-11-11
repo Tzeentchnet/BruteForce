@@ -252,7 +252,10 @@ and invalid indices, exact, freed, short-pitch and conflicting colour aliases,
 seed/upload/clear/readback races, layout migration and replacement, guarded
 and read-only colour writes, failed partial writes and retry, padded rows, a
 bound-target copy, CPU/GPU parity and shader diagnostics. The fixture also
-checks that a guarded write respects executable read-only protection.
+checks that a guarded write respects executable read-only protection. The
+texture-descriptor-index case covers exact key fields, deliberate hash
+collisions, rewrite/rekey, compacting discard, moved-entry relocation, and
+full-cache LRU eviction without allocating GPU resources.
 `memory_regressions` separately
 checks logical-range registration/reuse and mapping reset; `nv2a_ffp_backend`
 checks checked CPU decoding, input/output overlap and bounded verification

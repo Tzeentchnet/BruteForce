@@ -2546,12 +2546,14 @@ static int mirror_full_color_clear(Surf *s, uint32_t argb)
 /* ---- textures ------------------------------------------------------------ */
 
 #define MAX_TEX 2048
+#define TEX_INDEX_BUCKETS 4096
 #define MAX_TEX_SNAPSHOT_BYTES (128u << 20)
 typedef struct {
     uint32_t offset, w, h, pitch, color, levels, uploaded_levels, palette, palette_entries;
     uint64_t hash, sparse, palette_hash;
     GuestSpanIdentity source_identity, palette_identity;
     uint32_t gen, stable, last_use;
+    int index_next;
     uint8_t cube, unsupported;
     uint8_t *snapshot;
     size_t snapshot_bytes;
@@ -2561,6 +2563,7 @@ typedef struct {
 
 static Tex *s_tex;
 static int s_ntex;
+static int s_tex_index[TEX_INDEX_BUCKETS];
 static uint32_t *s_decode;
 static size_t s_decode_cap;
 static uint8_t *s_tex_probe;
@@ -2582,6 +2585,106 @@ static uint64_t hash_bytes(const uint8_t *p, size_t n)
     for (; i < n; i++)
         h = (h ^ p[i]) * 0x100000001B3ull;
     return h;
+}
+
+static unsigned tex_key_bucket_values(uint32_t offset, uint32_t width, uint32_t height,
+                                      uint32_t pitch, uint32_t color, int cube,
+                                      uint32_t palette, unsigned palette_entries,
+                                      uint32_t levels, unsigned uploaded_levels)
+{
+    uint32_t key[] = {
+        offset, width, height, pitch, color, (uint32_t)cube, palette, palette_entries,
+        (cube || s_tex_mips) ? levels : 0,
+        s_tex_mips ? uploaded_levels : 0,
+    };
+    uint64_t hash = hash_bytes((const uint8_t *)key, sizeof key);
+    return (unsigned)((hash ^ (hash >> 32)) & (TEX_INDEX_BUCKETS - 1));
+}
+
+static unsigned tex_key_bucket(const Nv2aTexture *t, int cube, unsigned palette_entries,
+                               unsigned uploaded_levels)
+{
+    return tex_key_bucket_values(t->offset, t->width, t->height, t->pitch, t->color,
+                                 cube, t->palette, palette_entries, t->levels,
+                                 uploaded_levels);
+}
+
+static unsigned tex_entry_bucket(const Tex *e)
+{
+    return tex_key_bucket_values(e->offset, e->w, e->h, e->pitch, e->color, e->cube,
+                                 e->palette, e->palette_entries, e->levels,
+                                 e->uploaded_levels);
+}
+
+static int tex_key_matches(const Tex *e, const Nv2aTexture *t, int cube,
+                           unsigned palette_entries, unsigned uploaded_levels)
+{
+    return e->offset == t->offset && e->w == t->width && e->h == t->height &&
+           e->color == t->color && e->pitch == t->pitch && e->cube == (uint8_t)cube &&
+           e->palette == t->palette && e->palette_entries == palette_entries &&
+           (!(cube || s_tex_mips) || e->levels == t->levels) &&
+           (!s_tex_mips || e->uploaded_levels == uploaded_levels);
+}
+
+static void tex_index_corrupt(const char *operation, int index)
+{
+    fprintf(stderr, "[GPU-D3D11] texture descriptor index corrupt during %s at slot %d\n",
+            operation, index);
+    fflush(stderr);
+    abort();
+}
+
+static Tex *tex_index_find(const Nv2aTexture *t, int cube, unsigned palette_entries,
+                           unsigned uploaded_levels, unsigned *probes)
+{
+    int link = s_tex_index[tex_key_bucket(t, cube, palette_entries, uploaded_levels)];
+    if (probes)
+        *probes = 0;
+    while (link) {
+        Tex *e;
+        if (link < 1 || link > s_ntex)
+            tex_index_corrupt("lookup", link - 1);
+        e = &s_tex[link - 1];
+        if (probes)
+            ++*probes;
+        if (tex_key_matches(e, t, cube, palette_entries, uploaded_levels))
+            return e;
+        link = e->index_next;
+    }
+    return NULL;
+}
+
+static void tex_index_insert(Tex *e)
+{
+    int index = (int)(e - s_tex);
+    unsigned bucket;
+    if (index < 0 || index >= s_ntex)
+        tex_index_corrupt("insert", index);
+    bucket = tex_entry_bucket(e);
+    e->index_next = s_tex_index[bucket];
+    s_tex_index[bucket] = index + 1;
+}
+
+static void tex_index_remove(Tex *e)
+{
+    int index = (int)(e - s_tex);
+    int *link;
+    if (index < 0 || index >= s_ntex)
+        tex_index_corrupt("remove", index);
+    link = &s_tex_index[tex_entry_bucket(e)];
+    while (*link) {
+        Tex *candidate;
+        if (*link < 1 || *link > s_ntex)
+            tex_index_corrupt("remove traversal", *link - 1);
+        if (*link == index + 1) {
+            *link = e->index_next;
+            e->index_next = 0;
+            return;
+        }
+        candidate = &s_tex[*link - 1];
+        link = &candidate->index_next;
+    }
+    tex_index_corrupt("remove missing", index);
 }
 
 static uint64_t tex_hash(const uint8_t *p, uint32_t color, size_t n)
@@ -2660,6 +2763,7 @@ static Tex *tex_slot(Tex *e)
 {
     int i, lru = 0;
     if (e) {
+        tex_index_remove(e);
         release_tex(e);
         return e;
     }
@@ -2670,6 +2774,7 @@ static Tex *tex_slot(Tex *e)
             lru = i;
     if (g_bruteforce_perf_counters_enabled)
         bruteforce_perf_record_texture_eviction();
+    tex_index_remove(&s_tex[lru]);
     release_tex(&s_tex[lru]);
     return &s_tex[lru];
 }
@@ -2677,13 +2782,18 @@ static Tex *tex_slot(Tex *e)
 static void discard_tex(Tex *e)
 {
     int index = (int)(e - s_tex);
+    int last = s_ntex - 1;
     if (g_bruteforce_perf_counters_enabled)
         bruteforce_perf_record_texture_discard();
+    tex_index_remove(e);
     release_tex(e);
-    --s_ntex;
-    if (index != s_ntex)
-        s_tex[index] = s_tex[s_ntex];
-    memset(&s_tex[s_ntex], 0, sizeof s_tex[s_ntex]);
+    if (index != last) {
+        tex_index_remove(&s_tex[last]);
+        s_tex[index] = s_tex[last];
+        tex_index_insert(&s_tex[index]);
+    }
+    memset(&s_tex[last], 0, sizeof s_tex[last]);
+    s_ntex = last;
 }
 
 static void set_tex_key(Tex *e, const Nv2aTexture *t, int cube, unsigned palette_entries,
@@ -2694,6 +2804,7 @@ static void set_tex_key(Tex *e, const Nv2aTexture *t, int cube, unsigned palette
     e->levels = t->levels; e->uploaded_levels = uploaded_levels;
     e->palette = t->palette; e->palette_entries = palette_entries;
     e->last_use = s_gen;
+    tex_index_insert(e);
 }
 
 static int ensure_decode(size_t texels)
@@ -3053,7 +3164,7 @@ static ID3D11ShaderResourceView *get_texture(const Nv2aTexture *t, int cube, uns
     uint64_t perf_start = 0;
     int perf = g_bruteforce_perf_counters_enabled;
     int rewritten, approximate, same_lifetime;
-    int i, alias_result, faces = cube ? 6 : 1;
+    int alias_result, faces = cube ? 6 : 1;
 
     s_texture_hard_reject = 0;
     *mip_levels = 1;
@@ -3122,22 +3233,15 @@ static ID3D11ShaderResourceView *get_texture(const Nv2aTexture *t, int cube, uns
         current.allocation = guest_allocation_identity(t->offset, &remaining);
         if (s_tex_strict_bounds)
             current.bounds = xbox_GuestBoundsIdentity(t->offset, &remaining);
-        for (i = 0; i < s_ntex; ++i) {
-            Tex *negative = &s_tex[i];
-            if (negative->unsupported && negative->offset == t->offset &&
-                negative->w == t->width && negative->h == t->height &&
-                negative->color == t->color && negative->pitch == t->pitch &&
-                negative->cube == (uint8_t)cube && negative->palette == t->palette &&
-                (!(cube || s_tex_mips) || negative->levels == t->levels) &&
-                (!s_tex_mips || negative->uploaded_levels == layout.levels) &&
-                (!s_tex_strict_bounds || (current.bounds && layout.span <= remaining)) &&
-                same_guest_identity(&negative->source_identity, &current)) {
-                negative->last_use = s_gen;
-                s_st.tex_unsupported_hits++;
-                if (perf)
-                    bruteforce_perf_record_texture_unsupported_hit();
-                return NULL;
-            }
+        Tex *negative = tex_index_find(t, cube, 0, layout.levels, NULL);
+        if (negative && negative->unsupported &&
+            (!s_tex_strict_bounds || (current.bounds && layout.span <= remaining)) &&
+            same_guest_identity(&negative->source_identity, &current)) {
+            negative->last_use = s_gen;
+            s_st.tex_unsupported_hits++;
+            if (perf)
+                bruteforce_perf_record_texture_unsupported_hit();
+            return NULL;
         }
     }
     if (s_tex_mips) {
@@ -3213,19 +3317,8 @@ static ID3D11ShaderResourceView *get_texture(const Nv2aTexture *t, int cube, uns
     }
     if (perf)
         perf_start = bruteforce_perf_clock();
-    for (i = 0; i < s_ntex; i++) {
-        if (perf)
-            perf_probes++;
-        if (s_tex[i].offset == t->offset && s_tex[i].w == t->width && s_tex[i].h == t->height
-                && s_tex[i].color == t->color && s_tex[i].pitch == t->pitch
-                && s_tex[i].cube == (uint8_t)cube && s_tex[i].palette == t->palette
-                && s_tex[i].palette_entries == palette_entries
-                && (!(cube || s_tex_mips) || s_tex[i].levels == t->levels)
-                && (!s_tex_mips || s_tex[i].uploaded_levels == layout.levels)) {
-            e = &s_tex[i];
-            break;
-        }
-    }
+    e = tex_index_find(t, cube, palette_entries, layout.levels,
+                       perf ? &perf_probes : NULL);
     if (perf)
         bruteforce_perf_record_texture_lookup(perf_probes, e != NULL,
                                               bruteforce_perf_clock() - perf_start);
@@ -6156,6 +6249,164 @@ static void d3d_flip(void)
 void bruteforce_d3d11_test_flip(void) { d3d_flip(); }
 ID3D11Device *bruteforce_d3d11_test_device(void) { return s_dev; }
 ID3D11DeviceContext *bruteforce_d3d11_test_context(void) { return s_ctx; }
+int bruteforce_d3d11_test_texture_index(void)
+{
+    Nv2aTexture first = {0}, second, candidate, cube, replacement;
+    uint32_t *seen = NULL;
+    uint32_t first_offset = 0, second_offset = 0;
+    unsigned bucket, i, probes;
+    int saved_mips = s_tex_mips;
+    int ok = 0;
+    Tex *entry;
+
+#define INDEX_CHECK(condition, message) do { \
+    if (!(condition)) { fprintf(stderr, "FAIL: %s\n", message); goto done; } \
+} while (0)
+
+    INDEX_CHECK(s_tex && s_ntex == 0, "texture index starts empty");
+    seen = (uint32_t *)malloc(sizeof *seen * TEX_INDEX_BUCKETS);
+    INDEX_CHECK(seen != NULL, "allocate texture index collision table");
+    for (i = 0; i < TEX_INDEX_BUCKETS; ++i)
+        seen[i] = UINT32_MAX;
+
+    first.width = first.height = 4;
+    first.pitch = 16;
+    first.color = 0x12;
+    first.levels = 1;
+    for (i = 0; i <= TEX_INDEX_BUCKETS; ++i) {
+        candidate = first;
+        candidate.offset = 0x01000000u + i * 0x80u;
+        bucket = tex_key_bucket(&candidate, 0, 0, 1);
+        if (seen[bucket] != UINT32_MAX) {
+            first_offset = seen[bucket];
+            second_offset = candidate.offset;
+            break;
+        }
+        seen[bucket] = candidate.offset;
+    }
+    INDEX_CHECK(first_offset && second_offset, "find texture descriptor collision");
+    first.offset = first_offset;
+    second = first;
+    second.offset = second_offset;
+
+    entry = tex_slot(NULL);
+    memset(entry, 0, sizeof *entry);
+    set_tex_key(entry, &first, 0, 0, 1);
+    entry->last_use = 1;
+    entry = tex_slot(NULL);
+    memset(entry, 0, sizeof *entry);
+    set_tex_key(entry, &second, 0, 0, 1);
+    entry->last_use = 2;
+
+    probes = 0;
+    INDEX_CHECK(tex_index_find(&first, 0, 0, 1, &probes) == &s_tex[0] && probes == 2,
+                "collision chain finds first descriptor");
+    probes = 0;
+    INDEX_CHECK(tex_index_find(&second, 0, 0, 1, &probes) == &s_tex[1] && probes == 1,
+                "collision chain finds second descriptor");
+    candidate = first; candidate.width++;
+    INDEX_CHECK(!tex_index_find(&candidate, 0, 0, 1, NULL), "width is indexed");
+    candidate = first; candidate.height++;
+    INDEX_CHECK(!tex_index_find(&candidate, 0, 0, 1, NULL), "height is indexed");
+    candidate = first; candidate.pitch += 4;
+    INDEX_CHECK(!tex_index_find(&candidate, 0, 0, 1, NULL), "pitch is indexed");
+    candidate = first; candidate.color++;
+    INDEX_CHECK(!tex_index_find(&candidate, 0, 0, 1, NULL), "format is indexed");
+    candidate = first; candidate.palette = 0x02000000u;
+    INDEX_CHECK(!tex_index_find(&candidate, 0, 0, 1, NULL), "palette address is indexed");
+    INDEX_CHECK(!tex_index_find(&first, 0, 32, 1, NULL), "palette length is indexed");
+    INDEX_CHECK(!tex_index_find(&first, 1, 0, 1, NULL), "cube state is indexed");
+    candidate = first; candidate.levels = 2;
+    INDEX_CHECK(tex_index_find(&candidate, 0, 0, 2, NULL) == &s_tex[0],
+                "level fields remain ignored for level-zero 2D mode");
+
+    entry = tex_index_find(&first, 0, 0, 1, NULL);
+    entry = tex_slot(entry);
+    memset(entry, 0, sizeof *entry);
+    set_tex_key(entry, &first, 0, 0, 1);
+    entry->last_use = 3;
+    probes = 0;
+    INDEX_CHECK(tex_index_find(&first, 0, 0, 1, &probes) == entry && probes == 1,
+                "rewritten descriptor is reindexed");
+    probes = 0;
+    INDEX_CHECK(tex_index_find(&second, 0, 0, 1, &probes) == &s_tex[1] && probes == 2,
+                "collision chain survives rewrite");
+
+    cube = first;
+    cube.offset = 0x03000000u;
+    cube.levels = 3;
+    entry = tex_slot(NULL);
+    memset(entry, 0, sizeof *entry);
+    set_tex_key(entry, &cube, 1, 0, 1);
+    entry->last_use = 4;
+    candidate = cube; candidate.levels = 2;
+    INDEX_CHECK(!tex_index_find(&candidate, 1, 0, 1, NULL),
+                "cube level count is indexed");
+    discard_tex(tex_index_find(&second, 0, 0, 1, NULL));
+    INDEX_CHECK(!tex_index_find(&second, 0, 0, 1, NULL),
+                "discard removes descriptor");
+    INDEX_CHECK(tex_index_find(&cube, 1, 0, 1, NULL) == &s_tex[1],
+                "discard reindexes relocated entry");
+
+    s_tex[0].last_use = 0;
+    s_tex[1].last_use = 1;
+    while (s_ntex < MAX_TEX) {
+        candidate = first;
+        candidate.offset = 0x10000000u + (uint32_t)s_ntex * 0x100u;
+        INDEX_CHECK(!tex_index_find(&candidate, 0, 0, 1, NULL),
+                    "full-cache fixture keys are unique");
+        entry = tex_slot(NULL);
+        memset(entry, 0, sizeof *entry);
+        set_tex_key(entry, &candidate, 0, 0, 1);
+        entry->last_use = (uint32_t)s_ntex + 1;
+    }
+    replacement = first;
+    replacement.offset = 0x70000000u;
+    entry = tex_slot(NULL);
+    memset(entry, 0, sizeof *entry);
+    set_tex_key(entry, &replacement, 0, 0, 1);
+    INDEX_CHECK(!tex_index_find(&first, 0, 0, 1, NULL),
+                "LRU eviction removes old descriptor");
+    INDEX_CHECK(tex_index_find(&replacement, 0, 0, 1, NULL) == entry,
+                "LRU replacement is indexed");
+    INDEX_CHECK(tex_index_find(&cube, 1, 0, 1, NULL) != NULL,
+                "LRU replacement preserves other descriptors");
+
+    memset(s_tex_index, 0, sizeof s_tex_index);
+    memset(s_tex, 0, MAX_TEX * sizeof *s_tex);
+    s_ntex = 0;
+    s_tex_mips = 1;
+    candidate = first;
+    candidate.offset = 0x71000000u;
+    candidate.levels = 3;
+    entry = tex_slot(NULL);
+    memset(entry, 0, sizeof *entry);
+    set_tex_key(entry, &candidate, 0, 0, 3);
+    INDEX_CHECK(tex_index_find(&candidate, 0, 0, 3, NULL) == entry,
+                "mip descriptor is indexed");
+    candidate.levels = 2;
+    INDEX_CHECK(!tex_index_find(&candidate, 0, 0, 3, NULL),
+                "mip declared level count is indexed");
+    candidate.levels = 3;
+    INDEX_CHECK(!tex_index_find(&candidate, 0, 0, 2, NULL),
+                "mip uploaded level count is indexed");
+
+    puts("texture descriptor index passed");
+    ok = 1;
+done:
+    free(seen);
+    if (s_tex) {
+        for (i = 0; i < (unsigned)s_ntex; ++i)
+            release_tex(&s_tex[i]);
+        memset(s_tex, 0, MAX_TEX * sizeof *s_tex);
+    }
+    memset(s_tex_index, 0, sizeof s_tex_index);
+    s_ntex = 0;
+    s_tex_snapshot_bytes = 0;
+    s_tex_mips = saved_mips;
+#undef INDEX_CHECK
+    return ok;
+}
 ID3D11ShaderResourceView *bruteforce_d3d11_test_texture(const Nv2aTexture *texture,
                                                          int cube, unsigned stage,
                                                          unsigned *levels)
@@ -6277,6 +6528,9 @@ int bruteforce_d3d11_install(void)
     }
     s_warp = warp && strcmp(warp, "1") == 0;
     s_tex = tex;
+    s_ntex = 0;
+    s_tex_snapshot_bytes = 0;
+    memset(s_tex_index, 0, sizeof s_tex_index);
     s_depth_texture = depth_texture && strcmp(depth_texture, "1") == 0;
     s_stencil_alias = stencil_alias && strcmp(stencil_alias, "1") == 0;
     s_skip_clean_readback = skip_clean_readback && strcmp(skip_clean_readback, "1") == 0;

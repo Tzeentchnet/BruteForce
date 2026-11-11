@@ -5,11 +5,13 @@ This is the short, checkable queue for the performance work in
 their implementation, measurements, and remaining limitations are recorded in
 the canonical project documentation.
 
-Current stop point: the default-off event-driven PFB flush wait has passed its
-synthetic coverage and one corrected title movement smoke. It has not passed a
-reviewed A/B/A comparison, G2, G3, or the CPU-reference gate. The next session
-starts with the Phase 4 comparison below; do not start the later mechanisms
-until that result is understood.
+Current stop point: all three default-off Phase 4 mechanisms have synthetic
+coverage, and the corrected segment-only and all-three smokes reached reviewed
+movement. Their 24-run comparison is explicitly deferred. The exact
+texture-descriptor index is now synthetic-tested without weakening exact
+source or palette comparison. The next active performance gate is the
+Milestone 2 matched A/B/A comparison; do not promote the shader cache or any
+Phase 4 switch without its separate correctness and measurement gates.
 
 ## Milestone 0: trustworthy baseline
 
@@ -44,13 +46,15 @@ until that result is understood.
 
 - [x] Count and time `guest_word`, `readable_guest_range`, and `VirtualQuery`
   use before changing validation.
-- [ ] Replace repeated preflight queries only with checked accesses that retain
-  invalid-address, guard-page, reprotection, allocation, and reset detection.
-- [ ] Add an exact descriptor-key index to the texture cache.
-- [ ] Preserve full source and palette comparison until tracked guest writes
+- [x] Replace repeated texture and colour-shadow preflight queries with checked
+  accesses that retain invalid-address, guard-page, reprotection, allocation,
+  and reset detection.
+- [x] Add an exact, collision-safe descriptor-key index to the texture cache.
+- [x] Preserve full source and palette comparison until tracked guest writes
   can prove safe invalidation.
-- [ ] Cover collisions, eviction, same-frame and unsampled rewrites, palette
-  rewrites, protected P8 ranges, aliases, and failed uploads.
+- [x] Cover descriptor-index collisions and lifecycle, same-frame and
+  unsampled rewrites, palette rewrites, protected P8 ranges, exact colour
+  aliases, and failed uploads synthetically.
 - [ ] Run a matched A/B/A campaign and record whether G2, G3, or NV2A busy time
   improves.
 
@@ -74,7 +78,7 @@ until that result is understood.
   and frame-statistics consumers.
 - [ ] Implement on-demand readback without weakening semaphore or flip
   ordering.
-- [ ] Bound unfinished GPU frames, initially to two, with event queries.
+- [x] Bound unfinished GPU frames, initially to two, with event queries.
 - [ ] Evaluate waitable or multi-slot GPU presentation only after ownership and
   readback are correct.
 
@@ -88,19 +92,21 @@ until that result is understood.
   holds, ring reuse, and D3D11 device-failure behavior synthetically.
 - [x] Complete one enabled title movement smoke on the corrected generation;
   treat its unreviewed whole-frame cadence only as bring-up evidence.
-- [ ] Run poll/event/poll/event/poll/event on the corrected generation with 12
-  raster threads, fixed camera-only input, caller profiling,
-  `BRUTEFORCE_PERF_COUNTERS=1`, and continuous world capture.
-- [ ] Review every selected capture and compare reviewed world cadence, 1% low,
-  G3, NV2A busy time, PFB event/timer wakes, rechecks, and visible/input
-  alignment.
-- [ ] Explain the smoke's high timer-wake and recheck counts and its
-  non-quiescent wait/ack difference before accepting the mechanism.
-- [ ] Keep the option default-off unless the correctness, G2, G3, and CPU
-  reference gates pass.
-- [ ] Replace idle `Sleep(0)` behavior with bounded spin-then-wait behavior.
-- [ ] Walk and retire one published PUT segment at a time behind its own switch.
-- [ ] Consider asynchronous KickOff only if G3 still fails.
+- [ ] **Deferred:** run poll/event/poll/event/poll/event on the corrected
+  generation with 12 raster threads, fixed camera-only input, caller
+  profiling, `BRUTEFORCE_PERF_COUNTERS=1`, and continuous world capture.
+- [ ] **Deferred:** review every selected capture and compare reviewed world
+  cadence, 1% low, G3, NV2A busy time, PFB event/timer wakes, rechecks, and
+  visible/input alignment.
+- [ ] **Deferred:** explain the smoke's high timer-wake and recheck counts and
+  its non-quiescent wait/ack difference before accepting the mechanism.
+- [x] Keep all three options default-off while correctness, G2, G3, and CPU
+  reference gates remain open.
+- [x] Replace idle `Sleep(0)` behavior with bounded spin-then-wait behavior.
+- [x] Walk and retire one published PUT segment at a time behind its own
+  switch.
+- [ ] Consider asynchronous KickOff only if G3 still fails after the Phase 4
+  campaign is explicitly resumed.
 
 ## Phase 5: residual work
 

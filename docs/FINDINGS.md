@@ -114,6 +114,88 @@ and offline classification
 are ignored private artifacts; the disc, captures, EEPROM and HDD remain
 local. No frame-rate or rendering-equivalence measurement was made.
 
+## Native xemu reference and packed-stencil match (2026-11-11)
+
+Two new isolated xemu 0.8.139 sessions at source commit
+`aa54c34cae1c09410d74c69a44210a9867fe2d16` closed the earlier focus and
+native-capture gaps. Both used the verified retail executable above, the
+read-only XISO, a private snapshot-backed HDD and EEPROM, networking and
+updates disabled, dummy audio, OpenGL, surface scale 1, nearest filtering,
+4:3 and a 640x480 startup window. Each made one guest boot, exited with code
+zero on an explicit host request, left the private HDD hash unchanged, and
+left the ISO size and modification time unchanged.
+
+The runner attached its input thread to the current foreground and target
+threads, verified the exact xemu PID and HWND, raised and focused that window,
+then detached every thread in reverse order. A deterministic title route
+entered Campaign, accepted the default profile and campaign name, selected
+Standard difficulty, joined, began, advanced the opening and reached the
+Basic Controls panel. Verified target-only input then dismissed the panel and
+turned and raised the camera. This establishes that input reached the intended
+xemu session; it does not make wall-clock time a scene identifier.
+
+Synthetic F12 input did not invoke xemu's screenshot action. The successful
+path used two PID- and foreground-verified mouse clicks in one helper process
+to select **Machine > Screenshot**. xemu produced 640x480 RGB PNGs from its
+framebuffer texture after its DAC gamma shader. Raw guest-framebuffer bit
+identity remains unverified. The retained local native captures are:
+
+| Scene | SHA-256 |
+| --- | --- |
+| Basic Controls, before dismissal | `56b5526b8c6ec5fa5ed772b7b06903c6479164ec1a511847fc2c5094fa848d9c` |
+| Tutorial stationary | `388aea1d3a24c0ea7726b0294b41747481cd71bc1817aa375c81d57dbfc9a7e1` |
+| Tutorial turned right | `ed6544f742ac04f1a8850a2595bf39c37c0a106cb8236add6ebb0627c7eca4ed` |
+| Tutorial upward view | `c13051f591e132d6af23cf018a7577907ad95d8526b34b170c03c433da72a061` |
+
+The Basic Controls state is content-matched against the first 640x480
+stationary capture from the fresh v0.17 CPU and D3D11 diagnostics. No image
+was resized, aligned or color-corrected; comparison converted inputs to
+8-bit RGB and ignored alpha. The CPU and default D3D11 captures differ from
+each other by more than 8/255 in only 397 pixels (0.1292%), with mean
+absolute channel error 0.3522. Against xemu, however, the CPU differs in
+146,244 pixels (47.6055%) and default D3D11 in 146,693 pixels (47.7516%),
+with mean channel errors 11.4986 and 11.5209 respectively. The shared bright
+result is therefore not evidence that either project renderer matches the
+reference.
+
+A focused same-generation two-leg diagnostic then fixed audio off, four
+threads, D3D11 hardware, linear D24S8 depth sampling, window clipping,
+ordered asynchronous visibility and CPU-upload presentation. The only
+changed control was `RECOMP_GPU_STENCIL_ALIAS=0/1`. Both isolated-save runs
+reached the static panel without a retry. This was one run per variant and is
+not a performance comparison.
+
+| xemu versus v0.17 D3D11 | Pixels over 8/255 | Fraction | Mean channel error | Maximum channel error |
+| --- | ---: | ---: | ---: | ---: |
+| Packed stencil alias off | 133,423 | 43.4320% | 10.5953 | 214 |
+| Packed stencil alias on | 11,403 | 3.7119% | 1.2485 | 118 |
+
+Within the rectangular panel area, the alias-off frame has 15,327 pixels
+(9.0201%) over 8/255, while the alias-on frame has 464 (0.2731%). Outside
+that box the counts are 118,096 (86.0256%) and 10,939 (7.9684%). The
+alias-on frame also differs from the earlier alias-only generation in only
+260 pixels (0.0846%) over 8/255. The remaining xemu difference is concentrated
+in fine world edges, foliage and the background rather than a whole-frame
+brightness shift.
+
+This matched evidence identifies stale packed stencil in the bright-pass
+route as the cause of the recurring bright Basic Controls image and strongly
+supports the existing packed-alias mechanism. It does not yet justify a
+title-wide default: guest depth writes, partial overlaps, scaled depth,
+multi-level depth aliases and every gameplay state remain unsupported or
+unvalidated. It also removes the need to posit a global gamma adjustment for
+this matched difference. The only traced title ramp remains an identity ramp
+before the first flip, so no gamma presentation change was made.
+
+The stationary, turned and upward native frames establish reusable xemu
+reference views but are not frame-matched to project captures. The upward
+view is not independently classified as sun-facing, and a native
+end-of-opening-fade frame and split-screen layout remain uncollected. The
+ignored local evidence manifest records run provenance, inputs, hashes,
+comparison statistics and limitations under
+`analysis/xemu-reference-v017-20261111-0125/`; no capture or proprietary
+payload is tracked.
+
 ## Launcher and pixel-shader cache
 
 On 2026-10-30, the Windows launcher was tested with generation

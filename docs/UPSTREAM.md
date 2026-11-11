@@ -918,8 +918,11 @@ own GPU back end, an extended interface for it, and its own pacing fixes.
     *Evidence:* both variants of the 2026-10-29 movement campaign repeatedly
     logged failed `0x2E` decodes. Whether those reads explain a visible
     rendering difference has not been determined. A bright pass also binds
-    a tracked GPU depth allocation as a `0x41` texture; its effect on glare
-    is not yet established.
+    a tracked GPU depth allocation as a `0x41` texture. A native 640x480 xemu
+    Basic Controls match now establishes the visible effect in that state:
+    with all other controls fixed, the project frame differs from xemu by
+    more than 8/255 in 43.4320% of pixels without packed-stencil
+    reconstruction and 3.7119% with it.
     *Change:* the opt-in project renderer can sample an exact matching
     GPU-created linear D24S8 surface through an R24 view. New eligible surfaces
     are initialized from guest memory, converting the Z24S8 field order;
@@ -951,12 +954,12 @@ own GPU back end, an extended interface for it, and its own pacing fixes.
     describes a stencil-aware glare pipeline but is not an xboxrecomp
     renderer or an original-hardware oracle. Recheck #184 and emulator
     implementations before preparing a generic contribution.
-    *Before filing:* validate the much darker alias-only stationary image
-    and repeated conversions against a trusted reference, preserve GPU
-    contents across surface recreation, track guest writes and validate
-    matched gameplay. One hardware diagnostic with shared presentation off
-    reproduced the earlier combined candidate's darker stationary image
-    within 20–473 pixels beyond 8/255; those captures are not frame-locked.
+    *Before filing:* the darker Basic Controls image is now validated against
+    a native xemu reference. Preserve GPU contents across surface recreation,
+    track guest writes, define partial and scaled aliases, and validate
+    matched movement, sun-facing, fade and split-screen scenes. The focused
+    same-generation pair is one run per variant and is correctness evidence,
+    not a performance result.
     *Status:* experimental project-only implementation.
 
 26. **Pass window clips to capable GPU back ends.**
@@ -1104,7 +1107,9 @@ own GPU back end, an extended interface for it, and its own pacing fixes.
     writer using the DAC palette offsets. One unmatched retail diagnostic
     logged one writer entry at the NV2A base with an identity RGB ramp, before
     the first recorded flip; it does not prove completed writes or establish
-    the ramp at the opening fade or its visible impact. See
+    the ramp at the opening fade or its visible impact. The native xemu Basic
+    Controls difference is reproduced by packed-stencil reconstruction
+    without a gamma adjustment, so the DAC hypothesis is not its cause. See
     [FINDINGS](./FINDINGS.md#static-gamma-ramp-investigation).
     *Change:* no framework patch. A default-off title-side entry probe captures
     the candidate base and planar ramp before the writer, without changing
@@ -1128,7 +1133,8 @@ own GPU back end, an extended interface for it, and its own pacing fixes.
     changes, establish title and hardware behavior, coordinate with #184 and
     the presentation paths, and test other hosts and titles without using
     game data.
-    *Status:* planned investigation; no patch or pull request.
+    *Status:* planned investigation; deprioritized by the matched
+    packed-stencil result; no patch or pull request.
 
 31. **Record the actual CPU presenter input and its flip provenance.**
     *Problem:* a flip-tagged guest dump can differ from an asynchronous

@@ -37,8 +37,12 @@ sp00nznet/xboxrecomp#314 and sp00nznet/xboxrecomp#319 are also selected and
 validated. sp00nznet/xboxrecomp#315 remains unselected because the 32-bit
 MSVC differential test found 2,643 signed 16-bit `IDIV` mismatches.
 
-The fresh-generation and focused-bring-up completion gate is met. The next
-gate is the matched A1/E1-E2 retail and xemu reference evidence; the old
+The fresh-generation and focused-bring-up completion gate is met. A native
+xemu Basic Controls frame is now content-matched to fresh v0.17 CPU and D3D11
+captures, and a same-generation controlled comparison identifies the packed
+stencil alias as the mechanism that removes the large brightness difference.
+The next gate is to extend that evidence through the sun-facing and
+end-of-opening-fade states and finish E1-E2 ownership coverage; the old
 generation remains only the reviewed measurement baseline. Patch 0037's
 one-line Windows raster diagnostic correction is the strongest small upstream
 candidate, followed by the software-interrupt ABI fix, immediate-entry guard,
@@ -61,11 +65,16 @@ deferred. See
 
 ## Current boundary
 
-- A private xemu 0.8.139 attempt verified the retail XBE and read-only disc
-  setup, but the target window did not acquire verified focus. No input was
-  sent, no requested tutorial/fade scene was independently matched, and the
-  window captures are not pixel-exact. An operator-assisted reference run
-  remains needed; see [FINDINGS](FINDINGS.md#private-xemu-reference-attempt-2026-10-30).
+- Two private xemu 0.8.139 sessions acquired and verified the exact target
+  window, completed the retail Campaign route, and produced native 640x480
+  screenshots through xemu's own Screenshot action. Basic Controls is
+  content-matched to fresh CPU and D3D11 captures. The packed-stencil path
+  reduces the fresh D3D11/xemu over-8/255 difference from 43.4320% to
+  3.7119%; the single-run pair is correctness evidence, not a performance
+  comparison. Stationary, turned and upward references are retained locally;
+  a confirmed sun-facing view, end-of-opening fade and split-screen layout
+  remain open. See
+  [FINDINGS](FINDINGS.md#native-xemu-reference-and-packed-stencil-match-2026-11-11).
 - Default-off presenter-source capture links Windows GDI and CPU-upload
   D3D11 submissions to verified flip records in synthetic tests, including
   PVIDEO composition. In two short, unmatched retail probes it verified one
@@ -339,7 +348,7 @@ GPU methods in the CPU-path census.
    [FINDINGS](FINDINGS.md#unmatched-retail-gpu-audit-and-vertex-probe)
    and [UPSTREAM item 28](UPSTREAM.md#performance-and-gpu-back-end-candidates)
    for report semantics and limitations.
-2. **Use xemu as the reference (decided).** The CPU path models no
+2. **Partly met: use xemu as the reference (decided).** The CPU path models no
    stencil, so it cannot settle the brightness, stencil and bloom questions.
    Run the same disc in xemu and capture matched states: the tutorial
    stationary hold, the sun-facing and turned views, and the end of the
@@ -349,18 +358,27 @@ GPU methods in the CPU-path census.
    by content rather than wall-clock time, and record the xemu version, its
    settings and the capture points in FINDINGS. Where our output and xemu's
    differ, list and classify the difference; do not assume xemu is perfect
-   either. Extend `tools/compare_frames.py` to compare against xemu captures
-   and report differences without treating either side as correct.
-3. **Brightness, bloom and HUD.** Use hardware D3D11 and the existing user
+   either. `tools/compare_frames.py` now reports neutral equal-size
+   comparisons. Native stationary, turned and upward captures exist, and
+   Basic Controls is matched without resizing, alignment or color correction.
+   The remaining reference work is a confirmed sun-facing frame, the
+   end-of-opening fade and available split-screen layouts.
+3. **Mechanism established at Basic Controls; broader brightness, bloom and
+   HUD validation remains.** Use hardware D3D11 and the existing user
    captures first to investigate why the HUD and glow can disappear together.
    Match the view and capture actual programmable vertex/clip state before
    attributing this to the near plane; current GPU-program frame traces may
    print stale CPU-transformed vertices and count submitted rather than
    post-clip triangles. Isolate the screen-zero plane and packed alias
    separately, and check the stencil threshold and packed-depth conversion
-   against real gameplay values. Explain and minimize any further gameplay
-   run. Do not add a global gamma or brightness adjustment.
-4. **Display gamma ramp (hypothesis, unverified).** Blood Wake found that
+   against real gameplay values. A fresh same-generation pair with every
+   other control fixed reduced xemu differences above 8/255 from 43.4320%
+   with packed aliases off to 3.7119% with them on. This identifies stale
+   packed stencil as the large matched-panel brightness cause, but unsupported
+   guest writes, partial overlaps, scaled aliases and other scenes still
+   block a default. Explain and minimize any further gameplay run. Do not add
+   a global gamma or brightness adjustment.
+4. **Display gamma ramp (hypothesis not supported by the matched panel).** Blood Wake found that
    the toolkit's NV2A registers are plain memory, so the title's write of a
    gamma ramp to the video DAC was lost and every frame was shown as if the
    ramp were the identity. Blood Wake's missions fade in from black through
@@ -373,7 +391,9 @@ GPU methods in the CPU-path census.
    no later entry was logged by that probe. This does not rule out other
    writers or establish the ramp at the matched opening fade. The opt-in
    probe's snapshots are not atomic and do not prove completed writes or
-   displayed pixels. See
+   displayed pixels. The native xemu match is reproduced by packed-stencil
+   reconstruction without a gamma adjustment, so this hypothesis is not the
+   current cause. See
    [FINDINGS](FINDINGS.md#static-gamma-ramp-investigation). Obtain matched
    runtime evidence before changing presentation. Only if the title writes a
    relevant ramp, apply its own ramp at present behind a switch, as Blood Wake

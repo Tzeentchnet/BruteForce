@@ -288,10 +288,15 @@ default-D3D11 movement regression remains unresolved; see the
 
 Both options are off by default. Guest writes to GPU-owned depth, partial
 aliases, depth cubes and multi-level depth aliases are not supported. These
-implementations have synthetic coverage but have not established
-original-hardware or complete gameplay equivalence. Scaled modes reject both
-alias options explicitly because their guest-layout seed, snapshot and packed
-sampling semantics have not been defined for physical-resolution depth.
+implementations have synthetic coverage but have not established complete
+gameplay equivalence. One native 640x480 xemu Basic Controls match now gives
+the packed-stencil option direct title evidence: with every other diagnostic
+control fixed, enabling it reduced pixels differing from xemu by more than
+8/255 from 43.4320% to 3.7119% and mean channel error from 10.5953 to 1.2485.
+That establishes the matched bright-pass mechanism, not every depth alias or
+scene. Scaled modes reject both alias options explicitly because their
+guest-layout seed, snapshot and packed sampling semantics have not been
+defined for physical-resolution depth.
 
 ### Vertex processing and pixel combiners
 
@@ -469,8 +474,11 @@ replace matched gameplay or original-hardware validation.
   has not been explained or shown fixed by a controlled, matched benchmark.
   The final cache-fix binary was not rebenchmarked. Earlier whole-frame
   change rates are not validated world FPS.
-- Matched-scene image equivalence remains open, including brightness, glow,
-  HUD and depth/stencil behavior. The CPU reference has its own known gaps.
+- One native xemu Basic Controls scene is matched: the packed-stencil option
+  removes the large whole-frame brightness difference, while its unsupported
+  ownership cases and title-wide behavior keep G4 open. Sun-facing, fade,
+  movement and split-screen equivalence remain open. The CPU reference has
+  its own known stencil gap.
 - True widescreen remains an unimplemented, default-off workstream. It needs
   coordinated title projection/culling, ordered 2D classification, selective
   target widening, centred guest readback and aspect-aware presentation;

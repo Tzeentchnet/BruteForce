@@ -327,11 +327,13 @@ GPU methods in the CPU-path census.
    missing or incomplete post-window snapshot instead of accepting a
    success-shaped run. Synthetic retry, disabled, malformed and native-fixture
    cases pass.
-   Visibility remains unknown for non-dropped routes. One isolated,
-   minimized, automatically scripted diagnostic now has a partial retail
-   audit, but its scenes were not independently reviewed. It recorded 174
-   line-list requests dropped as unsupported and many cull-enable writes;
-   their visible impact is unknown. A matched run still needs to rank
+   Visibility remains unknown for non-dropped routes. A fresh v0.17 scripted
+   run produced a complete post-window report with 4,486,537 requests,
+   including 1,106 unsupported line requests with 4,424 vertices, 161
+   distinct unhandled methods and 22 mirror-only methods. It also produced
+   CPU/D3D11 stationary and movement captures, but its scenes were not
+   independently reviewed and no xemu frame was matched. The older minimized
+   run remains partial. A matched operator-reviewed run still needs to rank
    unhandled and mirror-only methods and compare CPU/GPU/xemu captures rather
    than treating method counts as defects. See
    [FINDINGS](FINDINGS.md#unmatched-retail-gpu-audit-and-vertex-probe)
@@ -703,9 +705,13 @@ runtime roles and all culling paths are not yet classified.
    body and leaves its resulting guest state unchanged. Limits and sampling
    are validated, and synthetic direct/indirect dispatch and state-equivalence
    cases pass. Regenerate because the manual-source fingerprint changed.
-   Runtime coverage still needs gameplay, menus, movies, in-engine cutscenes
-   and every available split-screen layout. The trace does not alter the
-   matrix or establish ownership by itself.
+   One fresh-generation scripted run sampled 774 records through call 7,731.
+   It observed only caller `0x0006BE90`, four parent return classes and six
+   candidate camera states; all matrices were readable and changed across the
+   generated call. Caller `0x0006D240` did not appear. Runtime coverage still
+   needs operator-classified gameplay, menus, movies, in-engine cutscenes and
+   every available split-screen layout. The trace does not alter the matrix
+   or establish ownership by itself.
 2. **Establish title ownership before choosing hooks.** Confirm where each
    gameplay camera's aspect and horizontal/vertical tangent are finalized,
    which routine rebuilds dependent frustum planes, and whether another

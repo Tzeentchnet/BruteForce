@@ -464,6 +464,45 @@ establish clipping, culling, full-scene correctness or visible pixels.
 Matched CPU, D3D11 and xemu captures and classified real movement frames
 remain necessary; neither this audit nor flip counts close G4.
 
+### Fresh v0.17 A1/E1 diagnostic
+
+One audio-off, four-thread D3D11 run on generation
+`20261111-002138-a9dbc18a` combined the per-attempt GPU audit, the camera
+trace sampled every tenth builder call, stationary captures and two movement
+capture windows. The legacy route reached the scripted world and completed
+without a retry. Its scene detector is heuristic, the captures have no
+operator labels, and no xemu capture was matched, so this is a diagnostic
+inventory rather than a correctness or performance campaign.
+
+The post-window audit is complete (`active_begin=0`) and covers 19,065 flips
+at 640x480. It records 4,486,537 completed requests and 165,619,427 buffered
+vertices: 4,482,659 requests used the GPU-program route, 483 used the CPU
+program route, and 3,395 were dropped. Of the drops, 1,106 primitive-`0x2`
+line requests contain 4,424 vertices and are classified as unsupported;
+2,289 requests contain no vertices. Visibility remains unknown for all
+4,483,142 non-dropped requests.
+
+There are 161 distinct `method_unhandled` keys and 22
+`method_mirror_only` keys in this cumulative route. The largest unhandled
+counts are `0:0100` (654,434), `0:1E78` (120,258), `0:1E74` (120,257),
+`0:0308` (112,951), and four 89,571-count keys (`0:0294`, `0:0314`,
+`0:03B8`, `0:17C4`). As before, `0:0100` includes NO_OPERATION/software
+traffic and cannot be ranked as an ignored visual feature. The largest
+mirror-only counts are `0:1B0C` (382,607), `0:1B4C` (71,375), and
+`0:1B8C` (66,621). The report has zero table events, counter saturations,
+invalid methods, invalid unhandled keys and invalid mirror-only keys.
+`METHOD_VALUE_OTHER` contains 3,818,366 bounded extra values; that is lost
+value detail, not lost request or method counts.
+
+The benchmark produced six CPU and 18 D3D11 guest-surface captures. The first
+stationary-hold image from each route is 640x480; without resizing,
+alignment or colour correction, 397 pixels (0.1292%) differ by more than
+8/255 in any channel, the mean absolute difference is 0.3522 per channel,
+and the maximum channel difference is 114. Their benchmark timing and static
+content make this a useful candidate pair, but the pair is not frame-locked
+or independently scene-reviewed. Movement captures differ in count and timing
+and were not treated as matched frames.
+
 ## Presenter-source capture alignment
 
 Framework patch 0027 adds a default-off Windows presenter diagnostic. It
@@ -2170,9 +2209,32 @@ The wrapper invokes `sub_0006EE30_gen` exactly once and emits only after the
 generated body returns, so disabled and enabled modes retain its guest
 register, stack and matrix results. Synthetic direct/indirect dispatch,
 caller classification, safe-read, sampling, output-bound, invalid-setting
-and state-equivalence coverage passed in a 104-test focused selection. No
-retail trace has run on the fresh v0.17 generation, so camera ownership,
-scene coverage and all culling paths remain open.
+and state-equivalence coverage passed in a 104-test focused selection.
+
+The fresh v0.17 A1/E1 diagnostic sampled every tenth call and emitted 774
+records, from builder call 1 through 7,731, without reaching its 4,096-record
+limit. Every sampled return was `0x0006BFA2`, identifying direct caller
+`0x0006BE90`; static caller `0x0006D240` did not appear. Four parent return
+addresses were observed: `0x00177E34` (557 records), `0x0006C578` (110),
+`0x00177DBC` (66), and `0x000DA3E4` (41).
+
+All 774 input and output matrices were readable and changed across the
+generated call. The candidate owner path came from `EDI` in every record.
+Candidate class vtable `0x003A2640` appeared 539 times and `0x003A2868`
+appeared 235 times; both used candidate interface vtable `0x003A2810` across
+six candidate state addresses. The hypothesis-labelled horizontal half-FOV
+values were 35 degrees (602), 40 degrees (98), and 45 degrees (74).
+Candidate aspect values were about 4:3 in 537 records, about 1.87683 in 235,
+and one each near 1.73442 and 1.41280. These are safely read bit patterns
+under the static field interpretation, not proof that each candidate owns the
+display camera. The same candidate viewport getter and disabled flag appeared
+throughout; its units, scene role and relation to the absent caller remain
+unverified.
+
+This route therefore supplies runtime classes for one caller but does not
+complete E2. Menus, movie/cutscene identity, the second caller, split screen,
+frustum rebuilds, projected markers and object/world/effect culling still
+need operator-classified coverage.
 
 #### Required Brute Force boundary
 

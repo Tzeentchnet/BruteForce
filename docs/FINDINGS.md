@@ -190,7 +190,13 @@ before the first flip, so no gamma presentation change was made.
 The stationary, turned and upward native frames establish reusable xemu
 reference views but are not frame-matched to project captures. The upward
 view is not independently classified as sun-facing, and a native
-end-of-opening-fade frame and split-screen layout remain uncollected. The
+end-of-opening-fade frame and split-screen layout remain uncollected. Later
+unattended attempts were stopped after foreground-focus failures and an
+undismissed Basic Controls overlay made their camera-sweep labels invalid.
+Those frames are excluded from the evidence set. Repeating full boots without
+an operator confirming each requested state would not add trustworthy
+evidence, so the remaining reference scenes are an explicit operator
+checkpoint rather than an unattended retry loop. The
 ignored local evidence manifest records run provenance, inputs, hashes,
 comparison statistics and limitations under
 `analysis/xemu-reference-v017-20261111-0125/`; no capture or proprietary

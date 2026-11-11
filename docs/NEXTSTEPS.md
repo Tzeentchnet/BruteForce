@@ -73,7 +73,10 @@ deferred. See
   3.7119%; the single-run pair is correctness evidence, not a performance
   comparison. Stationary, turned and upward references are retained locally;
   a confirmed sun-facing view, end-of-opening fade and split-screen layout
-  remain open. See
+  remain an operator checkpoint. Later unattended retries were stopped after
+  focus failures and an undismissed Basic Controls overlay invalidated their
+  camera-sweep labels; do not spend additional full boots on those states
+  without an operator confirming each capture. See
   [FINDINGS](FINDINGS.md#native-xemu-reference-and-packed-stencil-match-2026-11-11).
 - Default-off presenter-source capture links Windows GDI and CPU-upload
   D3D11 submissions to verified flip records in synthetic tests, including
@@ -362,7 +365,9 @@ GPU methods in the CPU-path census.
    comparisons. Native stationary, turned and upward captures exist, and
    Basic Controls is matched without resizing, alignment or color correction.
    The remaining reference work is a confirmed sun-facing frame, the
-   end-of-opening fade and available split-screen layouts.
+   end-of-opening fade and available split-screen layouts. Treat these as an
+   operator checkpoint: unattended retries that cannot verify the visible
+   state are not evidence and should not be repeated.
 3. **Mechanism established at Basic Controls; broader brightness, bloom and
    HUD validation remains.** Use hardware D3D11 and the existing user
    captures first to investigate why the HUD and glow can disappear together.

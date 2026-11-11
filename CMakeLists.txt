@@ -60,6 +60,19 @@ target_include_directories(bruteforce_fence_test PRIVATE
 )
 target_link_libraries(bruteforce_fence_test PRIVATE host_time)
 
+add_executable(bruteforce_camera_trace_test EXCLUDE_FROM_ALL
+    tests/camera_trace_test.c tests/fixtures/generated/recomp_dispatch.c
+    src/recomp_manual.c src/perf_counters.c)
+target_compile_definitions(bruteforce_camera_trace_test PRIVATE
+    WIN32_LEAN_AND_MEAN NOMINMAX _CRT_SECURE_NO_WARNINGS)
+target_include_directories(bruteforce_camera_trace_test PRIVATE
+    "${CMAKE_CURRENT_SOURCE_DIR}/src"
+    "${XBOXRECOMP_DIR}/templates/runtime"
+    "${XBOXRECOMP_DIR}/src"
+    "${XBOXRECOMP_DIR}/src/kernel"
+)
+target_link_libraries(bruteforce_camera_trace_test PRIVATE host_time)
+
 add_executable(bruteforce_read_trace_test EXCLUDE_FROM_ALL tests/read_trace_test.c)
 target_compile_definitions(bruteforce_read_trace_test PRIVATE WIN32_LEAN_AND_MEAN NOMINMAX _CRT_SECURE_NO_WARNINGS)
 target_include_directories(bruteforce_read_trace_test PRIVATE
@@ -201,6 +214,7 @@ if(MSVC)
     endif()
     target_compile_options(bruteforce PRIVATE
         /bigobj /experimental:c11atomics "/MP${BRUTEFORCE_COMPILE_JOBS}")
+    target_compile_options(bruteforce_camera_trace_test PRIVATE /experimental:c11atomics)
     target_compile_options(bruteforce_interrupt_test PRIVATE /experimental:c11atomics)
     target_link_options(bruteforce PRIVATE /LARGEADDRESSAWARE)
     if(BRUTEFORCE_LINK_SYMBOLS)

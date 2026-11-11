@@ -18,6 +18,7 @@ static volatile LONG irq_count, shadow_done, irq_too_early;
 static int post_result;
 
 void recomp_unimpl(const char *text, uint32_t va);
+void sub_0006EE30_gen(void) {}
 void sub_00372180_gen(void) {}
 void sub_00377F80_gen(void) {}
 

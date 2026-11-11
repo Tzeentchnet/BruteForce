@@ -122,6 +122,7 @@ RUNTIME_OPTION_KEYS = (
     "RECOMP_GPU_TEX_CACHE_APPROX", "RECOMP_GPU_ZPASS", "RECOMP_GPU_PSCACHE",
     "RECOMP_GPU_DEPTH_TEXTURE", "RECOMP_GPU_STENCIL_ALIAS",
     "RECOMP_GPU_DIRECT_PRESENT", "RECOMP_GPU_SCALE", "RECOMP_GPU_OUTPUT",
+    "RECOMP_GPU_AUDIT", "RECOMP_GPU_AUDIT_FILE",
     "RECOMP_PROGRAM_NEAR_ZERO", "RECOMP_PFB_FLUSH_WAIT", "RECOMP_AUDIO",
     "BRUTEFORCE_PERF_COUNTERS", "BRUTEFORCE_PROFILE_CALLERS",
 )
@@ -186,6 +187,15 @@ def clean_environment(parent):
     """Do not inherit title/framework switches; audio defaults on afterward."""
     return {key: value for key, value in parent.items()
             if not key.upper().startswith(("RECOMP_", "BRUTEFORCE_"))}
+
+
+def validate_gpu_audit_overrides(overrides):
+    keys = [key for key in overrides if key.upper() == "RECOMP_GPU_AUDIT"]
+    if any(key.upper() == "RECOMP_GPU_AUDIT_FILE" for key in overrides):
+        raise BenchError("RECOMP_GPU_AUDIT_FILE is managed per attempt and cannot be supplied by a variant")
+    if len(keys) > 1:
+        raise BenchError("RECOMP_GPU_AUDIT cannot be supplied more than once with different casing")
+    return keys[0] if keys else None
 
 
 def parse_env(spec):
@@ -601,6 +611,7 @@ def run_once(out_dir, label, scene, env_overrides, threads, watchdog, profile, c
              capture_world=False, profile_callers=False):
     if profile_callers and not profile:
         raise BenchError("profile caller attribution requires profiling")
+    audit_key = validate_gpu_audit_overrides(env_overrides)
     overridden = {key.upper() for key in env_overrides}
     if profile_callers and "BRUTEFORCE_PROFILE_CALLERS" in overridden:
         raise BenchError("--profile-callers owns BRUTEFORCE_PROFILE_CALLERS")
@@ -658,6 +669,12 @@ def run_once(out_dir, label, scene, env_overrides, threads, watchdog, profile, c
         # exists; it is created TRACE_AFTER seconds into the movement window.
         env["RECOMP_FRAME_TRACE"] = str(trace_flag)
     env.update(env_overrides)
+    audit_path = None
+    if audit_key is not None:
+        env["RECOMP_GPU_AUDIT"] = env.pop(audit_key)
+        if env["RECOMP_GPU_AUDIT"] == "1":
+            audit_path = out_dir / "gpu_audit.csv"
+            env["RECOMP_GPU_AUDIT_FILE"] = str(audit_path)
     profile_callers_enabled = (
         profile and env.get("BRUTEFORCE_PROFILE_CALLERS") == "1"
     )
@@ -729,6 +746,12 @@ def run_once(out_dir, label, scene, env_overrides, threads, watchdog, profile, c
         "audio": {"mode": "on" if bench_control.audio_enabled(env) else "off",
                   "capture_requested": bool(wav_path),
                   "wav_path": str(wav_path) if wav_path else None},
+        "gpu_audit": {
+            "path": str(audit_path), "snapshot_after_window_confirmed": False,
+            "report_complete": False,
+            "scope": "cumulative runtime snapshot, including startup and possibly post-window work; "
+                     "not necessarily final at console-control exit",
+        } if audit_path else None,
         "automatic_panel_presses": not no_auto_panels,
     }
 
@@ -893,9 +916,15 @@ def run_once(out_dir, label, scene, env_overrides, threads, watchdog, profile, c
                 if ready and scene == "movement" and sent != len(MOVEMENT_INPUT):
                     result["error"] = "fixed movement input script did not finish"
                     break
-                if wait_for_outputs(out_dir, stderr_path, profile, census, process):
+                if wait_for_outputs(out_dir, stderr_path, profile, census, process,
+                                    audit_path=audit_path):
+                    if audit_path:
+                        result["gpu_audit"]["snapshot_after_window_confirmed"] = True
                     break
-                result["error"] = "profile or census output was not written"
+                result["error"] = (
+                    "requested profile, census, or GPU audit output was not written after the measured window"
+                    if audit_path else "profile or census output was not written"
+                )
                 break
             if exited:
                 result["exit_code"] = process.returncode
@@ -930,6 +959,11 @@ def run_once(out_dir, label, scene, env_overrides, threads, watchdog, profile, c
         stdout.close()
         stderr.close()
         log.poll()
+    if audit_path:
+        complete = gpu_audit_report_complete(audit_path)
+        result["gpu_audit"]["report_complete"] = complete
+        if not complete:
+            result["error"] = result.get("error") or f"GPU audit report missing or incomplete: {audit_path}"
     result["state"] = state
     result["panel_presses"] = panel_presses
     result["input_events"] = input_events
@@ -1003,8 +1037,26 @@ def run_once(out_dir, label, scene, env_overrides, threads, watchdog, profile, c
     return result
 
 
-def wait_for_outputs(out_dir, stderr_path, profile, census, process, timeout=120):
-    """After the gates close: the profiler writes once, the census at reports."""
+def gpu_audit_report_complete(path, newer_than=None):
+    """Recognize the audit writer's header and final counter in a closed snapshot."""
+    try:
+        with Path(path).open("rb") as stream:
+            stat = os.fstat(stream.fileno())
+            if newer_than is not None and stat.st_mtime <= newer_than:
+                return False
+            if not stream.readline().startswith(b"# GPU audit:"):
+                return False
+            if stream.readline().rstrip(b"\r\n") != b"category,key,count,vertices":
+                return False
+            stream.seek(max(0, stat.st_size - 128))
+            tail = stream.read()
+    except OSError:
+        return False
+    return re.search(rb"(?:^|\n)overflow,INVALID_MIRROR_ONLY,[0-9]+,0\r?\n\Z", tail) is not None
+
+
+def wait_for_outputs(out_dir, stderr_path, profile, census, process, timeout=120, audit_path=None):
+    """Wait for requested reports after the measurement gates close."""
     deadline = time.monotonic() + timeout
     closed = time.time()
     while time.monotonic() < deadline:
@@ -1017,6 +1069,8 @@ def wait_for_outputs(out_dir, stderr_path, profile, census, process, timeout=120
         if census:
             path = Path(out_dir) / "census.csv"
             ok &= path.is_file() and path.stat().st_mtime > closed
+        if audit_path:
+            ok &= gpu_audit_report_complete(audit_path, newer_than=closed)
         if ok:
             return True
         time.sleep(0.5)
@@ -1170,6 +1224,7 @@ def main(argv=None):
         if len({name for name, _ in variants}) != len(variants):
             raise BenchError("Variant names must be distinct")
         for _, env in variants:
+            validate_gpu_audit_overrides(env)
             for key, value in env.items():
                 if key.upper() == "RECOMP_AC97_READY" and value.strip() in ("", "0"):
                     message = ("legacy RECOMP_AC97_READY is enabled by presence, even for 0; "

@@ -1,6 +1,8 @@
 #include <windows.h>
+#include <errno.h>
 #include <stddef.h>
 #include <stdint.h>
+#include <stdarg.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -26,6 +28,7 @@
 #define BRUTEFORCE_DAC_RAMP_BYTES (256u * 3u)
 
 typedef void (*recomp_func_t)(void);
+extern void sub_0006EE30_gen(void);
 extern void sub_00372180_gen(void);
 extern void sub_00377F80_gen(void);
 
@@ -187,6 +190,376 @@ void sub_0037834E_enter(void)
     if (written < 0 || fflush(stderr) != 0)
         abort();
     ReleaseSRWLockExclusive(&lock);
+}
+
+#define CAMERA_TRACE_DEFAULT_LIMIT 256u
+#define CAMERA_TRACE_MAX_LIMIT 4096u
+#define CAMERA_TRACE_MAX_EVERY 1000000u
+#define CAMERA_VIEW_MANAGER_GLOBAL 0x00469B54u
+#define CAMERA_VIEW_RECT_GETTER 0x00067D60u
+#define CAMERA_VIEW_ENABLE_GETTER 0x00067D30u
+
+typedef struct {
+    uint32_t value;
+    int valid;
+} CameraTraceWord;
+
+typedef struct {
+    uint64_t call, time_us;
+    unsigned long thread;
+    uint32_t regs[8], eflags;
+    CameraTraceWord return_va, caller_va, parent_return_va, args[4];
+    CameraTraceWord owner_va, owner_vtable, interface_vtable, state_va;
+    CameraTraceWord fov_h, fov_v, tangent_h, tangent_v, aspect;
+    CameraTraceWord view_manager, view_vtable, view_getter, view_enable_getter;
+    uint32_t matrix_before[16], matrix_after[16], view_rect[4];
+    int before_valid, after_valid, view_rect_valid, view_enabled_valid, view_enabled;
+    const char *owner_source, *view_scope;
+} CameraTraceSnapshot;
+
+typedef struct {
+    char data[4096];
+    size_t used;
+    int valid;
+} CameraTraceLine;
+
+static INIT_ONCE camera_trace_once = INIT_ONCE_STATIC_INIT;
+static SRWLOCK camera_trace_lock = SRWLOCK_INIT;
+static int camera_trace_enabled;
+static uint32_t camera_trace_limit, camera_trace_every, camera_trace_reserved;
+static uint32_t camera_trace_emitted;
+static uint64_t camera_trace_calls;
+static volatile LONG camera_trace_full;
+
+static uint32_t camera_trace_setting(const char *name, uint32_t fallback, uint32_t maximum)
+{
+    const char *text = getenv(name), *p;
+    uint32_t value = 0;
+
+    if (!text)
+        return fallback;
+    for (p = text; *p; ++p) {
+        unsigned digit = (unsigned char)*p - (unsigned)'0';
+        if (digit > 9u || value > (maximum - digit) / 10u)
+            break;
+        value = value * 10u + digit;
+    }
+    if (p == text || *p || value == 0) {
+        fprintf(stderr, "[CAMERA-TRACE] %s must be an integer in 1..%u\n",
+                name, maximum);
+        fflush(stderr);
+        abort();
+    }
+    return value;
+}
+
+static BOOL CALLBACK initialize_camera_trace(PINIT_ONCE once, PVOID parameter, PVOID *context)
+{
+    const char *enabled = getenv("BRUTEFORCE_CAMERA_TRACE");
+    (void)once; (void)parameter; (void)context;
+
+    if (enabled && *enabled && strcmp(enabled, "0") != 0 && strcmp(enabled, "1") != 0) {
+        fprintf(stderr, "[CAMERA-TRACE] BRUTEFORCE_CAMERA_TRACE must be 0 or 1\n");
+        fflush(stderr);
+        abort();
+    }
+    camera_trace_limit = camera_trace_setting("BRUTEFORCE_CAMERA_TRACE_LIMIT",
+                                              CAMERA_TRACE_DEFAULT_LIMIT,
+                                              CAMERA_TRACE_MAX_LIMIT);
+    camera_trace_every = camera_trace_setting("BRUTEFORCE_CAMERA_TRACE_EVERY", 1u,
+                                              CAMERA_TRACE_MAX_EVERY);
+    camera_trace_enabled = enabled && strcmp(enabled, "1") == 0;
+    return TRUE;
+}
+
+static int camera_trace_reserve(uint64_t *call, uint64_t *time_us, unsigned long *thread)
+{
+    int selected = 0;
+    if (InterlockedCompareExchange(&camera_trace_full, 0, 0))
+        return 0;
+
+    AcquireSRWLockExclusive(&camera_trace_lock);
+    if (camera_trace_reserved < camera_trace_limit) {
+        ++camera_trace_calls;
+        if ((camera_trace_calls - 1u) % camera_trace_every == 0) {
+            *call = camera_trace_calls;
+            *time_us = xbox_HostNowNs() / 1000u;
+            *thread = (unsigned long)GetCurrentThreadId();
+            selected = 1;
+            if (++camera_trace_reserved == camera_trace_limit)
+                InterlockedExchange(&camera_trace_full, 1);
+        }
+    }
+    ReleaseSRWLockExclusive(&camera_trace_lock);
+    return selected;
+}
+
+static int camera_trace_read(uint32_t va, void *out, size_t size)
+{
+    const uint64_t end = (uint64_t)va + size;
+    const uintptr_t offset = (uintptr_t)xbox_GetMemoryOffset();
+    const DWORD readable = PAGE_READONLY | PAGE_READWRITE | PAGE_WRITECOPY |
+                           PAGE_EXECUTE_READ | PAGE_EXECUTE_READWRITE | PAGE_EXECUTE_WRITECOPY;
+    uintptr_t host, host_end, cursor;
+    SIZE_T copied = 0;
+
+    if (!va || !size ||
+        !(end <= XBOX_CONTIG_SIZE ||
+          (va >= XBOX_CONTIG_BASE && end <= (uint64_t)XBOX_CONTIG_BASE + XBOX_CONTIG_SIZE)) ||
+        offset > UINTPTR_MAX - va || size > UINTPTR_MAX - (offset + va))
+        return 0;
+    host = offset + va;
+    host_end = host + size;
+    for (cursor = host; cursor < host_end;) {
+        MEMORY_BASIC_INFORMATION info;
+        uintptr_t region;
+        if (VirtualQuery((const void *)cursor, &info, sizeof(info)) != sizeof(info) ||
+            info.State != MEM_COMMIT || (info.Protect & (PAGE_GUARD | PAGE_NOACCESS)) ||
+            !(info.Protect & readable))
+            return 0;
+        region = (uintptr_t)info.BaseAddress;
+        if (cursor < region || info.RegionSize > UINTPTR_MAX - region ||
+            cursor >= region + info.RegionSize)
+            return 0;
+        cursor = region + info.RegionSize;
+    }
+    return ReadProcessMemory(GetCurrentProcess(), (const void *)host, out, size, &copied) &&
+           copied == size;
+}
+
+static CameraTraceWord camera_trace_word(uint32_t base, uint32_t offset)
+{
+    CameraTraceWord word = { 0, 0 };
+    if (base && offset <= UINT32_MAX - base)
+        word.valid = camera_trace_read(base + offset, &word.value, sizeof(word.value));
+    return word;
+}
+
+static int camera_trace_read_offset(uint32_t base, uint32_t offset, void *out, size_t size)
+{
+    return base && offset <= UINT32_MAX - base &&
+           camera_trace_read(base + offset, out, size);
+}
+
+static void camera_trace_capture(CameraTraceSnapshot *snapshot)
+{
+    uint32_t i;
+    uint8_t view_flags;
+
+    snapshot->regs[0] = g_eax; snapshot->regs[1] = g_ecx;
+    snapshot->regs[2] = g_edx; snapshot->regs[3] = g_ebx;
+    snapshot->regs[4] = g_esp; snapshot->regs[5] = g_ebp;
+    snapshot->regs[6] = g_esi; snapshot->regs[7] = g_edi;
+    snapshot->eflags = g_eflags;
+    snapshot->return_va = camera_trace_word(snapshot->regs[4], 0);
+    for (i = 0; i < 4; ++i)
+        snapshot->args[i] = camera_trace_word(snapshot->regs[4], 4u + i * 4u);
+    snapshot->before_valid = camera_trace_read(snapshot->regs[1], snapshot->matrix_before,
+                                               sizeof(snapshot->matrix_before));
+
+    snapshot->owner_source = "unknown";
+    snapshot->view_scope = "global_context_only";
+    if (snapshot->return_va.valid && snapshot->return_va.value == 0x0006BFA2u) {
+        snapshot->caller_va.value = 0x0006BE90u;
+        snapshot->caller_va.valid = 1;
+        snapshot->parent_return_va = camera_trace_word(snapshot->regs[5], 4);
+        snapshot->owner_va.value = snapshot->regs[7];
+        snapshot->owner_va.valid = 1;
+        snapshot->owner_source = "edi";
+        snapshot->view_scope = "caller_context_candidate";
+    } else if (snapshot->return_va.valid && snapshot->return_va.value == 0x0006D291u) {
+        snapshot->caller_va.value = 0x0006D240u;
+        snapshot->caller_va.valid = 1;
+        snapshot->parent_return_va = camera_trace_word(snapshot->regs[4], 0x130u);
+        if (snapshot->regs[6] >= 0x48u) {
+            snapshot->owner_va.value = snapshot->regs[6] - 0x48u;
+            snapshot->owner_va.valid = 1;
+        }
+        snapshot->owner_source = "esi_minus_0x48";
+    }
+
+    if (snapshot->owner_va.valid) {
+        uint32_t owner = snapshot->owner_va.value;
+        snapshot->owner_vtable = camera_trace_word(owner, 0);
+        snapshot->interface_vtable = camera_trace_word(owner, 0x48u);
+        snapshot->state_va = camera_trace_word(owner, 0x50u);
+        if (snapshot->state_va.valid) {
+            uint32_t state = snapshot->state_va.value;
+            /* Static interpretation only; the camera ownership and field roles
+             * still need runtime classification for each caller and scene. */
+            snapshot->fov_h = camera_trace_word(state, 0x14u);
+            snapshot->fov_v = camera_trace_word(state, 0x18u);
+            snapshot->tangent_h = camera_trace_word(state, 0x24u);
+            snapshot->tangent_v = camera_trace_word(state, 0x28u);
+            snapshot->aspect = camera_trace_word(state, 0x2Cu);
+        }
+    }
+
+    /* The retail 0x6BE90 caller uses this global's +0x38 virtual getter
+     * after the builder. Its 0x67D60 implementation returns manager+0x24.
+     * The rectangle's units and its association with other callers are
+     * unverified; never apply that layout to a different getter. */
+    snapshot->view_manager = camera_trace_word(CAMERA_VIEW_MANAGER_GLOBAL, 0);
+    if (snapshot->view_manager.valid)
+        snapshot->view_vtable = camera_trace_word(snapshot->view_manager.value, 0);
+    if (snapshot->view_vtable.valid) {
+        snapshot->view_getter = camera_trace_word(snapshot->view_vtable.value, 0x38u);
+        snapshot->view_enable_getter = camera_trace_word(snapshot->view_vtable.value, 0x30u);
+    }
+    if (snapshot->view_getter.valid && snapshot->view_getter.value == CAMERA_VIEW_RECT_GETTER)
+        snapshot->view_rect_valid =
+            camera_trace_read_offset(snapshot->view_manager.value, 0x24u,
+                                     snapshot->view_rect, sizeof(snapshot->view_rect));
+    if (snapshot->view_enable_getter.valid &&
+        snapshot->view_enable_getter.value == CAMERA_VIEW_ENABLE_GETTER &&
+        camera_trace_read_offset(snapshot->view_manager.value, 4u, &view_flags, 1u)) {
+        snapshot->view_enabled_valid = 1;
+        snapshot->view_enabled = (view_flags & 2u) != 0;
+    }
+}
+
+static void camera_trace_append(CameraTraceLine *line, const char *format, ...)
+{
+    va_list args;
+    int written;
+    if (!line->valid)
+        return;
+    va_start(args, format);
+    written = vsnprintf(line->data + line->used, sizeof(line->data) - line->used, format, args);
+    va_end(args);
+    if (written < 0 || (size_t)written >= sizeof(line->data) - line->used) {
+        line->valid = 0;
+        return;
+    }
+    line->used += (size_t)written;
+}
+
+static void camera_trace_field(CameraTraceLine *line, const char *name, CameraTraceWord word)
+{
+    camera_trace_append(line, ",\"%s\":", name);
+    if (word.valid)
+        camera_trace_append(line, "\"%08X\"", word.value);
+    else
+        camera_trace_append(line, "null");
+}
+
+static void camera_trace_array(CameraTraceLine *line, const char *name,
+                               const uint32_t *values, size_t count, int valid)
+{
+    size_t i;
+    camera_trace_append(line, ",\"%s\":", name);
+    if (!valid) {
+        camera_trace_append(line, "null");
+        return;
+    }
+    camera_trace_append(line, "[");
+    for (i = 0; i < count; ++i)
+        camera_trace_append(line, "%s\"%08X\"", i ? "," : "", values[i]);
+    camera_trace_append(line, "]");
+}
+
+static void camera_trace_emit(const CameraTraceSnapshot *snapshot)
+{
+    CameraTraceLine line = { { 0 }, 0, 1 };
+    uint32_t sequence;
+
+    AcquireSRWLockExclusive(&camera_trace_lock);
+    sequence = ++camera_trace_emitted;
+    camera_trace_append(&line, "[CAMERA-TRACE] {\"version\":1,\"seq\":%u,"
+                        "\"call\":%llu,\"t_us\":%llu,\"thread\":%lu",
+                        sequence, (unsigned long long)snapshot->call,
+                        (unsigned long long)snapshot->time_us, snapshot->thread);
+    camera_trace_field(&line, "return_va", snapshot->return_va);
+    camera_trace_field(&line, "caller_va", snapshot->caller_va);
+    camera_trace_field(&line, "parent_return_va", snapshot->parent_return_va);
+    camera_trace_append(&line, ",\"entry_regs\":{\"eax\":\"%08X\",\"ecx\":\"%08X\","
+                        "\"edx\":\"%08X\",\"ebx\":\"%08X\",\"esp\":\"%08X\","
+                        "\"ebp\":\"%08X\",\"esi\":\"%08X\",\"edi\":\"%08X\","
+                        "\"eflags\":\"%08X\"}",
+                        snapshot->regs[0], snapshot->regs[1], snapshot->regs[2],
+                        snapshot->regs[3], snapshot->regs[4], snapshot->regs[5],
+                        snapshot->regs[6], snapshot->regs[7], snapshot->eflags);
+    camera_trace_append(&line, ",\"matrix_va\":\"%08X\"", snapshot->regs[1]);
+    camera_trace_append(&line, ",\"args\":{");
+    /* The first member has no leading comma. */
+    camera_trace_append(&line, "\"fov_bits\":");
+    if (snapshot->args[0].valid)
+        camera_trace_append(&line, "\"%08X\"", snapshot->args[0].value);
+    else
+        camera_trace_append(&line, "null");
+    camera_trace_field(&line, "aspect_bits", snapshot->args[1]);
+    camera_trace_field(&line, "near_bits", snapshot->args[2]);
+    camera_trace_field(&line, "far_bits", snapshot->args[3]);
+    camera_trace_append(&line, "}");
+    camera_trace_array(&line, "input_matrix_bits", snapshot->matrix_before, 16,
+                       snapshot->before_valid);
+    camera_trace_array(&line, "output_matrix_bits", snapshot->matrix_after, 16,
+                       snapshot->after_valid);
+    camera_trace_append(&line, ",\"owner\":{\"source\":\"%s\"", snapshot->owner_source);
+    camera_trace_field(&line, "candidate_va", snapshot->owner_va);
+    camera_trace_field(&line, "candidate_class_vtable", snapshot->owner_vtable);
+    camera_trace_field(&line, "candidate_interface_vtable", snapshot->interface_vtable);
+    camera_trace_field(&line, "candidate_state_va", snapshot->state_va);
+    camera_trace_field(&line, "hyp_fov_h_bits", snapshot->fov_h);
+    camera_trace_field(&line, "hyp_fov_v_bits", snapshot->fov_v);
+    camera_trace_field(&line, "hyp_tangent_h_bits", snapshot->tangent_h);
+    camera_trace_field(&line, "hyp_tangent_v_bits", snapshot->tangent_v);
+    camera_trace_field(&line, "hyp_aspect_bits", snapshot->aspect);
+    camera_trace_append(&line, "},\"viewport\":{\"scope\":\"%s\"", snapshot->view_scope);
+    camera_trace_field(&line, "manager_va", snapshot->view_manager);
+    camera_trace_field(&line, "manager_vtable", snapshot->view_vtable);
+    camera_trace_field(&line, "rect_getter_va", snapshot->view_getter);
+    camera_trace_field(&line, "enable_getter_va", snapshot->view_enable_getter);
+    camera_trace_append(&line, ",\"enabled_candidate\":%s",
+                        !snapshot->view_enabled_valid ? "null" :
+                        snapshot->view_enabled ? "true" : "false");
+    camera_trace_array(&line, "rect_candidate_bits", snapshot->view_rect, 4,
+                       snapshot->view_rect_valid);
+    camera_trace_append(&line, "}}\n");
+    if (line.valid) {
+        (void)fwrite(line.data, 1, line.used, stderr);
+        (void)fflush(stderr);
+    } else {
+        fputs("[CAMERA-TRACE] internal formatting overflow\n", stderr);
+        (void)fflush(stderr);
+    }
+    ReleaseSRWLockExclusive(&camera_trace_lock);
+}
+
+void sub_0006EE30(void)
+{
+    DWORD last_error = GetLastError();
+    int saved_errno = errno;
+
+    if (!InitOnceExecuteOnce(&camera_trace_once, initialize_camera_trace, NULL, NULL))
+        abort();
+    if (!camera_trace_enabled) {
+        errno = saved_errno;
+        SetLastError(last_error);
+        sub_0006EE30_gen();
+        return;
+    }
+
+    {
+        CameraTraceSnapshot snapshot = { 0 };
+        if (!camera_trace_reserve(&snapshot.call, &snapshot.time_us, &snapshot.thread)) {
+            errno = saved_errno;
+            SetLastError(last_error);
+            sub_0006EE30_gen();
+            return;
+        }
+        camera_trace_capture(&snapshot);
+        errno = saved_errno;
+        SetLastError(last_error);
+        sub_0006EE30_gen();
+        last_error = GetLastError();
+        saved_errno = errno;
+        snapshot.after_valid = camera_trace_read(snapshot.regs[1], snapshot.matrix_after,
+                                                 sizeof(snapshot.matrix_after));
+        camera_trace_emit(&snapshot);
+        errno = saved_errno;
+        SetLastError(last_error);
+    }
 }
 
 static uint32_t registered_miniport;

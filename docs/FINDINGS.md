@@ -313,6 +313,15 @@ Set `RECOMP_GPU_AUDIT=1` to enable the default-off observer;
 `RECOMP_GPU_AUDIT_FILE` names its CSV, defaulting to `gpu_audit.csv`.
 Unset, `0`, and other values leave it disabled. It does not register a
 rendering backend, so the existing CPU rasterizer remains the reference.
+For benchmark campaigns, `tools/bench.py` now owns
+`RECOMP_GPU_AUDIT_FILE`: every enabled attempt, including a retry, receives a
+separate `gpu_audit.csv` under its attempt directory. The exact enable value
+and resolved file are retained in the attempt metadata. A caller-supplied
+file override is rejected, and an enabled attempt fails if it cannot produce
+a complete snapshot after the measured window. This prevents retries from
+overwriting one shared report or a truncated report from looking successful.
+The 2026-11-10 focused harness/native selection passed 35 cases. It did not
+run the retail title or establish the visible impact of any audited method.
 Reports are rewritten at executor reports, on a flip after 20 seconds have
 elapsed (or the wall clock moves backwards), and at normal exit. An active
 BEGIN appears separately as `open_request` and `open_input`, not as a
@@ -2128,6 +2137,31 @@ and height uniformly, however, and the presenter's output-size query is
 hard-coded to a 4:3 picture. There is no ordered 2D/3D classification path.
 Simply widening a target now would stretch HUD and movie draws and would not
 define the guest readback crop.
+
+#### E1 camera-trace implementation
+
+The central perspective builder now has a default-off title wrapper.
+`BRUTEFORCE_CAMERA_TRACE=1` emits one JSON object per selected call to
+standard error. `BRUTEFORCE_CAMERA_TRACE_LIMIT` bounds the process-wide
+output to 1-4096 records (default 256), and
+`BRUTEFORCE_CAMERA_TRACE_EVERY` samples every 1-1,000,000 calls (default 1).
+Invalid values abort explicitly rather than silently changing the trace.
+
+Each record contains the return/caller address, entry registers and
+arguments, the input and generated output matrices, and safely read
+candidate owner, camera-state and viewport values. Fields derived from the
+static interpretation above are named `hyp_*` or `*_candidate`; an unreadable
+or inapplicable field is `null`. The trace therefore preserves the
+observation/hypothesis boundary and does not claim that a candidate structure
+owns the active view. Guest addresses and state remain local diagnostic data.
+
+The wrapper invokes `sub_0006EE30_gen` exactly once and emits only after the
+generated body returns, so disabled and enabled modes retain its guest
+register, stack and matrix results. Synthetic direct/indirect dispatch,
+caller classification, safe-read, sampling, output-bound, invalid-setting
+and state-equivalence coverage passed in a 104-test focused selection. No
+retail trace has run on the fresh v0.17 generation, so camera ownership,
+scene coverage and all culling paths remain open.
 
 #### Required Brute Force boundary
 

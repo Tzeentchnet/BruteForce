@@ -52,14 +52,17 @@ memory accounting, pushbuffer control flow, and graphics interrupts:
 cmake -S . -B build\smoke -G "Visual Studio 17 2022" -A x64 `
   "-DBRUTEFORCE_GEN_DIR=$PWD\tests\fixtures\generated"
 cmake --build build\smoke --config Release --parallel 4 --target `
-  bruteforce bruteforce_fence_test bruteforce_read_trace_test `
+  bruteforce bruteforce_fence_test bruteforce_camera_trace_test `
+  bruteforce_read_trace_test `
   bruteforce_present_test bruteforce_usb_test bruteforce_interrupt_test `
   bruteforce_crash_test bruteforce_memory_stats_test `
   bruteforce_pushbuffer_test bruteforce_pgraph_test bruteforce_window_clip_test `
   bruteforce_color_unpack_test bruteforce_texture_math_test `
-  bruteforce_frame_stats_test bruteforce_d3d11_test bruteforce_gpu_shared_present_test
+  bruteforce_frame_stats_test bruteforce_gpu_audit_test `
+  bruteforce_d3d11_test bruteforce_gpu_shared_present_test
 $env:BRUTEFORCE_TEST_HOST = "$PWD\build\smoke\Release\bruteforce.exe"
 $env:BRUTEFORCE_TEST_FENCE = "$PWD\build\smoke\Release\bruteforce_fence_test.exe"
+$env:BRUTEFORCE_TEST_CAMERA_TRACE = "$PWD\build\smoke\Release\bruteforce_camera_trace_test.exe"
 $env:BRUTEFORCE_TEST_READ_TRACE = "$PWD\build\smoke\Release\bruteforce_read_trace_test.exe"
 $env:BRUTEFORCE_TEST_PRESENT = "$PWD\build\smoke\Release\bruteforce_present_test.exe"
 $env:BRUTEFORCE_TEST_USB = "$PWD\build\smoke\Release\bruteforce_usb_test.exe"
@@ -72,6 +75,7 @@ $env:BRUTEFORCE_TEST_WINDOW_CLIP = "$PWD\build\smoke\Release\bruteforce_window_c
 $env:BRUTEFORCE_TEST_COLOR_UNPACK = "$PWD\build\smoke\Release\bruteforce_color_unpack_test.exe"
 $env:BRUTEFORCE_TEST_TEXTURE_MATH = "$PWD\build\smoke\Release\bruteforce_texture_math_test.exe"
 $env:BRUTEFORCE_TEST_FRAME_STATS = "$PWD\build\smoke\Release\bruteforce_frame_stats_test.exe"
+$env:BRUTEFORCE_TEST_GPU_AUDIT = "$PWD\build\smoke\Release\bruteforce_gpu_audit_test.exe"
 $env:BRUTEFORCE_TEST_D3D11 = "$PWD\build\smoke\Release\bruteforce_d3d11_test.exe"
 $env:BRUTEFORCE_TEST_GPU_SHARED_PRESENT = "$PWD\build\smoke\Release\bruteforce_gpu_shared_present_test.exe"
 python -m pytest -q tests

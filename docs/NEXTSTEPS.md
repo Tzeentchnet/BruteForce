@@ -313,6 +313,11 @@ GPU methods in the CPU-path census.
    synthetic-tested in patch 0025: `RECOMP_GPU_AUDIT=1` observes CPU and GPU
    routes without a dummy backend, including early drops, submissions,
    rejections, software culls, clears, flips and methods by subchannel.
+   The benchmark now owns a unique `gpu_audit.csv` in every enabled attempt,
+   records the exact audit controls in that attempt's metadata, and rejects a
+   missing or incomplete post-window snapshot instead of accepting a
+   success-shaped run. Synthetic retry, disabled, malformed and native-fixture
+   cases pass.
    Visibility remains unknown for non-dropped routes. One isolated,
    minimized, automatically scripted diagnostic now has a partial retail
    audit, but its scenes were not independently reviewed. It recorded 174
@@ -669,7 +674,7 @@ mainly where they gate 4K, widescreen and audio.
   surface API failures, and cover the Windows window-state transitions in a
   synthetic fixture before changing launcher policy.
 
-## E. True Hor+ widescreen (investigation complete; implementation pending)
+## E. True Hor+ widescreen (camera diagnostic implemented; mode pending)
 
 **Static evidence.** The complete source review is in
 [FINDINGS](FINDINGS.md#blood-wake-feature-review-and-true-widescreen-investigation)
@@ -681,12 +686,17 @@ readback and wide presentation. Brute Force has a conventional perspective
 builder and camera aspect/tangent state that appear suitable, but their
 runtime roles and all culling paths are not yet classified.
 
-1. **Add a diagnostic-only camera trace.** Wrap the central perspective
-   builder behind a default-off title switch and record a bounded set of
-   caller, output, aspect, tangent, viewport and camera-owner classes. Cover
-   gameplay, menus, movies, in-engine cutscenes and every available
-   split-screen layout. Do not alter the matrix in this step. Regenerate
-   because the manual-source fingerprint changes.
+1. **Implemented; retail coverage pending: diagnostic-only camera trace.**
+   `BRUTEFORCE_CAMERA_TRACE=1` wraps the central perspective builder and
+   records bounded JSON lines containing its caller, entry arguments,
+   input/output matrix, and explicitly labelled candidate aspect, tangent,
+   viewport and camera-owner fields. The wrapper always calls the generated
+   body and leaves its resulting guest state unchanged. Limits and sampling
+   are validated, and synthetic direct/indirect dispatch and state-equivalence
+   cases pass. Regenerate because the manual-source fingerprint changed.
+   Runtime coverage still needs gameplay, menus, movies, in-engine cutscenes
+   and every available split-screen layout. The trace does not alter the
+   matrix or establish ownership by itself.
 2. **Establish title ownership before choosing hooks.** Confirm where each
    gameplay camera's aspect and horizontal/vertical tangent are finalized,
    which routine rebuilds dependent frustum planes, and whether another

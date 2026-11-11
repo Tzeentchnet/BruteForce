@@ -589,6 +589,33 @@ parseable and mark those values unavailable. A zero synchronous wait in
 async mode means completion moved to report polling; it does not establish
 zero report-processing cost or correct report order.
 
+For an A1 request audit, pass `RECOMP_GPU_AUDIT=1` on the benchmark variant.
+The harness owns the report path and writes `gpu_audit.csv` inside each
+attempt directory, including retries. It records both the enable value and
+resolved path in that attempt's metadata and fails the attempt when the
+post-window report is missing or incomplete. Do not pass
+`RECOMP_GPU_AUDIT_FILE` in a variant: one shared path could let attempts
+overwrite each other and is rejected. Audit CSVs can contain guest addresses;
+keep them local.
+
+The default-off E1 camera diagnostic uses:
+
+```powershell
+$env:BRUTEFORCE_CAMERA_TRACE = "1"
+$env:BRUTEFORCE_CAMERA_TRACE_LIMIT = "256" # 1..4096
+$env:BRUTEFORCE_CAMERA_TRACE_EVERY = "1"   # sample every Nth call
+.\build\Release\bruteforce.exe
+```
+
+It writes bounded `[CAMERA-TRACE]` JSON lines to standard error. Records
+include caller and entry state, input/output projection matrices, and
+explicitly labelled candidate owner, camera and viewport fields. `null`
+means the value was unreadable or inapplicable; `hyp_*` and `*_candidate`
+fields are not verified ownership. The trace does not change the matrix.
+Keep the log local, and unset all three variables for normal runs. A build
+containing a changed `src/recomp_manual.c` fingerprint must be regenerated
+before a retail trace.
+
 For a separate Windows diagnostic, `RECOMP_PRESENTER_CAPTURE` records the
 GDI or CPU-upload D3D11 presenter's converted input and its API result.
 Use a new capture directory and a new statistics filename under an existing

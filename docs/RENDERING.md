@@ -178,7 +178,12 @@ the selected resolution.
 
 ### Proposed true-widescreen boundary
 
-True widescreen is not implemented. The static investigation in
+True widescreen is not implemented. A default-off title camera trace now
+wraps the central perspective builder and records bounded caller,
+input/output-matrix and explicitly labelled candidate camera/viewport state
+without changing the generated result. Its synthetic state-equivalence and
+dispatch coverage passes, but it has not yet classified retail scenes or
+culling ownership. The static investigation in
 [FINDINGS](./FINDINGS.md#blood-wake-feature-review-and-true-widescreen-investigation)
 establishes a viable architecture, not validated runtime behavior.
 Framebuffer widening alone is explicitly insufficient because it would

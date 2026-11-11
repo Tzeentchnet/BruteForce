@@ -103,6 +103,8 @@ void sub_00372180_gen(void)
     g_esp += 4;
 }
 
+void sub_0006EE30_gen(void) {}
+
 int xbox_Nv2aPfbFlushWaitEnabled(void)
 {
     return pfb_wait_enabled;

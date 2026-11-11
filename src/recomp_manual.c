@@ -21,6 +21,7 @@
 #define BRUTEFORCE_NV2A_BASE 0xFD000000u
 #define BRUTEFORCE_PFB_FLUSH_OFFSET 0x100410u
 #define BRUTEFORCE_PFB_FLUSH_BUSY 0x00010000u
+#define BRUTEFORCE_USER_DMA_PUT 0xFD800040u
 #define BRUTEFORCE_GPU_VECTOR 3u
 #define BRUTEFORCE_XPP_CLI 0x00384FA5u
 #define BRUTEFORCE_XPP_STI 0x00384FB6u
@@ -664,6 +665,52 @@ static volatile uint32_t *pfb_device_global;
 static volatile uint32_t *pfb_nv2a_field;
 static uint32_t pfb_device_va;
 static int pfb_wait_enabled;
+static int pfb_idle_enabled;
+
+static uint32_t submit_caller(uint32_t stack_offset)
+{
+    volatile uint32_t *word;
+    if (g_esp > UINT32_MAX - stack_offset)
+        return 0;
+    word = guest_word(g_esp + stack_offset, 0);
+    return word ? *word : 0;
+}
+
+static void store32(uint32_t address, uint32_t value, uint32_t site,
+                    uint32_t stack_offset)
+{
+    int perf = g_bruteforce_perf_counters_enabled;
+    uint32_t caller = 0;
+    uint64_t started = 0;
+    if (address != BRUTEFORCE_USER_DMA_PUT) {
+        *(uint32_t *)((uintptr_t)xbox_GetMemoryOffset() + address) = value;
+        return;
+    }
+    if (perf) {
+        started = bruteforce_perf_clock();
+        caller = submit_caller(stack_offset);
+    }
+    if (xbox_Nv2aSegmentsEnabled())
+        xbox_Nv2aPublishPut(value, caller ? caller : site);
+    else {
+        *(volatile uint32_t *)((uintptr_t)xbox_GetMemoryOffset() + address) = value;
+        if (xbox_Nv2aIdleWaitEnabled())
+            xbox_Nv2aIdleWake();
+    }
+    if (perf)
+        bruteforce_perf_record_submit(1, site, caller,
+                                      bruteforce_perf_clock() - started);
+}
+
+void sub_00371FA0_store32(uint32_t address, uint32_t value)
+{
+    store32(address, value, 0x00371FA0u, 4);
+}
+
+void sub_00372050_store32(uint32_t address, uint32_t value)
+{
+    store32(address, value, 0x00372050u, 0);
+}
 
 static BOOL CALLBACK initialize_pfb_wait(PINIT_ONCE once, PVOID parameter,
                                          PVOID *context)
@@ -673,6 +720,7 @@ static BOOL CALLBACK initialize_pfb_wait(PINIT_ONCE once, PVOID parameter,
     (void)context;
 
     pfb_wait_enabled = xbox_Nv2aPfbFlushWaitEnabled();
+    pfb_idle_enabled = xbox_Nv2aIdleWaitEnabled();
     if (!pfb_wait_enabled)
         return TRUE;
 
@@ -695,11 +743,28 @@ void sub_00372180(void)
     static INIT_ONCE once = INIT_ONCE_STATIC_INIT;
     volatile uint32_t *flush;
     LONG previous;
+    int perf = g_bruteforce_perf_counters_enabled;
+    uint64_t started = 0;
+    uint32_t site = 0, caller = 0;
+
+    if (perf) {
+        started = bruteforce_perf_clock();
+        site = submit_caller(0);
+        if (site == 0x00371FBCu)
+            caller = submit_caller(8);
+        else if (site == 0x0037206Bu)
+            caller = submit_caller(4);
+    }
 
     if (!InitOnceExecuteOnce(&once, initialize_pfb_wait, NULL, NULL))
         abort();
     if (!pfb_wait_enabled) {
+        if (pfb_idle_enabled)
+            xbox_Nv2aIdleWake();
         sub_00372180_gen();
+        if (perf)
+            bruteforce_perf_record_submit(0, site, caller,
+                                          bruteforce_perf_clock() - started);
         return;
     }
     if (*pfb_device_global != pfb_device_va) {
@@ -723,8 +788,13 @@ void sub_00372180(void)
     previous = InterlockedOr((volatile LONG *)flush,
                              (LONG)BRUTEFORCE_PFB_FLUSH_BUSY);
     g_ecx = (uint32_t)previous | BRUTEFORCE_PFB_FLUSH_BUSY;
+    if (pfb_idle_enabled)
+        xbox_Nv2aIdleWake();
     if (!xbox_Nv2aPfbFlushWait())
         abort();
+    if (perf)
+        bruteforce_perf_record_submit(0, site, caller,
+                                      bruteforce_perf_clock() - started);
     g_esp += 4;
 }
 

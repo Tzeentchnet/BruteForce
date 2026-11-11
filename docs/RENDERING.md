@@ -585,6 +585,16 @@ operations or at a flip and applies backpressure before submitting more;
 it also polls ordered visibility reports while waiting. Neither bound
 shortens PFB flush, semaphore, report or flip-hold synchronization.
 
+The independent experimental per-PUT queue is upstream of this renderer:
+the producer publishes a captured PUT, and the NV2A worker walks that
+segment before publishing GET. A pending queue or held flip prevents PFB
+acknowledgement; a held flip also prevents starting the next segment.
+The read-only guest USER mapping rejects untracked writes, while framework
+GET/PUT updates use its writable alias. The 128-entry queue and five-second
+wait limit fail explicitly instead of dropping work. Synthetic marker tests
+cover this ordering boundary, but integrated title, backend and presentation
+behavior remain unverified.
+
 Window size and fullscreen determine native mode's output picture. The
 point/linear display filter applies to the CPU route and scale-1 fallback;
 the scaled GPU final pass owns its reconstruction. None of these controls

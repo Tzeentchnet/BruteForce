@@ -74,6 +74,7 @@ static ULONGLONG s_t0;
 static double s_window_start = -1, s_window_end = -1;
 static uint64_t s_ticks, s_dropped;
 static int s_callers;
+static uint64_t s_caller_dropped;
 static uint64_t s_img_lo, s_img_hi;
 
 typedef LONG (NTAPI *NtQueryInformationThreadFn)(HANDLE, int, PVOID, ULONG, PULONG);
@@ -179,6 +180,7 @@ static void record_caller(int t, const CONTEXT *ctx)
             return;
         }
     }
+    s_caller_dropped++;
 }
 
 static int gate_open(void)
@@ -339,7 +341,7 @@ static int is_wait_symbol(const char *name)
     return 0;
 }
 
-static void agg_add(ProfAgg *agg, size_t cap, uint32_t tidx, const char *name, uint64_t count)
+static int agg_add(ProfAgg *agg, size_t cap, uint32_t tidx, const char *name, uint64_t count)
 {
     uint64_t h = 1469598103934665603ull ^ tidx;
     size_t i, n;
@@ -351,13 +353,14 @@ static void agg_add(ProfAgg *agg, size_t cap, uint32_t tidx, const char *name, u
             snprintf(agg[i].name, sizeof(agg[i].name), "%s", name);
             agg[i].tidx = tidx;
             agg[i].count = count;
-            return;
+            return 1;
         }
         if (agg[i].tidx == tidx && !strcmp(agg[i].name, name)) {
             agg[i].count += count;
-            return;
+            return 1;
         }
     }
+    return 0;
 }
 
 void bruteforce_profile_dump(const char *why)
@@ -366,7 +369,7 @@ void bruteforce_profile_dump(const char *why)
     FILE *f;
     size_t cap = 1u << 17, k;
     ProfAgg *agg, *mod;
-    uint64_t total = 0;
+    uint64_t total = 0, aggregation_dropped = 0;
     static uint64_t waits[PROF_MAX_THREADS];
     char temp[MAX_PATH + 8];
     uint32_t i;
@@ -395,7 +398,8 @@ void bruteforce_profile_dump(const char *why)
         if (!s->tidx)
             continue;
         symbol_name(proc, s->rip, name, sizeof(name));
-        agg_add(agg, cap, s->tidx, name, s->count);
+        if (!agg_add(agg, cap, s->tidx, name, s->count))
+            aggregation_dropped += s->count;
         agg_add(agg, cap, 0, name, s->count);
         if (is_wait_symbol(name))
             waits[s->tidx - 1] += s->count;
@@ -443,9 +447,9 @@ void bruteforce_profile_dump(const char *why)
                         100.0 * mod[k].count / s_th_samples[t], mod[k].name);
                 shown++;
             }
-        for (k = 0, shown = 0; k < cap && agg[k].count && shown < 25; k++)
+        for (k = 0, shown = 0; k < cap && agg[k].count; k++)
             if (agg[k].tidx == (uint32_t)t + 1) {
-                fprintf(f, "      %5.1f%%  %s\n",
+                fprintf(f, "      %9.6f%%  %s\n",
                         100.0 * agg[k].count / s_th_samples[t], agg[k].name);
                 shown++;
             }
@@ -470,19 +474,22 @@ void bruteforce_profile_dump(const char *why)
                 else
                     snprintf(b, sizeof(b), "(no exe frame)");
                 snprintf(ab, sizeof(ab), "%.70s <- %.80s", a, b);
-                agg_add(cagg, ccap, s->tidx, ab, s->count);
+                if (!agg_add(cagg, ccap, s->tidx, ab, s->count))
+                    aggregation_dropped += s->count;
             }
             qsort(cagg, ccap, sizeof(ProfAgg), agg_cmp);
+            fprintf(f, "CALLERS,complete_v1,%llu\n",
+                    (unsigned long long)(s_caller_dropped + aggregation_dropped));
             fprintf(f, "\n== Outside the exe, by first exe caller\n");
             for (t = 0; t < s_nth; t++) {
                 int shown = 0;
                 if (!s_th_samples[t])
                     continue;
-                for (k = 0; k < ccap && cagg[k].count && shown < 20; k++)
+                for (k = 0; k < ccap && cagg[k].count; k++)
                     if (cagg[k].tidx == (uint32_t)t + 1) {
                         if (!shown)
                             fprintf(f, "T%d\n", t);
-                        fprintf(f, "      %5.1f%%  %s\n",
+                        fprintf(f, "      %9.6f%%  %s\n",
                                 100.0 * cagg[k].count / s_th_samples[t], cagg[k].name);
                         shown++;
                     }

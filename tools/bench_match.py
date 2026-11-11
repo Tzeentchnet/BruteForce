@@ -159,8 +159,12 @@ def _frame_window(result_path, result, labels_path):
         raise MatchError(f"reviewed interval has no duration: {labels_path}")
     return {
         "first_flip": details[0]["flip"], "last_flip": details[-1]["flip"],
+        "first_timestamp_us": round(details[0]["t"] * 1_000_000),
+        "last_timestamp_us": round(details[-1]["t"] * 1_000_000),
         "seconds": round(duration, 3), "flips_per_second": round((len(details) - 1) / duration, 3),
         "reviewed_world_changes_per_second": report["reviewed_world_changes_per_second"],
+        "reviewed_world_low_1pct_fps": report["reviewed_world_low_1pct_fps"],
+        "reviewed_world_cadence": report["reviewed_world_cadence"],
         "region": report["region"], "exclude": report["exclude"],
         "dimensions": report["image_dimensions"], "tolerance": report["tolerance"],
         "label_manifest": str(labels_path),

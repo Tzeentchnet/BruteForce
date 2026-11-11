@@ -43,6 +43,8 @@ $fixtures = @(
   "nv2a_ffp_backend",
   "nv2a_gpu_audit",
   "nv2a_pfb_flush",
+  "nv2a_idle_wait",
+  "nv2a_segments",
   "nv2a_raster_batch"
 )
 foreach ($fixture in $fixtures) {
@@ -53,6 +55,41 @@ foreach ($fixture in $fixtures) {
   ctest --test-dir $build -C Release --output-on-failure
 }
 ```
+
+For the Phase 4 changes using a private, already reconstructed toolkit and a
+`build\performance-main` configured against that toolkit and an existing
+generation (the synthetic D3D11 test does not run the game):
+
+```powershell
+$toolkit = "$PWD\build\performance-toolkit"
+python tools\toolkit.py --verify --checkout $toolkit
+foreach ($fixture in @("nv2a_pfb_flush", "nv2a_idle_wait", "nv2a_segments")) {
+  cmake -S "$toolkit\tests\$fixture" -B "build\performance-tests\$fixture"
+  cmake --build "build\performance-tests\$fixture" --config Release
+  ctest --test-dir "build\performance-tests\$fixture" -C Release --output-on-failure
+}
+python -m pytest -q "$toolkit\tools\recomp\test_store32_hooks.py" `
+  --basetemp build\pyt-store
+python -m pytest -q tests\test_bench.py tests\test_bench_control.py `
+  tests\test_bench_world.py tests\test_bench_match.py tests\test_bench_audit.py `
+  tests\test_bench_performance.py --basetemp build\pyt-bench
+cmake --build build\performance-main --config Release --target bruteforce_d3d11_test
+$env:BRUTEFORCE_TEST_D3D11 = "$PWD\build\performance-main\Release\bruteforce_d3d11_test.exe"
+$env:BRUTEFORCE_TEST_XBE = "$toolkit\tools\conformance\test.xbe"
+python -m pytest -q tests\test_d3d11.py::test_detailed_performance_counters `
+  --basetemp build\pyt-d3d
+```
+
+The segment fixture checks the read-only alias, fail-closed untracked stores
+and resets, initial GET/JUMP, partial packets, JUMP/CALL/RETURN, producer
+backpressure and held-flip dispatch. Its executor uses synthetic ordered
+markers, not the real PGRAPH/report backend; the existing fence, pushbuffer,
+PGRAPH and interrupt fixtures cover those components separately. These tests
+do not establish integrated retail timing, presented pixels or performance.
+The title fence fixture also checks the opt-in aggregate shader compile
+counter's success, failure and reset behavior; the WARP fixture checks an
+actual uncached pixel-shader compile, and the benchmark parser checks its
+interval records.
 
 To exercise the native host and all synthetic fixtures, including crash
 diagnostics, guest

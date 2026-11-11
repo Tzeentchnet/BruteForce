@@ -47,13 +47,24 @@ and window-clip fixtures cover additional depth/stencil and scaled cases.
 These are not new gameplay, throughput, A/B/A or original-hardware evidence.
 G4 and the existing Phase 5 exit remain open.
 
+Patch 0045 now supplies bounded event acknowledgement, an independent idle
+wait, and guarded segment-at-a-time PUT consumption behind separate
+default-off switches. Their current evidence is synthetic; it does not
+establish retail behavior, a speedup, or any of G2–G5. The benchmark now
+checks reviewed, matched performance pairs and reports missing gate evidence
+as inconclusive. The old generation predates the new store hooks and must be
+regenerated before a segmented experiment.
+Opt-in interval timing also now covers pixel-shader compile/create failures
+and elapsed time when the persistent shader cache is off; existing
+cache-enabled hit/compile diagnostics remain separate.
+
 | Phase | Status |
 | --- | --- |
 | 0 | Mostly done. Harness (`tools/bench.py`), frame statistics (patch 0014), census and ceiling probes (0015), profiler (`src/profile.c`), null back end and surface guard (`src/gpu/null_backend.c`) exist and were run. Reviewed movement manifests now report baseline-to-change and change-to-change cadence percentiles and 1% lows. The profile summary separates known guest GPU polls and caller-attributed kernel waits from unrelated kernel waits; `--profile-callers` enables the latter at additional diagnostic cost. `BRUTEFORCE_PERF_COUNTERS=1` adds atomic interval counts and opt-in timing for title pointer validation, `VirtualQuery`, exact texture-cache lookup/comparison, snapshot copies, rewrites and eviction; concurrent validation and exact P8 rewrite fixtures cover the counters. A three-run reviewed camera-pan campaign records G2, G3, readback, visibility, validation and texture-cache work on the final Release generation. A six-leg reviewed sync/async visibility campaign then isolated the existing visibility option: async improved reviewed throughput by 11.7%, but its 15.697/s mean 1% low and 65.467% G3 still fail. Guest-surface captures do not establish displayed-present cadence. Request audit 0025 now has a complete fresh-generation scripted report as well as the older partial diagnostic; neither has operator-reviewed scene identity or a matched xemu frame. The harness gives every enabled attempt and retry an isolated audit report, records its controls and rejects missing/incomplete output. Flip-ID capture mapping 0026 is synthetic-tested. Presenter capture 0027 verified one link per GDI and CPU-upload route in short, unmatched retail probes, but did not validate physical visibility. Matched CPU-reference output, native-rate confirmation and the surface-read answer remain open. The follow-up surface guard completed with one excluded page but retained documented blind spots. Missing: upstream PR measurements (#231, #272, #273). |
 | 1 | Implemented, G4 not met. D3D11 back end (`src/gpu/`, `RECOMP_GPU=d3d11`) with the extended interface (0016). Synthetic WARP and hardware fixtures match apart from listed edge pixels. The new GPU-vertex tutorial capture differs from the CPU reference in 0.52% of pixels beyond 8/255; an older CPU-vertex capture differs substantially. |
 | 2 | Implemented (0017, on by default with the D3D11 back end). Stationary hold 3.20 → 30.41 rendered fps (3 runs each, alternating). An unreviewed retail diagnostic sampled 23,400 GPU-program batches without reported vertex differences through its last report. WARP and hardware fixtures cover additional packed formats, relative constants and culling against the CPU interpreter; matched-scene and complete format/hardware verification remain open. |
 | 3 | Partial. Async visibility reports (0018) and shared GPU presentation (0024) are opt-in. Three reviewed alternating runs per visibility mode measured 27.401 versus 30.606 world changes/s, but async still failed the 1%-low and G3 gates and remains opt-in. Submitted renderer work now has a two-event bound, and default-off elision skips copies only for demonstrably coherent, unscaled 32-bit guest surfaces. Tracked-surface flips still wait; dirty surfaces, diagnostics and scaled/16-bit frames still read back. General on-demand guest-reader interception is not implemented. CPU-written Bink frames synchronize before scaled submission. No new retail performance comparison was run. |
-| 4 | Selected after remaining existing-option isolation. G3 remains 65.467% with async visibility and is still dominated by the real PFB flush poll. Preserve flush, semaphore, and flip ordering. |
+| 4 | Steps 1–3 implemented behind independent default-off switches with synthetic coverage; title integration and reviewed isolation/combined campaigns remain open. The last measured G3 remains 65.467% with async visibility. PFB, GET, semaphore, report, interrupt and flip ordering remain mandatory. Step 4 is deferred pending G3. |
 | 5 | In progress. GPU compute decodes common textures; exact D24 and packed D24S8/stencil surface aliases and GPU window clipping are experimental opt-ins. A native xemu Basic Controls match now establishes that packed-stencil reconstruction, rather than a global gamma change, removes the large brightness error in that state: 43.4320% of pixels exceed 8/255 without it and 3.7119% with it. Unsupported ownership cases and other scenes keep the option experimental and G4 unmet. D3D11 honors partial clear rectangles, and patch 0022 removes redundant software depth clears when a backend owns drawing and clearing. Patch 0019 cached hot `getenv` calls. Checked texture/colour snapshots and tracked lifetimes replace repeated page queries on those paths, but their performance and title correctness have not been measured. |
 
 ### Audio performance status
@@ -192,10 +203,12 @@ interval. A trailing incomplete interval is not a completed frame and is
 reported outside that cadence.
 
 G3 includes samples in the two known guest GPU polls and kernel-wait samples
-whose first executable caller is one of those polls. Other game-thread kernel
+whose first executable caller is one of those polls, the event-driven PFB
+wait, or the dedicated segment queue-space/lock wait helper. Ordinary PUT
+publication is not counted wholesale as waiting. Other game-thread kernel
 waits are reported separately and are not assumed to be GPU time. A profile
-without `--profile-callers` provides only the direct-poll lower bound and is
-not a complete G3 measurement.
+without complete, symbolized `--profile-callers` attribution provides only
+the direct-poll lower bound and is not a complete G3 measurement.
 
 The 2026-11-03 reviewed default baseline used three 40-second camera-pan runs
 on generation `20261103-145850-21e3091e`, 12 raster threads and the RTX 5070.
@@ -519,18 +532,16 @@ current conservative flip wait means this gate is not met.
 ## Phase 4: let the game thread run ahead
 
 Each step changes guest-visible timing, so each stays behind its own switch.
-Implement related steps as a milestone and measure them in one alternating
-campaign; isolate individual switches only when needed to explain a result.
+Measure flush-only, idle-only, segment-only and all-three separately against
+the all-off baseline, each in alternating A/B/A order with at least three
+runs per variant and otherwise identical controls.
 
-**Status (2026-11-03):** step 1 is implemented behind the default-off
-`RECOMP_PFB_FLUSH_WAIT=1` switch and has synthetic coverage plus one corrected
-title movement smoke. The first hook build retained guest return addresses;
-matching the generated routine's four-byte `ret` stack effect fixed startup.
-The smoke had no capture review or caller profile, so it is bring-up evidence,
-not a performance or correctness-gate result. Before steps 2-4, run the
-required poll/event/poll/event/poll/event campaign on the corrected generation,
-review all world captures, and explain its timer-wake/recheck behavior. See
-[FINDINGS.md](./FINDINGS.md#event-driven-pfb-flush-wait-bring-up-2026-11-03).
+**Status:** steps 1–3 have focused synthetic coverage only on the new tree.
+An earlier corrected PFB-only title smoke was not reviewed or profiled and
+predates patch 0045. The bounded queue and USER guard have not been exercised
+by the title. No new retail or xemu run was made. Regenerate on the final
+tree, review world and presentation evidence, inspect event/timer/queue and
+caller counters, and retain the CPU reference before applying any gate.
 
 1. **Event-driven flush acknowledgement.** Identify the KickOff routine
    containing or calling the PFB flush poll at `0x00372180`. Replace its
@@ -541,15 +552,19 @@ review all world captures, and explain its timer-wake/recheck behavior. See
    different experiment completes the flush at the register write; do not
    adapt that shortcut. The wait must wake only from the real acknowledgement.
    The local implementation is framework patch 0036 plus the title-specific
-   hook; it remains a non-default candidate until the alternating gates pass.
+   hook and the bounded extension in 0045; it remains non-default.
 2. **Idle NV2A thread.** Replace the end-of-pass `Sleep(0)` with: spin while
    work is recent, then nap on a high-resolution timer or until the next
-   KickOff signals.
+   KickOff signals. Implemented as independent
+   `RECOMP_NV2A_IDLE_WAIT=1`, including a timer backstop.
 3. **Walk one segment at a time.** Walk each published PUT segment on its own
    and advance GET after each, so a KickOff waiting on GET is released after
    one segment rather than the whole batch. This changes when a held flip
    takes effect relative to later segments. Validate it against flip pacing
    and the PGRAPH trap ordering in [test_pgraph.py](../tests/test_pgraph.py).
+   `RECOMP_NV2A_SEGMENTS=1` queues each intercepted PUT and protects the
+   USER aperture; unsupported writes/resets stop rather than skip commands.
+   Production-scene behavior and ordering still require the campaign.
 4. **Asynchronous KickOff (optional).** Allow up to N segments outstanding
    before KickOff waits on GET. Only consider this if G3 is not met after
    steps 1–3. It relies on D3D reusing ring space only behind GET and on

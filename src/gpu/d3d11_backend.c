@@ -56,6 +56,7 @@
 #include "kernel.h"
 #include "nv2a_backend.h"
 #include "nv2a_backend_ext.h"
+#include "platform/host_time.h"
 #include "xbox_memory_layout.h"
 #include "video/gpu_present.h"
 #include "d3d11_backend.h"
@@ -246,10 +247,14 @@ static void report_validation_perf(const char *name,
 
 static void report_detailed_perf(void)
 {
+    static uint64_t previous_us;
     BruteForcePerfCounters counters;
     const BruteForceTexturePerfCounters *texture;
+    uint64_t report_us;
+    unsigned i;
 
     bruteforce_perf_counters_take(&counters);
+    report_us = xbox_HostNowNs() / 1000u;
     report_validation_perf("guest_word", &counters.guest_word);
     report_validation_perf("readable_guest_range", &counters.guest_range);
     texture = &counters.texture;
@@ -278,6 +283,33 @@ static void report_detailed_perf(void)
             (unsigned long long)texture->snapshot_evictions,
             (unsigned long long)texture->discards,
             (unsigned long long)texture->unsupported_hits);
+    fprintf(stderr, "[PERF-SHADER] kind=pixel-compile calls=%llu failures=%llu"
+                    " elapsed_ms=%.3f window_start_us=%llu window_end_us=%llu\n",
+            (unsigned long long)counters.pixel_shader_compile.calls,
+            (unsigned long long)counters.pixel_shader_compile.failures,
+            bruteforce_perf_ticks_ms(counters.pixel_shader_compile.ticks),
+            (unsigned long long)previous_us, (unsigned long long)report_us);
+    for (i = 0; i < BRUTEFORCE_PERF_MAX_CALLERS; ++i) {
+        const BruteForceSubmitPerfCounter *pfb = &counters.pfb[i];
+        const BruteForceSubmitPerfCounter *put = &counters.put[i];
+        if (pfb->calls)
+            fprintf(stderr, "[PERF-SUBMIT] kind=pfb site=%08X caller=%08X"
+                            " calls=%llu elapsed_ms=%.3f window_start_us=%llu window_end_us=%llu\n",
+                    pfb->site, pfb->caller, (unsigned long long)pfb->calls,
+                    bruteforce_perf_ticks_ms(pfb->ticks),
+                    (unsigned long long)previous_us, (unsigned long long)report_us);
+        if (put->calls)
+            fprintf(stderr, "[PERF-SUBMIT] kind=put site=%08X caller=%08X"
+                            " calls=%llu elapsed_ms=%.3f window_start_us=%llu window_end_us=%llu\n",
+                    put->site, put->caller, (unsigned long long)put->calls,
+                    bruteforce_perf_ticks_ms(put->ticks),
+                    (unsigned long long)previous_us, (unsigned long long)report_us);
+    }
+    if (counters.pfb_overflow || counters.put_overflow)
+        fprintf(stderr, "[PERF-SUBMIT] caller table overflow: pfb=%llu put=%llu\n",
+                (unsigned long long)counters.pfb_overflow,
+                (unsigned long long)counters.put_overflow);
+    previous_us = report_us;
 }
 
 static void stats_flip(void)
@@ -434,6 +466,8 @@ static ID3D11PixelShader *get_rc_shader(const GpuRcKey *k)
     ID3D11PixelShader *ps = NULL;
     HRESULT hr;
     double started;
+    uint64_t perf_started;
+    int perf = g_bruteforce_perf_counters_enabled;
     int i;
 
     for (i = 0; i < s_nps; i++)
@@ -462,17 +496,28 @@ static ID3D11PixelShader *get_rc_shader(const GpuRcKey *k)
     }
     if (!ps) {
         started = qpc_ms();
-        if (!compile(src, len, name, entry, target, &blob))
+        perf_started = perf ? bruteforce_perf_clock() : 0;
+        if (!compile(src, len, name, entry, target, &blob)) {
+            if (perf)
+                bruteforce_perf_record_pixel_shader_compile(
+                    0, bruteforce_perf_clock() - perf_started);
             return NULL;
+        }
         hr = ID3D11Device_CreatePixelShader(s_dev, ID3D10Blob_GetBufferPointer(blob),
                                             ID3D10Blob_GetBufferSize(blob), NULL, &ps);
         if (FAILED(hr) || !ps) {
+            if (perf)
+                bruteforce_perf_record_pixel_shader_compile(
+                    0, bruteforce_perf_clock() - perf_started);
             gpu_d3d11_check_device(s_dev, hr, "creating pixel shader");
             fprintf(stderr, "[GPU-D3D11] CreatePixelShader(rc) failed 0x%08lX\n",
                     (unsigned long)hr);
             ID3D10Blob_Release(blob);
             return NULL;
         }
+        if (perf)
+            bruteforce_perf_record_pixel_shader_compile(
+                1, bruteforce_perf_clock() - perf_started);
         s_st.ps_compiles++;
         if (gpu_pscache_enabled()) {
             fprintf(stderr, "[GPU-PSCACHE] compiled in %.3f ms\n", qpc_ms() - started);

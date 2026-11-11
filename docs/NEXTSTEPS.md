@@ -6,8 +6,8 @@ results are in [FINDINGS.md](FINDINGS.md), and framework work is
 tracked in [UPSTREAM.md](UPSTREAM.md). The current
 toolkit uses xboxrecomp v0.17.0 at
 `343b6d8901723b37ce568b2418c5df4e1fe1d223`, selected post-release commits
-from #314, #319 and #320, and 41 local patches. Its isolated and independently
-replayed tree is `153571c77e95ccb7e337d40aa03a5633233ccb44`.
+from #314, #319 and #320, and 42 local patches. Its isolated and independently
+replayed tree is `bfbf6d32c4f184332e1db90e975e0caf839a4b10`.
 
 Supported retail generation `20261111-002138-a9dbc18a` is a Release build on
 the earlier v0.17 tree `131abd8d1f4559bb36dba4391e4c644925cff5df`;
@@ -177,16 +177,18 @@ Direct3D 12 work remain deferred. See
   fixtures. Title captures were visually matched but not byte-identical or
   frame-locked, so strict output identity remains open and the cache stays
   opt-in.
-- Phase 4's first mechanism now exists behind
-  `RECOMP_PFB_FLUSH_WAIT=1`. Synthetic coverage and one corrected movement
-  smoke show that the real acknowledgement can drive the title through the
-  scripted route. The initial title wrapper omitted the generated `ret` stack
-  effect; a four-byte guest-stack correction and explicit enabled/disabled
-  fixture modes fixed it. The smoke did not include capture review or caller
-  profiling, so the next task is a six-leg poll/event alternating campaign,
-  not the idle-thread or segmented-walk mechanism. Do not satisfy the
-  acknowledgement early or weaken semaphore, report, flip, or CPU-reference
-  ordering. The shader-cache output gate remains independent.
+- Phase 4's three separately selectable mechanisms are now implemented and
+  synthetic-tested: `RECOMP_PFB_FLUSH_WAIT`, `RECOMP_NV2A_IDLE_WAIT`, and
+  `RECOMP_NV2A_SEGMENTS`. Patch 0045 bounds waits and queues; segmented mode
+  guards the USER mapping, consumes captured PUTs in order and fails closed
+  on untracked writes or resets. It needs a newly regenerated title. No new
+  title or xemu campaign was run for these changes. The next performance
+  work is four separate baseline/candidate A/B/A campaigns (flush, idle,
+  segment, and all three), at least three runs per variant, one generation,
+  scene, script, thread count and otherwise identical options. Review
+  distinct-world frames and complete caller profiles, then separately check
+  matched CPU-reference G4 and 2× stationary G5. Guard/reset failures are
+  evidence to investigate, not permission to bypass the handshake.
 - Both variants of the new movement campaign logged unsupported texture
   format `0x2E` (`LIN_D24S8`). Its effect on the visible image is not yet
   established; the CPU reference also lacks a decoder for that format.

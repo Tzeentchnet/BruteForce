@@ -10,6 +10,10 @@ int g_bruteforce_perf_counters_enabled;
 
 static int s_initialized;
 static uint64_t s_frequency;
+static SRWLOCK s_submit_lock = SRWLOCK_INIT;
+static BruteForceSubmitPerfCounter s_pfb[BRUTEFORCE_PERF_MAX_CALLERS];
+static BruteForceSubmitPerfCounter s_put[BRUTEFORCE_PERF_MAX_CALLERS];
+static uint64_t s_pfb_overflow, s_put_overflow;
 
 static struct {
     volatile LONG64 guest_word_calls;
@@ -46,6 +50,9 @@ static struct {
     volatile LONG64 texture_snapshot_evictions;
     volatile LONG64 texture_discards;
     volatile LONG64 texture_unsupported_hits;
+    volatile LONG64 pixel_shader_compiles;
+    volatile LONG64 pixel_shader_compile_failures;
+    volatile LONG64 pixel_shader_compile_ticks;
 } s_counters;
 
 static void add(volatile LONG64 *counter, uint64_t value)
@@ -83,7 +90,7 @@ int bruteforce_perf_counters_init(void)
     s_frequency = (uint64_t)frequency.QuadPart;
     g_bruteforce_perf_counters_enabled = 1;
     s_initialized = 1;
-    fprintf(stderr, "[PERF] Detailed validation and texture-cache counters enabled;"
+    fprintf(stderr, "[PERF] Detailed validation, texture-cache and shader counters enabled;"
                     " diagnostic timing adds overhead\n");
     return 1;
 }
@@ -103,6 +110,15 @@ double bruteforce_perf_ticks_ms(uint64_t ticks)
 void bruteforce_perf_counters_take(BruteForcePerfCounters *out)
 {
     memset(out, 0, sizeof *out);
+    AcquireSRWLockExclusive(&s_submit_lock);
+    memcpy(out->pfb, s_pfb, sizeof s_pfb);
+    memcpy(out->put, s_put, sizeof s_put);
+    out->pfb_overflow = s_pfb_overflow;
+    out->put_overflow = s_put_overflow;
+    memset(s_pfb, 0, sizeof s_pfb);
+    memset(s_put, 0, sizeof s_put);
+    s_pfb_overflow = s_put_overflow = 0;
+    ReleaseSRWLockExclusive(&s_submit_lock);
     out->guest_word.calls = take(&s_counters.guest_word_calls);
     out->guest_word.accepted = take(&s_counters.guest_word_accepted);
     out->guest_word.rejected = take(&s_counters.guest_word_rejected);
@@ -137,6 +153,38 @@ void bruteforce_perf_counters_take(BruteForcePerfCounters *out)
     out->texture.snapshot_evictions = take(&s_counters.texture_snapshot_evictions);
     out->texture.discards = take(&s_counters.texture_discards);
     out->texture.unsupported_hits = take(&s_counters.texture_unsupported_hits);
+    out->pixel_shader_compile.calls = take(&s_counters.pixel_shader_compiles);
+    out->pixel_shader_compile.failures = take(&s_counters.pixel_shader_compile_failures);
+    out->pixel_shader_compile.ticks = take(&s_counters.pixel_shader_compile_ticks);
+}
+
+void bruteforce_perf_record_pixel_shader_compile(int success, uint64_t ticks)
+{
+    add(&s_counters.pixel_shader_compiles, 1);
+    if (!success)
+        add(&s_counters.pixel_shader_compile_failures, 1);
+    add(&s_counters.pixel_shader_compile_ticks, ticks);
+}
+
+void bruteforce_perf_record_submit(int is_put, uint32_t site, uint32_t caller,
+                                   uint64_t ticks)
+{
+    BruteForceSubmitPerfCounter *slots = is_put ? s_put : s_pfb;
+    unsigned i;
+    AcquireSRWLockExclusive(&s_submit_lock);
+    for (i = 0; i < BRUTEFORCE_PERF_MAX_CALLERS; ++i) {
+        if (!slots[i].calls ||
+            (slots[i].site == site && slots[i].caller == caller)) {
+            slots[i].site = site;
+            slots[i].caller = caller;
+            slots[i].calls++;
+            slots[i].ticks += ticks;
+            break;
+        }
+    }
+    if (i == BRUTEFORCE_PERF_MAX_CALLERS)
+        ++*(is_put ? &s_put_overflow : &s_pfb_overflow);
+    ReleaseSRWLockExclusive(&s_submit_lock);
 }
 
 static void record_validation(volatile LONG64 *calls, volatile LONG64 *accepted_count,

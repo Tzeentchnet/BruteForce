@@ -34,12 +34,16 @@ static volatile LONG calls;
 static volatile LONG event_calls, acknowledged, completed, generated;
 static volatile LONG pfb_wait_calls;
 static volatile uint32_t pfb_register;
+static uint32_t published_put, published_caller;
+static int segments_enabled, publish_calls;
 static uint32_t connected_interrupt;
 static int acknowledge_result, pfb_wait_enabled;
 
 void sub_00371AB0_enter(void);
 void sub_0037834E_enter(void);
 void sub_00372180(void);
+void sub_00371FA0_store32(uint32_t address, uint32_t value);
+void sub_00372050_store32(uint32_t address, uint32_t value);
 void sub_00377F80(void);
 void recomp_icall_fail_log(uint32_t va);
 
@@ -108,6 +112,28 @@ void sub_0006EE30_gen(void) {}
 int xbox_Nv2aPfbFlushWaitEnabled(void)
 {
     return pfb_wait_enabled;
+}
+
+int xbox_Nv2aIdleWaitEnabled(void)
+{
+    return 0;
+}
+
+void xbox_Nv2aIdleWake(void)
+{
+    abort();
+}
+
+int xbox_Nv2aSegmentsEnabled(void)
+{
+    return segments_enabled;
+}
+
+void xbox_Nv2aPublishPut(uint32_t put, uint32_t caller)
+{
+    published_put = put;
+    published_caller = caller;
+    publish_calls++;
 }
 
 int xbox_Nv2aPfbFlushWait(void)
@@ -285,6 +311,8 @@ int main(int argc, char **argv)
             return 2;
         for (i = 0; i < THREADS; ++i)
             CloseHandle(threads[i]);
+        bruteforce_perf_record_pixel_shader_compile(1, 23);
+        bruteforce_perf_record_pixel_shader_compile(0, 7);
         bruteforce_perf_counters_take(&perf_counters);
         bruteforce_perf_counters_take(&reset_counters);
         if (perf_counters.guest_word.calls != expected_calls ||
@@ -295,6 +323,10 @@ int main(int argc, char **argv)
             perf_counters.guest_word.regions != expected_calls ||
             reset_counters.guest_word.calls != 0 ||
             reset_counters.guest_word.virtual_queries != 0 ||
+            perf_counters.pixel_shader_compile.calls != 2 ||
+            perf_counters.pixel_shader_compile.failures != 1 ||
+            perf_counters.pixel_shader_compile.ticks != 30 ||
+            reset_counters.pixel_shader_compile.calls != 0 ||
             calls != THREADS * ITERATIONS)
             return 1;
         printf("guest_word performance counters validated: %llu calls\n",
@@ -303,6 +335,46 @@ int main(int argc, char **argv)
     }
     if (strncmp(mode, "gamma-", 6) == 0)
         return gamma_test(mode);
+    if (strcmp(mode, "store-hook") == 0) {
+        if (_putenv_s("BRUTEFORCE_PERF_COUNTERS", "1") != 0 ||
+            !bruteforce_perf_counters_init())
+            return 2;
+        segments_enabled = 1;
+        g_esp = GUEST_RETURN;
+        put32(g_esp, 0x11111111u);
+        put32(g_esp + 4, 0x22222222u);
+        sub_00371FA0_store32(0x0037DD80u, 0x1234u);
+        sub_00371FA0_store32(0xFD800040u, 0x100u);
+        if (*(uint32_t *)(guest + 0x0037DD80u) != 0x1234u ||
+            publish_calls != 1 || published_put != 0x100u ||
+            published_caller != 0x22222222u)
+            return 1;
+        sub_00372050_store32(0xFD800040u, 0x200u);
+        bruteforce_perf_counters_take(&perf_counters);
+        return publish_calls != 2 || published_put != 0x200u ||
+               published_caller != 0x11111111u ||
+               perf_counters.put[0].site != 0x00371FA0u ||
+               perf_counters.put[0].caller != 0x22222222u ||
+               perf_counters.put[0].calls != 1 ||
+               perf_counters.put[1].site != 0x00372050u ||
+               perf_counters.put[1].caller != 0x11111111u ||
+               perf_counters.put[1].calls != 1;
+    }
+    if (strcmp(mode, "pfb-attribution") == 0) {
+        if (_putenv_s("BRUTEFORCE_PERF_COUNTERS", "1") != 0 ||
+            !bruteforce_perf_counters_init())
+            return 2;
+        pfb_wait_enabled = 1;
+        put32(MINIPORT, 0xFD000000u);
+        put32(GUEST_RETURN, 0x00371FBCu);
+        put32(GUEST_RETURN + 8, 0x12345678u);
+        g_esp = GUEST_RETURN;
+        sub_00372180();
+        bruteforce_perf_counters_take(&perf_counters);
+        return perf_counters.pfb[0].site != 0x00371FBCu ||
+               perf_counters.pfb[0].caller != 0x12345678u ||
+               perf_counters.pfb[0].calls != 1;
+    }
     if (strcmp(mode, "pfb-disabled") == 0 ||
         strcmp(mode, "pfb-enabled") == 0) {
         pfb_wait_enabled = strcmp(mode, "pfb-enabled") == 0;

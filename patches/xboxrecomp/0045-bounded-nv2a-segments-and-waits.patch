@@ -1,0 +1,1891 @@
+diff --git a/docs/pipeline/05-runtime.md b/docs/pipeline/05-runtime.md
+index cd7a9df..8a7a6ff 100644
+--- a/docs/pipeline/05-runtime.md
++++ b/docs/pipeline/05-runtime.md
+@@ -380,6 +380,14 @@ placed there silently never runs.
+ To change behaviour for every caller, replace. Clean up the stack the way the
+ original did (`g_esp += 12` for a `ret 8`).
+ 
++For narrowly scoped memory-mapped publication, a manual definition
++`void sub_XXXXXXXX_store32(uint32_t address, uint32_t value)` redirects
++ordinary 32-bit `MOV` stores in that generated function to the callback.
++The callback must perform ordinary stores itself and handle its selected
++registers. This does not intercept other store instructions or other
++functions; use an independent fail-closed guard if complete interception is
++required. Regenerate after adding or changing the hook.
++
+ ## Build System
+ 
+ The entire project is built with CMake:
+diff --git a/docs/runtime/environment-variables.md b/docs/runtime/environment-variables.md
+index 02a43b3..f7378e4 100644
+--- a/docs/runtime/environment-variables.md
++++ b/docs/runtime/environment-variables.md
+@@ -85,6 +85,9 @@ The executor is itself opt-in: set `RECOMP_PB_EXEC=1` to execute the pushbuffer.
+ | `RECOMP_PB_EXEC` | off | Executes the title's pushbuffer. | `nv2a_pb_scan.c`, `xbox_memory_layout.c` |
+ | `RECOMP_PB_SCAN` | off | Read-only survey of the pushbuffer; ranks what is not implemented. | `nv2a_pb_scan.c`, `xbox_memory_layout.c` |
+ | `RECOMP_PB_WALK=dma` | off | Walks the pushbuffer as the DMA engine does, which delivers D3D's software-method interrupt. | `nv2a_pb_scan.c` |
++| `RECOMP_PFB_FLUSH_WAIT=1` | off | Waits for the real PFB acknowledgement with an event and 200 µs IRQ backstop; aborts after 30 seconds without clearing the busy bit. A title must call the wait API at its actual flush site. | `nv2a_pfb_flush.c` |
++| `RECOMP_NV2A_IDLE_WAIT=1` | off | Waits independently when the NV2A worker is idle, with a retained wake event and 200 µs timer backstop. | `nv2a_idle_wait.c` |
++| `RECOMP_NV2A_SEGMENTS=1` | off | Windows-only guarded, bounded queue of producer-published PUTs. Requires `RECOMP_PB_EXEC`, `RECOMP_PB_WALK=staged`, `RECOMP_PGRAPH_IRQ=1`, and a title integration that intercepts real PUT stores. Unsupported writes, resets and queue timeouts abort rather than skipping work. | `nv2a_segments.c`, `nv2a_user_page.c` |
+ | `RECOMP_NV2A_TRACE` | off | Shows whether `DMA_PUT` moves at all. | `xbox_memory_layout.c` |
+ | `RECOMP_NV2A_WAIT_DIAG=1` | off | With `RECOMP_PFB_FLUSH_WAIT=1`, reports a still-busy flush after two seconds, at most eight times, including the last observed flip hold. It never completes the wait. | `nv2a_pfb_flush.c` |
+ | `RECOMP_PB_REPORT_MS=N` | 10000 | Milliseconds between `[GPU]` reports (minimum 100). | `xbox_memory_layout.c` |
+diff --git a/src/kernel/CMakeLists.txt b/src/kernel/CMakeLists.txt
+index 4f551e8..bb40d73 100644
+--- a/src/kernel/CMakeLists.txt
++++ b/src/kernel/CMakeLists.txt
+@@ -27,6 +27,9 @@ set(KERNEL_SOURCES
+     recomp_trace.c
+     recomp_diff.c
+     nv2a_pfb_flush.c
++    nv2a_idle_wait.c
++    nv2a_segments.c
++    nv2a_user_page.c
+     nv2a_pb_scan.c
+     nv2a_pb_exec.c
+     nv2a_flip_hold.c
+diff --git a/src/kernel/nv2a_idle_wait.c b/src/kernel/nv2a_idle_wait.c
+new file mode 100644
+index 0000000..4b7a981
+--- /dev/null
++++ b/src/kernel/nv2a_idle_wait.c
+@@ -0,0 +1,229 @@
++#include "nv2a_idle_wait.h"
++#include "platform/xbox_winnt.h"
++
++#include <stdio.h>
++#include <stdlib.h>
++#include <string.h>
++
++#if !defined(_WIN32)
++#include <errno.h>
++#include <pthread.h>
++#include <time.h>
++#endif
++
++#ifndef NV2A_IDLE_BACKSTOP_NS
++#define NV2A_IDLE_BACKSTOP_NS 200000u
++#endif
++#ifndef NV2A_IDLE_SPIN_PASSES
++#define NV2A_IDLE_SPIN_PASSES 64u
++#endif
++
++static volatile LONG s_enabled = -1;
++static unsigned s_spin_remaining;
++static unsigned long long s_waits, s_events, s_timers;
++static DWORD s_last_report;
++
++static int option(void)
++{
++    const char *value = getenv("RECOMP_NV2A_IDLE_WAIT");
++    if (!value || !*value || strcmp(value, "0") == 0)
++        return 0;
++    if (strcmp(value, "1") == 0)
++        return 1;
++    fprintf(stderr, "[NV2A-IDLE] RECOMP_NV2A_IDLE_WAIT must be 0 or 1\n");
++    fflush(stderr);
++    abort();
++}
++
++#if defined(_WIN32)
++#ifndef CREATE_WAITABLE_TIMER_HIGH_RESOLUTION
++#define CREATE_WAITABLE_TIMER_HIGH_RESOLUTION 0x00000002
++#endif
++static INIT_ONCE s_once = INIT_ONCE_STATIC_INIT;
++static HANDLE s_event, s_timer;
++
++static BOOL CALLBACK initialize(PINIT_ONCE once, PVOID parameter, PVOID *context)
++{
++    int enabled = option();
++    (void)once; (void)parameter; (void)context;
++    if (enabled) {
++        s_event = CreateEventW(NULL, FALSE, FALSE, NULL);
++        s_timer = CreateWaitableTimerExW(NULL, NULL,
++                                         CREATE_WAITABLE_TIMER_HIGH_RESOLUTION,
++                                         TIMER_ALL_ACCESS);
++        if (!s_event || !s_timer) {
++            fprintf(stderr, "[NV2A-IDLE] cannot create private wake/timer: %lu\n",
++                    (unsigned long)GetLastError());
++            fflush(stderr);
++            abort();
++        }
++        fprintf(stderr, "[NV2A-IDLE] independent idle wait enabled"
++                        " (%u ns backstop)\n", (unsigned)NV2A_IDLE_BACKSTOP_NS);
++    }
++    InterlockedExchange(&s_enabled, enabled);
++    return TRUE;
++}
++
++static void ensure_initialized(void)
++{
++    if (!InitOnceExecuteOnce(&s_once, initialize, NULL, NULL)) {
++        fprintf(stderr, "[NV2A-IDLE] initialization failed: %lu\n",
++                (unsigned long)GetLastError());
++        abort();
++    }
++}
++
++static void signal_wake(void)
++{
++    if (!SetEvent(s_event)) {
++        fprintf(stderr, "[NV2A-IDLE] wake failed: %lu\n",
++                (unsigned long)GetLastError());
++        abort();
++    }
++}
++
++static int wait_once(void)
++{
++    HANDLE handles[2] = { s_event, s_timer };
++    LARGE_INTEGER due;
++    DWORD result;
++    due.QuadPart = -(LONGLONG)(NV2A_IDLE_BACKSTOP_NS / 100u);
++    if (!SetWaitableTimer(s_timer, &due, 0, NULL, NULL, FALSE)) {
++        fprintf(stderr, "[NV2A-IDLE] timer arm failed: %lu\n",
++                (unsigned long)GetLastError());
++        abort();
++    }
++    result = WaitForMultipleObjects(2, handles, FALSE, 1000);
++    if (result == WAIT_OBJECT_0)
++        return 1;
++    if (result == WAIT_OBJECT_0 + 1)
++        return 0;
++    fprintf(stderr, "[NV2A-IDLE] wait failed or timer stalled:"
++                    " result=%lu error=%lu\n",
++            (unsigned long)result, (unsigned long)GetLastError());
++    fflush(stderr);
++    abort();
++}
++
++#else
++static pthread_once_t s_once = PTHREAD_ONCE_INIT;
++static pthread_mutex_t s_lock = PTHREAD_MUTEX_INITIALIZER;
++static pthread_cond_t s_cond;
++static int s_pending;
++
++static void initialize(void)
++{
++    int enabled = option();
++    if (enabled) {
++#if defined(__APPLE__)
++        if (pthread_cond_init(&s_cond, NULL) != 0)
++            abort();
++#else
++        pthread_condattr_t attr;
++        if (pthread_condattr_init(&attr) != 0 ||
++            pthread_condattr_setclock(&attr, CLOCK_MONOTONIC) != 0 ||
++            pthread_cond_init(&s_cond, &attr) != 0 ||
++            pthread_condattr_destroy(&attr) != 0)
++            abort();
++#endif
++        fprintf(stderr, "[NV2A-IDLE] independent idle wait enabled"
++                        " (%u ns backstop)\n", (unsigned)NV2A_IDLE_BACKSTOP_NS);
++    }
++    InterlockedExchange(&s_enabled, enabled);
++}
++
++static void ensure_initialized(void)
++{
++    if (pthread_once(&s_once, initialize) != 0) {
++        fprintf(stderr, "[NV2A-IDLE] initialization failed\n");
++        abort();
++    }
++}
++
++static void signal_wake(void)
++{
++    if (pthread_mutex_lock(&s_lock) != 0)
++        abort();
++    s_pending = 1;
++    if (pthread_cond_signal(&s_cond) != 0 || pthread_mutex_unlock(&s_lock) != 0)
++        abort();
++}
++
++static int wait_once(void)
++{
++    int result = 0, signalled;
++#if defined(__APPLE__)
++    struct timespec deadline = { NV2A_IDLE_BACKSTOP_NS / 1000000000u,
++                                 NV2A_IDLE_BACKSTOP_NS % 1000000000u };
++#else
++    struct timespec deadline;
++#endif
++    if (pthread_mutex_lock(&s_lock) != 0)
++        abort();
++    if (!s_pending) {
++#if defined(__APPLE__)
++        result = pthread_cond_timedwait_relative_np(&s_cond, &s_lock, &deadline);
++#else
++        if (clock_gettime(CLOCK_MONOTONIC, &deadline) != 0)
++            abort();
++        deadline.tv_sec += NV2A_IDLE_BACKSTOP_NS / 1000000000u;
++        deadline.tv_nsec += NV2A_IDLE_BACKSTOP_NS % 1000000000u;
++        if (deadline.tv_nsec >= 1000000000L) {
++            deadline.tv_sec++;
++            deadline.tv_nsec -= 1000000000L;
++        }
++        result = pthread_cond_timedwait(&s_cond, &s_lock, &deadline);
++#endif
++    }
++    signalled = s_pending;
++    s_pending = 0;
++    if (pthread_mutex_unlock(&s_lock) != 0)
++        abort();
++    if (result != 0 && result != ETIMEDOUT) {
++        fprintf(stderr, "[NV2A-IDLE] wait failed: %d\n", result);
++        abort();
++    }
++    return signalled;
++}
++#endif
++
++int nv2a_idle_wait_enabled(void)
++{
++    ensure_initialized();
++    return InterlockedCompareExchange(&s_enabled, 0, 0) == 1;
++}
++
++void nv2a_idle_wake(void)
++{
++    if (nv2a_idle_wait_enabled())
++        signal_wake();
++}
++
++void nv2a_idle_wait_after_pass(int did_work)
++{
++    DWORD now;
++    if (!nv2a_idle_wait_enabled()) {
++        Sleep(0);
++        return;
++    }
++    if (did_work)
++        s_spin_remaining = NV2A_IDLE_SPIN_PASSES;
++    if (s_spin_remaining) {
++        s_spin_remaining--;
++        Sleep(0);
++        return;
++    }
++    s_waits++;
++    if (wait_once())
++        s_events++;
++    else
++        s_timers++;
++    now = GetTickCount();
++    if (!s_last_report)
++        s_last_report = now ? now : 1;
++    else if ((DWORD)(now - s_last_report) >= 10000u) {
++        fprintf(stderr, "[NV2A-IDLE] waits=%llu events=%llu timers=%llu\n",
++                s_waits, s_events, s_timers);
++        s_last_report = now;
++    }
++}
+diff --git a/src/kernel/nv2a_idle_wait.h b/src/kernel/nv2a_idle_wait.h
+new file mode 100644
+index 0000000..3cb6bbc
+--- /dev/null
++++ b/src/kernel/nv2a_idle_wait.h
+@@ -0,0 +1,8 @@
++#ifndef NV2A_IDLE_WAIT_H
++#define NV2A_IDLE_WAIT_H
++
++int nv2a_idle_wait_enabled(void);
++void nv2a_idle_wake(void);
++void nv2a_idle_wait_after_pass(int did_work);
++
++#endif
+diff --git a/src/kernel/nv2a_pfb_flush.c b/src/kernel/nv2a_pfb_flush.c
+index e08453a..3660e12 100644
+--- a/src/kernel/nv2a_pfb_flush.c
++++ b/src/kernel/nv2a_pfb_flush.c
+@@ -16,6 +16,9 @@
+ #ifndef NV2A_PFB_DIAG_INTERVAL_MS
+ #define NV2A_PFB_DIAG_INTERVAL_MS 2000u
+ #endif
++#ifndef NV2A_PFB_WAIT_LIMIT_MS
++#define NV2A_PFB_WAIT_LIMIT_MS 30000u
++#endif
+ 
+ enum PfbWake {
+     PFB_WAKE_EVENT,
+@@ -137,7 +140,7 @@ static void ensure_initialized(void)
+     }
+ }
+ 
+-static enum PfbWake wait_once(void)
++static enum PfbWake pfb_flush_wait_once(void)
+ {
+     HANDLE handles[2];
+     LARGE_INTEGER due;
+@@ -166,14 +169,15 @@ static enum PfbWake wait_once(void)
+ 
+     handles[0] = s_ack_event;
+     handles[1] = s_backstop_timer;
+-    result = WaitForMultipleObjects(2, handles, FALSE, INFINITE);
++    result = WaitForMultipleObjects(2, handles, FALSE, 1000);
+     if (result == WAIT_OBJECT_0)
+         return PFB_WAKE_EVENT;
+     if (result == WAIT_OBJECT_0 + 1)
+         return PFB_WAKE_TIMER;
+ 
+-    fprintf(stderr, "[PFB-WAIT] acknowledgement wait failed: %lu\n",
+-            (unsigned long)GetLastError());
++    fprintf(stderr, "[PFB-WAIT] acknowledgement wait failed or timer stalled:"
++                    " result=%lu error=%lu\n",
++            (unsigned long)result, (unsigned long)GetLastError());
+     fflush(stderr);
+     abort();
+ }
+@@ -232,7 +236,7 @@ static void ensure_initialized(void)
+     }
+ }
+ 
+-static enum PfbWake wait_once(void)
++static enum PfbWake pfb_flush_wait_once(void)
+ {
+     uint64_t generation;
+     uint64_t current_generation;
+@@ -336,7 +340,7 @@ void nv2a_pfb_flush_wait(volatile uint32_t *reg,
+                          Nv2aPfbFlushSafePoint safe_point)
+ {
+     int diagnostic;
+-    DWORD started = 0, last = 0;
++    DWORD started, last;
+     if (!reg || !safe_point) {
+         fprintf(stderr, "[PFB-WAIT] flush register and safe point are required\n");
+         abort();
+@@ -348,10 +352,10 @@ void nv2a_pfb_flush_wait(volatile uint32_t *reg,
+ 
+     counter_increment(&s_waits);
+     diagnostic = InterlockedCompareExchange(&s_wait_diag, 0, 0) == 1;
+-    if (diagnostic)
+-        started = last = GetTickCount();
+-    while (*reg & NV2A_PFB_FLUSH_BUSY_MASK) {
+-        enum PfbWake wake = wait_once();
++    started = last = GetTickCount();
++    while ((uint32_t)InterlockedCompareExchange((volatile LONG *)reg, 0, 0)
++           & NV2A_PFB_FLUSH_BUSY_MASK) {
++        enum PfbWake wake = pfb_flush_wait_once();
+ 
+         if (wake == PFB_WAKE_EVENT)
+             counter_increment(&s_event_wakes);
+@@ -361,11 +365,22 @@ void nv2a_pfb_flush_wait(volatile uint32_t *reg,
+             counter_increment(&s_spurious_wakes);
+         safe_point();
+         counter_increment(&s_safe_points);
+-        if (*reg & NV2A_PFB_FLUSH_BUSY_MASK)
++        if ((uint32_t)InterlockedCompareExchange((volatile LONG *)reg, 0, 0)
++            & NV2A_PFB_FLUSH_BUSY_MASK)
+             counter_increment(&s_rechecks);
+-        if (diagnostic && (*reg & NV2A_PFB_FLUSH_BUSY_MASK)) {
++        if ((uint32_t)InterlockedCompareExchange((volatile LONG *)reg, 0, 0)
++            & NV2A_PFB_FLUSH_BUSY_MASK) {
+             DWORD now = GetTickCount();
+-            if ((DWORD)(now - last) >= NV2A_PFB_DIAG_INTERVAL_MS) {
++            if ((DWORD)(now - started) >= NV2A_PFB_WAIT_LIMIT_MS) {
++                fprintf(stderr, "[PFB-WAIT] acknowledgement timed out after %lu ms:"
++                                " register=%08X last_flip_hold=%ld; busy bit remains set\n",
++                        (unsigned long)(DWORD)(now - started),
++                        (unsigned)InterlockedCompareExchange((volatile LONG *)reg, 0, 0),
++                        (long)InterlockedCompareExchange(&s_last_flip_held, 0, 0));
++                fflush(stderr);
++                abort();
++            }
++            if (diagnostic && (DWORD)(now - last) >= NV2A_PFB_DIAG_INTERVAL_MS) {
+                 last = now;
+                 if (reserve_wait_diag_report()) {
+                     fprintf(stderr, "[NV2A-WAIT] PFB flush still busy after %lu ms:"
+diff --git a/src/kernel/nv2a_segments.c b/src/kernel/nv2a_segments.c
+new file mode 100644
+index 0000000..fd84f1b
+--- /dev/null
++++ b/src/kernel/nv2a_segments.c
+@@ -0,0 +1,290 @@
++#include "nv2a_segments.h"
++#include "nv2a_idle_wait.h"
++#include "platform/xbox_winnt.h"
++
++#include <stdio.h>
++#include <stdlib.h>
++#include <string.h>
++
++#ifndef NV2A_SEGMENT_QUEUE_CAPACITY
++#define NV2A_SEGMENT_QUEUE_CAPACITY 128u
++#endif
++#ifndef NV2A_SEGMENT_WAIT_MS
++#define NV2A_SEGMENT_WAIT_MS 5000u
++#endif
++#define NV2A_SEGMENT_RAM_BYTES (64u * 1024u * 1024u)
++#define NV2A_SEGMENT_CALLERS 32u
++
++typedef struct { uint32_t put, caller; } Segment;
++typedef struct { uint32_t caller; unsigned long long published, completed; } Caller;
++static INIT_ONCE s_once = INIT_ONCE_STATIC_INIT;
++static CRITICAL_SECTION s_lock;
++static HANDLE s_space;
++static int s_enabled, s_bound, s_first;
++static volatile uint32_t *s_put, *s_get;
++static uint32_t s_last_put, s_last_get;
++static Segment s_queue[NV2A_SEGMENT_QUEUE_CAPACITY];
++static unsigned s_head, s_count, s_high_water;
++static volatile LONG s_outstanding;
++static unsigned long long s_waits, s_published, s_completed;
++static Caller s_callers[NV2A_SEGMENT_CALLERS];
++static unsigned long long s_caller_overflow;
++static DWORD s_report_ms;
++
++static void fail(const char *reason)
++{
++    fprintf(stderr, "[NV2A-SEGMENT] %s\n", reason);
++    fflush(stderr);
++    abort();
++}
++
++static int valid_put(uint32_t put)
++{
++    return !(put & 3u) && put < NV2A_SEGMENT_RAM_BYTES;
++}
++
++static BOOL CALLBACK initialize(PINIT_ONCE once, PVOID parameter, PVOID *context)
++{
++    const char *value = getenv("RECOMP_NV2A_SEGMENTS");
++    (void)once; (void)parameter; (void)context;
++    if (!value || !*value || strcmp(value, "0") == 0)
++        return TRUE;
++    if (strcmp(value, "1") != 0)
++        fail("RECOMP_NV2A_SEGMENTS must be 0 or 1");
++    if (!getenv("RECOMP_PB_EXEC") || !getenv("RECOMP_PB_WALK") ||
++        strcmp(getenv("RECOMP_PB_WALK"), "staged") != 0 ||
++        !getenv("RECOMP_PGRAPH_IRQ") || strcmp(getenv("RECOMP_PGRAPH_IRQ"), "1") != 0)
++        fail("requires RECOMP_PB_EXEC, RECOMP_PB_WALK=staged and RECOMP_PGRAPH_IRQ=1");
++    InitializeCriticalSection(&s_lock);
++    s_space = CreateEventA(NULL, FALSE, FALSE, NULL);
++    if (!s_space)
++        fail("cannot create queue-space event");
++    s_enabled = 1;
++    fprintf(stderr, "[NV2A-SEGMENT] guarded per-PUT queue enabled"
++                    " (capacity %u, wait limit %u ms)\n",
++            (unsigned)NV2A_SEGMENT_QUEUE_CAPACITY, (unsigned)NV2A_SEGMENT_WAIT_MS);
++    return TRUE;
++}
++
++int nv2a_segments_enabled(void)
++{
++    if (!InitOnceExecuteOnce(&s_once, initialize, NULL, NULL))
++        fail("cannot initialize");
++    return s_enabled;
++}
++
++static void check_registers(void)
++{
++    if (!s_bound)
++        fail("USER registers are not bound or are shutting down");
++    if ((uint32_t)InterlockedCompareExchange((volatile LONG *)s_put, 0, 0) != s_last_put)
++        fail("untracked PUT write or reset");
++    if ((uint32_t)InterlockedCompareExchange((volatile LONG *)s_get, 0, 0) != s_last_get)
++        fail("untracked GET write or reset");
++}
++
++#if defined(_MSC_VER)
++__declspec(noinline)
++#elif defined(__GNUC__) || defined(__clang__)
++__attribute__((noinline))
++#endif
++static DWORD nv2a_segment_wait_once(HANDLE event)
++{
++    if (event) {
++        /* Retain this frame after the syscall for profiler attribution. */
++        volatile DWORD result = WaitForSingleObject(event, 1);
++        return result;
++    }
++    Sleep(1);
++    return WAIT_TIMEOUT;
++}
++
++static void lock_queue(Nv2aSegmentSafePoint safe_point, DWORD started)
++{
++    while (!TryEnterCriticalSection(&s_lock)) {
++        if ((DWORD)(GetTickCount() - started) >= NV2A_SEGMENT_WAIT_MS)
++            fail("queue lock wait timed out");
++        if (safe_point) safe_point();
++        nv2a_segment_wait_once(NULL);
++    }
++}
++
++static Caller *caller_slot(uint32_t caller)
++{
++    unsigned i;
++    if (!caller)
++        caller = 0xFFFFFFFFu;
++    for (i = 0; i < NV2A_SEGMENT_CALLERS; i++)
++        if (s_callers[i].caller == caller || !s_callers[i].caller) {
++            s_callers[i].caller = caller;
++            return &s_callers[i];
++        }
++    s_caller_overflow++;
++    return NULL;
++}
++
++static void report(void)
++{
++    DWORD now = GetTickCount();
++    unsigned i;
++    if (!s_report_ms) {
++        s_report_ms = now ? now : 1;
++        return;
++    }
++    if ((DWORD)(now - s_report_ms) < 10000u)
++        return;
++    s_report_ms = now;
++    fprintf(stderr, "[NV2A-SEGMENT] published=%llu completed=%llu pending=%u"
++                    " high_water=%u queue_waits=%llu caller_overflow=%llu\n",
++            s_published, s_completed, s_count, s_high_water, s_waits, s_caller_overflow);
++    for (i = 0; i < NV2A_SEGMENT_CALLERS; i++)
++        if (s_callers[i].caller)
++            fprintf(stderr, "[NV2A-SEGMENT-CALLER] caller=%08X published=%llu completed=%llu\n",
++                    s_callers[i].caller, s_callers[i].published, s_callers[i].completed);
++    fflush(stderr);
++}
++
++void nv2a_segments_bind(volatile uint32_t *put, volatile uint32_t *get)
++{
++    if (!nv2a_segments_enabled() || !put || !get)
++        fail("cannot bind disabled or missing USER registers");
++    lock_queue(NULL, GetTickCount());
++    if (s_bound || s_count)
++        fail("cannot bind an active queue");
++    s_put = put;
++    s_get = get;
++    s_last_put = *put;
++    s_last_get = *get;
++    if (!valid_put(s_last_put) || !valid_put(s_last_get))
++        fail("initial PUT or GET is outside aligned physical RAM");
++    s_first = 1;
++    s_bound = 1;
++    LeaveCriticalSection(&s_lock);
++}
++
++void nv2a_segments_publish(uint32_t put, uint32_t caller, Nv2aSegmentSafePoint safe_point)
++{
++    DWORD started = GetTickCount();
++    int counted_wait = 0;
++    if (!nv2a_segments_enabled() || !safe_point)
++        fail("publication requires the enabled queue and a safe point");
++    if (!valid_put(put))
++        fail("PUT is outside aligned physical RAM");
++    for (;;) {
++        Caller *counter;
++        lock_queue(safe_point, started);
++        check_registers();
++        if (s_count < NV2A_SEGMENT_QUEUE_CAPACITY) {
++            unsigned tail = (s_head + s_count) % NV2A_SEGMENT_QUEUE_CAPACITY;
++            InterlockedExchange((volatile LONG *)s_put, (LONG)put);
++            s_last_put = put;
++            s_queue[tail].put = put;
++            s_queue[tail].caller = caller;
++            s_count++;
++            InterlockedIncrement(&s_outstanding);
++            if (s_count > s_high_water) s_high_water = s_count;
++            s_published++;
++            counter = caller_slot(caller);
++            if (counter) counter->published++;
++            report();
++            LeaveCriticalSection(&s_lock);
++            nv2a_idle_wake();
++            return;
++        }
++        if (!counted_wait) {
++            s_waits++;
++            counted_wait = 1;
++        }
++        LeaveCriticalSection(&s_lock);
++        if ((DWORD)(GetTickCount() - started) >= NV2A_SEGMENT_WAIT_MS)
++            fail("queue-space wait timed out without publishing PUT");
++        safe_point();
++        {
++            DWORD result = nv2a_segment_wait_once(s_space);
++            if (result != WAIT_OBJECT_0 && result != WAIT_TIMEOUT)
++                fail("queue-space wait failed");
++        }
++    }
++}
++
++int nv2a_segments_peek(uint32_t *from, uint32_t *put, uint32_t *caller, int *first)
++{
++    int present;
++    if (!nv2a_segments_enabled() || !from || !put || !caller || !first)
++        fail("invalid queue peek");
++    lock_queue(NULL, GetTickCount());
++    check_registers();
++    present = s_count != 0;
++    if (present) {
++        *from = s_last_get;
++        *put = s_queue[s_head].put;
++        *caller = s_queue[s_head].caller;
++        *first = s_first;
++    }
++    LeaveCriticalSection(&s_lock);
++    return present;
++}
++
++void nv2a_segments_complete(uint32_t put)
++{
++    Caller *counter;
++    lock_queue(NULL, GetTickCount());
++    check_registers();
++    if (!s_count || s_queue[s_head].put != put)
++        fail("segment completion does not match the queue head");
++    counter = caller_slot(s_queue[s_head].caller);
++    if (counter) counter->completed++;
++    InterlockedExchange((volatile LONG *)s_get, (LONG)put);
++    s_last_get = put;
++    s_head = (s_head + 1) % NV2A_SEGMENT_QUEUE_CAPACITY;
++    s_count--;
++    InterlockedDecrement(&s_outstanding);
++    s_first = 0;
++    s_completed++;
++    report();
++    LeaveCriticalSection(&s_lock);
++    if (!SetEvent(s_space))
++        fail("cannot signal queue space");
++}
++
++int nv2a_segments_pending(void)
++{
++    return s_enabled && InterlockedCompareExchange(&s_outstanding, 0, 0) != 0;
++}
++
++int nv2a_segments_service(int flip_held, void (*resync)(uint32_t),
++                          void (*walk)(uint32_t))
++{
++    uint32_t from, put, caller;
++    int first;
++    if (flip_held || !nv2a_segments_pending())
++        return 0;
++    if (!resync || !walk)
++        fail("missing segment walker");
++    if (!nv2a_segments_peek(&from, &put, &caller, &first))
++        return 0;
++    (void)caller;
++    if (first)
++        resync(from);
++    if (put != from)
++        walk(put);
++    nv2a_segments_complete(put);
++    return 1;
++}
++
++void nv2a_segments_shutdown(void)
++{
++    if (!nv2a_segments_enabled())
++        return;
++    lock_queue(NULL, GetTickCount());
++    if (s_count)
++        fprintf(stderr, "[NV2A-SEGMENT] shutdown with %u unconsumed segments;"
++                        " GET was not advanced\n", s_count);
++    s_bound = 0;
++    s_count = 0;
++    s_head = 0;
++    InterlockedExchange(&s_outstanding, 0);
++    LeaveCriticalSection(&s_lock);
++    if (!SetEvent(s_space))
++        fail("cannot wake a producer during shutdown");
++}
+diff --git a/src/kernel/nv2a_segments.h b/src/kernel/nv2a_segments.h
+new file mode 100644
+index 0000000..f4254f5
+--- /dev/null
++++ b/src/kernel/nv2a_segments.h
+@@ -0,0 +1,18 @@
++#ifndef NV2A_SEGMENTS_H
++#define NV2A_SEGMENTS_H
++
++#include <stdint.h>
++
++typedef void (*Nv2aSegmentSafePoint)(void);
++
++int nv2a_segments_enabled(void);
++void nv2a_segments_bind(volatile uint32_t *put, volatile uint32_t *get);
++void nv2a_segments_publish(uint32_t put, uint32_t caller, Nv2aSegmentSafePoint safe_point);
++int nv2a_segments_peek(uint32_t *from, uint32_t *put, uint32_t *caller, int *first);
++void nv2a_segments_complete(uint32_t put);
++int nv2a_segments_pending(void);
++int nv2a_segments_service(int flip_held, void (*resync)(uint32_t),
++                          void (*walk)(uint32_t));
++void nv2a_segments_shutdown(void);
++
++#endif
+diff --git a/src/kernel/nv2a_user_page.c b/src/kernel/nv2a_user_page.c
+new file mode 100644
+index 0000000..f1744fc
+--- /dev/null
++++ b/src/kernel/nv2a_user_page.c
+@@ -0,0 +1,81 @@
++#include "nv2a_user_page.h"
++
++#include <stdint.h>
++#include <stdio.h>
++#include <stdlib.h>
++#include <string.h>
++
++#if defined(_WIN32)
++static Nv2aUserPage *s_page;
++
++static LONG CALLBACK untracked_user_write(PEXCEPTION_POINTERS ep)
++{
++    uintptr_t at, base;
++    if (!s_page || ep->ExceptionRecord->ExceptionCode != EXCEPTION_ACCESS_VIOLATION ||
++        ep->ExceptionRecord->NumberParameters < 2 ||
++        ep->ExceptionRecord->ExceptionInformation[0] != 1)
++        return EXCEPTION_CONTINUE_SEARCH;
++    at = (uintptr_t)ep->ExceptionRecord->ExceptionInformation[1];
++    base = (uintptr_t)s_page->guest;
++    if (at < base || at - base >= NV2A_USER_PAGE_BYTES)
++        return EXCEPTION_CONTINUE_SEARCH;
++    fprintf(stderr, "[NV2A-SEGMENT] untracked guest USER write at offset 0x%04llX;"
++                    " refusing to lose a publication or reset\n",
++            (unsigned long long)(at - base));
++    fflush(stderr);
++    abort();
++    return EXCEPTION_CONTINUE_SEARCH;
++}
++
++int nv2a_user_page_create(Nv2aUserPage *page, void *address, Nv2aUserMapReadOnly map)
++{
++    MEMORY_BASIC_INFORMATION info;
++    if (!page || !map || s_page)
++        return 0;
++    memset(page, 0, sizeof *page);
++    page->mapping = CreateFileMappingW(INVALID_HANDLE_VALUE, NULL, PAGE_READWRITE,
++                                       0, NV2A_USER_PAGE_BYTES, NULL);
++    if (!page->mapping)
++        goto failed;
++    page->host = MapViewOfFile(page->mapping, FILE_MAP_READ | FILE_MAP_WRITE,
++                               0, 0, NV2A_USER_PAGE_BYTES);
++    if (!page->host)
++        goto failed;
++    page->guest = map(page->mapping, NV2A_USER_PAGE_BYTES, address);
++    if (!page->guest || (address && page->guest != address))
++        goto failed;
++    if (VirtualQuery(page->guest, &info, sizeof info) != sizeof info ||
++        info.State != MEM_COMMIT || (info.Protect & 0xFFu) != PAGE_READONLY)
++        goto failed;
++    s_page = page;
++    page->handler = AddVectoredExceptionHandler(1, untracked_user_write);
++    if (!page->handler)
++        goto failed;
++    return 1;
++failed:
++    fprintf(stderr, "[NV2A-SEGMENT] cannot establish read-only USER guard:"
++                    " error=%lu\n", (unsigned long)GetLastError());
++    fflush(stderr);
++    nv2a_user_page_destroy(page);
++    return 0;
++}
++
++void nv2a_user_page_destroy(Nv2aUserPage *page)
++{
++    if (!page) return;
++    if (page->handler) RemoveVectoredExceptionHandler(page->handler);
++    if (s_page == page) s_page = NULL;
++    if (page->guest) UnmapViewOfFile(page->guest);
++    if (page->host) UnmapViewOfFile(page->host);
++    if (page->mapping) CloseHandle(page->mapping);
++    memset(page, 0, sizeof *page);
++}
++#else
++int nv2a_user_page_create(Nv2aUserPage *page, void *address, Nv2aUserMapReadOnly map)
++{
++    (void)page; (void)address; (void)map;
++    fprintf(stderr, "[NV2A-SEGMENT] guarded USER mapping is not supported on this host\n");
++    return 0;
++}
++void nv2a_user_page_destroy(Nv2aUserPage *page) { (void)page; }
++#endif
+diff --git a/src/kernel/nv2a_user_page.h b/src/kernel/nv2a_user_page.h
+new file mode 100644
+index 0000000..cfc4945
+--- /dev/null
++++ b/src/kernel/nv2a_user_page.h
+@@ -0,0 +1,21 @@
++#ifndef NV2A_USER_PAGE_H
++#define NV2A_USER_PAGE_H
++
++#include "platform/xbox_winnt.h"
++#include <stddef.h>
++
++#define NV2A_USER_PAGE_OFFSET 0x800000u
++#define NV2A_USER_PAGE_BYTES  0x10000u
++
++typedef void *(*Nv2aUserMapReadOnly)(HANDLE mapping, size_t size, void *address);
++typedef struct {
++    HANDLE mapping;
++    void *guest;
++    void *host;
++    void *handler;
++} Nv2aUserPage;
++
++int nv2a_user_page_create(Nv2aUserPage *page, void *address, Nv2aUserMapReadOnly map);
++void nv2a_user_page_destroy(Nv2aUserPage *page);
++
++#endif
+diff --git a/src/kernel/xbox_memory_layout.c b/src/kernel/xbox_memory_layout.c
+index 246148c..afb4413 100644
+--- a/src/kernel/xbox_memory_layout.c
++++ b/src/kernel/xbox_memory_layout.c
+@@ -21,6 +21,9 @@
+ #include "kernel_missing.h"
+ #include "nv2a_flip_hold.h"
+ #include "nv2a_pfb_flush.h"
++#include "nv2a_idle_wait.h"
++#include "nv2a_segments.h"
++#include "nv2a_user_page.h"
+ #include <stdio.h>
+ #include <stdlib.h>
+ #include <string.h>
+@@ -30,6 +33,10 @@
+ #endif
+ 
+ extern int nv2a_pb_staged_walk(void);
++extern int nv2a_pb_exec_flip_poll(void);
++extern void nv2a_pb_exec_poll(void);
++extern void nv2a_pb_resync(uint32_t);
++extern void nv2a_pb_scan_report(void);
+ extern void nv2a_pb_scan_staged(uint32_t);
+ extern void nv2a_pb_scan_wrapped(uint32_t, uint32_t, uint32_t, uint32_t);
+ 
+@@ -153,6 +160,8 @@ static void *g_contig_memory = NULL;
+ #define XBOX_NV2A_BASE 0xFD000000u
+ #define XBOX_NV2A_SIZE (16u * 1024u * 1024u)
+ static void *g_nv2a_memory = NULL;
++static void *g_nv2a_suffix = NULL;
++static Nv2aUserPage g_nv2a_user_page;
+ 
+ /* MCPX southbridge register span: APU 0xFE800000 through NIC 0xFEF00000. */
+ #define XBOX_MCPX_BASE 0xFE800000u
+@@ -327,6 +336,19 @@ static void *layout_map_view(HANDLE mapping, size_t size, void *addr)
+     return MapViewOfFileEx(mapping, FILE_MAP_ALL_ACCESS, 0, 0, size, addr);
+ }
+ 
++#if defined(_WIN32)
++static void *layout_map_readonly(HANDLE mapping, size_t size, void *addr)
++{
++    if (win_in_window((uintptr_t)addr, size)) {
++        win_split_placeholder((uintptr_t)addr, size);
++        return s_MapViewOfFile3(mapping, GetCurrentProcess(), addr, 0, size,
++                                MEM_REPLACE_PLACEHOLDER, PAGE_READONLY, NULL, 0);
++    }
++    span_release_for(addr, size);
++    return MapViewOfFileEx(mapping, FILE_MAP_READ, 0, 0, size, addr);
++}
++#endif
++
+ /* Commit zeroed read-write memory at a fixed host address. Same split as
+  * layout_map_view. Replace the placeholder with a reservation, then commit it.
+  * Two steps, because MEM_COMMIT together with MEM_REPLACE_PLACEHOLDER is not
+@@ -1442,18 +1464,19 @@ static void framebuffer_probe_tick(void)
+  * and a level load, thousands of kickoffs long, looked frozen. Clearing them
+  * from inside the walk answers the kickoff within a few hundred commands,
+  * without a thread of its own spinning on a host core. */
+-static void nv2a_ack_busy_bits(int flip_held)
++static int nv2a_ack_busy_bits(int flip_held)
+ {
+     volatile uint32_t *regs = (volatile uint32_t *)g_nv2a_memory;
++    int did_work = 0;
+ 
+     if (!regs)
+-        return;
++        return 0;
+     for (size_t i = 0; i < sizeof(NV2A_ACK) / sizeof(NV2A_ACK[0]); i++) {
+         volatile uint32_t *r =
+             (volatile uint32_t *)((char *)regs + NV2A_ACK[i].offset);
+         uint32_t mask = NV2A_ACK[i].busy_mask;
+         if (NV2A_ACK[i].offset == NV2A_ACK_PFB_FLUSH) {
+-            nv2a_pfb_flush_ack(r, flip_held);
++            did_work |= nv2a_pfb_flush_ack(r, flip_held);
+             continue;
+         }
+         /* Once the vblank is delivered its two bits belong to the
+@@ -1476,14 +1499,17 @@ static void nv2a_ack_busy_bits(int flip_held)
+         }
+         /* Interlocked: the vblank-ack thread and the guest change other
+          * bits of the same word meanwhile. */
+-        if (*r & mask)
+-            InterlockedAnd((volatile LONG *)r, (LONG)~mask);
++        if (*r & mask) {
++            LONG old = InterlockedAnd((volatile LONG *)r, (LONG)~mask);
++            did_work |= ((uint32_t)old & mask) != 0;
++        }
+     }
++    return did_work;
+ }
+ 
+ void xbox_Nv2aAckBusyBits(void)
+ {
+-    nv2a_ack_busy_bits(0);
++    nv2a_ack_busy_bits(nv2a_pb_exec_flip_poll() || nv2a_segments_pending());
+ }
+ 
+ int xbox_Nv2aPfbFlushWait(void)
+@@ -1506,6 +1532,26 @@ int xbox_Nv2aPfbFlushWaitEnabled(void)
+     return nv2a_pfb_flush_wait_enabled();
+ }
+ 
++int xbox_Nv2aIdleWaitEnabled(void)
++{
++    return nv2a_idle_wait_enabled();
++}
++
++void xbox_Nv2aIdleWake(void)
++{
++    nv2a_idle_wake();
++}
++
++int xbox_Nv2aSegmentsEnabled(void)
++{
++    return nv2a_segments_enabled();
++}
++
++void xbox_Nv2aPublishPut(uint32_t put, uint32_t caller)
++{
++    nv2a_segments_publish(put, caller, xbox_IrqSafePoint);
++}
++
+ /* One word of the NV2A register file (offset from the register base), or NULL
+  * before it is mapped. The pushbuffer executor writes what the GPU would when
+  * it executes a command: PGRAPH state a title reads back, and DMA_GET. */
+@@ -1513,12 +1559,17 @@ volatile uint32_t *xbox_Nv2aRegPtr(uint32_t offset)
+ {
+     if (!g_nv2a_memory || offset + 4 > XBOX_NV2A_SIZE)
+         return NULL;
++    if (g_nv2a_user_page.host && offset >= NV2A_USER_PAGE_OFFSET &&
++        offset <= NV2A_USER_PAGE_OFFSET + NV2A_USER_PAGE_BYTES - 4u)
++        return (volatile uint32_t *)((char *)g_nv2a_user_page.host +
++                                     offset - NV2A_USER_PAGE_OFFSET);
+     return (volatile uint32_t *)((char *)g_nv2a_memory + offset);
+ }
+ 
+ static DWORD WINAPI nv2a_ack_thread(LPVOID param)
+ {
+     volatile uint32_t *regs = (volatile uint32_t *)param;
++    int segmented = nv2a_segments_enabled();
+     while (!InterlockedCompareExchange(&g_nv2a_ack_stop, 0, 0)) {
+         /* A flip held for its vblank (nv2a_flip_hold.h): this pass walks
+          * nothing, leaves DMA_GET where it is and acknowledges no PFB flush,
+@@ -1531,13 +1582,13 @@ static DWORD WINAPI nv2a_ack_thread(LPVOID param)
+          * D3D present kicks off right after its stall, so the stall ends
+          * its segment and the two are the same; a segment carrying two
+          * flips paces only the last. */
+-        extern int nv2a_pb_exec_flip_poll(void);
+-        extern void nv2a_pb_exec_poll(void);
+         int flip_held = nv2a_pb_exec_flip_poll();
++        int did_work;
+         /* A back end's asynchronous work (nv2a_backend_ext.h, poll): pending
+          * visibility reports complete here even while nothing is walked. */
+         nv2a_pb_exec_poll();
+-        nv2a_ack_busy_bits(flip_held);
++        did_work = nv2a_ack_busy_bits(flip_held ||
++                                      (segmented && nv2a_segments_pending()));
+         for (size_t i = 0; i < sizeof(NV2A_IDLE) / sizeof(NV2A_IDLE[0]); i++) {
+             volatile uint32_t *r =
+                 (volatile uint32_t *)((char *)regs + NV2A_IDLE[i].offset);
+@@ -1577,7 +1628,25 @@ static DWORD WINAPI nv2a_ack_thread(LPVOID param)
+          * RECOMP_PB_EXEC asked for it. Gating the call as well meant
+          * RECOMP_PB_EXEC on its own did nothing at all, and the executor
+          * only ran when someone happened to also be tracing. */
+-        {
++        if (segmented) {
++            if (nv2a_segments_service(flip_held, nv2a_pb_resync,
++                                      nv2a_pb_scan_staged))
++                did_work = 1;
++            if (s_nv2a_trace) {
++                static DWORD last_report;
++                static long report_ms = -1;
++                DWORD now = GetTickCount();
++                if (report_ms < 0) {
++                    const char *e = getenv("RECOMP_PB_REPORT_MS");
++                    report_ms = e ? atol(e) : 10000;
++                    if (report_ms < 100) report_ms = 100;
++                }
++                if (now - last_report > (DWORD)report_ms) {
++                    last_report = now;
++                    nv2a_pb_scan_report();
++                }
++            }
++        } else {
+             /* Is the title submitting GPU work at all? PUT is where the
+              * title's pushbuffer writer has got to; if it never moves, nothing
+              * is being drawn and the missing piece is upstream of the GPU. */
+@@ -1588,10 +1657,11 @@ static DWORD WINAPI nv2a_ack_thread(LPVOID param)
+             uint32_t put = *(volatile uint32_t *)((char *)regs + NV2A_USER_DMA_PUT);
+             if (!flip_held
+                     && (put != last_put || (now_ms - last_put_ms) > 2000)) {
++                if (put != last_put)
++                    did_work = 1;
+                 /* Survey the segment the title just submitted, once. */
+                 {
+                     extern void nv2a_pb_scan(uint32_t);
+-                    extern void nv2a_pb_scan_report(void);
+                     static DWORD last_report;
+ 
+                     /* DMA_PUT holds a PHYSICAL address -- Xbox D3D writes
+@@ -1608,7 +1678,6 @@ static DWORD WINAPI nv2a_ack_thread(LPVOID param)
+                      * The contiguous window IS the physical-address view, so
+                      * OR-ing its base is the documented round trip, not a
+                      * guess. */
+-                    extern void nv2a_pb_resync(uint32_t);
+                     extern int  nv2a_pb_dma_walk(void);
+                     extern uint32_t nv2a_pb_scan_segment(uint32_t, uint32_t);
+ 
+@@ -1748,7 +1817,7 @@ static DWORD WINAPI nv2a_ack_thread(LPVOID param)
+         *(volatile uint32_t *)((uintptr_t)(XBOX_KERNEL_DATA_BASE + KDATA_TICK_COUNT)
+                                + g_memory_offset) = GetTickCount();
+ 
+-        Sleep(0);  /* yield; the waiter is spinning on another core */
++        nv2a_idle_wait_after_pass(did_work);
+     }
+     return 0;
+ }
+@@ -1763,6 +1832,12 @@ static void xbox_Nv2aAckStart(void)
+     if (g_nv2a_ack_thread) {
+         fprintf(stderr, "  NV2A busy-bit ack: %zu register(s) acknowledged\n",
+                 sizeof(NV2A_ACK) / sizeof(NV2A_ACK[0]));
++    } else {
++        fprintf(stderr, "[NV2A] cannot start acknowledgement worker: %lu\n",
++                (unsigned long)GetLastError());
++        if (nv2a_segments_enabled() || nv2a_idle_wait_enabled() ||
++            nv2a_pfb_flush_wait_enabled())
++            abort();
+     }
+ }
+ 
+@@ -3327,7 +3402,29 @@ BOOL xbox_MemoryLayoutInit(const void *xbe_data, size_t xbe_size)
+      */
+     {
+         uintptr_t nv2a_native = XBOX_NV2A_BASE + g_memory_offset;
+-        g_nv2a_memory = layout_commit_at((LPVOID)nv2a_native, XBOX_NV2A_SIZE);
++        if (nv2a_segments_enabled()) {
++#if defined(_WIN32)
++            g_nv2a_memory = layout_commit_at((LPVOID)nv2a_native,
++                                              NV2A_USER_PAGE_OFFSET);
++            g_nv2a_suffix = layout_commit_at(
++                (LPVOID)(nv2a_native + NV2A_USER_PAGE_OFFSET + NV2A_USER_PAGE_BYTES),
++                XBOX_NV2A_SIZE - NV2A_USER_PAGE_OFFSET - NV2A_USER_PAGE_BYTES);
++            if (!g_nv2a_memory || !g_nv2a_suffix ||
++                !nv2a_user_page_create(&g_nv2a_user_page,
++                    (void *)(nv2a_native + NV2A_USER_PAGE_OFFSET), layout_map_readonly)) {
++                fprintf(stderr, "[NV2A-SEGMENT] cannot guard the USER aperture\n");
++                abort();
++            }
++            nv2a_segments_bind(
++                (volatile uint32_t *)((char *)g_nv2a_user_page.host + 0x40),
++                (volatile uint32_t *)((char *)g_nv2a_user_page.host + 0x44));
++#else
++            fprintf(stderr, "[NV2A-SEGMENT] guarded USER mapping requires Windows\n");
++            abort();
++#endif
++        } else {
++            g_nv2a_memory = layout_commit_at((LPVOID)nv2a_native, XBOX_NV2A_SIZE);
++        }
+         /* The pushbuffer survey rides on the same poll, so either
+          * variable arms it. */
+         s_nv2a_trace_kicks = getenv("RECOMP_NV2A_TRACE") != NULL;
+@@ -3757,20 +3854,35 @@ void xbox_ProtectMirrorsForDebug(void)
+ void xbox_MemoryLayoutShutdown(void)
+ {
+     advance_layout_generation();
+-    if (g_kernel_memory) {
+-        VirtualFree(g_kernel_memory, 0, MEM_RELEASE);
+-        g_kernel_memory = NULL;
+-    }
+     if (g_nv2a_ack_thread) {
++        DWORD wait;
+         InterlockedExchange(&g_nv2a_ack_stop, 1);
+-        WaitForSingleObject(g_nv2a_ack_thread, 1000);
++        nv2a_idle_wake();
++        wait = WaitForSingleObject(g_nv2a_ack_thread, 1000);
++        if (wait != WAIT_OBJECT_0) {
++            fprintf(stderr, "[NV2A-IDLE] ack thread did not stop:"
++                            " result=%lu error=%lu\n",
++                    (unsigned long)wait, (unsigned long)GetLastError());
++            fflush(stderr);
++            abort();
++        }
+         CloseHandle(g_nv2a_ack_thread);
+         g_nv2a_ack_thread = NULL;
+     }
++    nv2a_segments_shutdown();
++    nv2a_user_page_destroy(&g_nv2a_user_page);
++    if (g_kernel_memory) {
++        VirtualFree(g_kernel_memory, 0, MEM_RELEASE);
++        g_kernel_memory = NULL;
++    }
+     if (g_nv2a_memory) {
+         VirtualFree(g_nv2a_memory, 0, MEM_RELEASE);
+         g_nv2a_memory = NULL;
+     }
++    if (g_nv2a_suffix) {
++        VirtualFree(g_nv2a_suffix, 0, MEM_RELEASE);
++        g_nv2a_suffix = NULL;
++    }
+     /* Unmap mirror views first */
+     for (int m = 0; m < XBOX_NUM_MIRRORS; m++) {
+         if (g_mirror_views[m]) {
+diff --git a/src/kernel/xbox_memory_layout.h b/src/kernel/xbox_memory_layout.h
+index 83622b9..a834320 100644
+--- a/src/kernel/xbox_memory_layout.h
++++ b/src/kernel/xbox_memory_layout.h
+@@ -187,6 +187,10 @@ volatile uint32_t *xbox_Nv2aRegPtr(uint32_t offset);
+  * title-specific hook can retain its original polling loop. */
+ int xbox_Nv2aPfbFlushWait(void);
+ int xbox_Nv2aPfbFlushWaitEnabled(void);
++int xbox_Nv2aIdleWaitEnabled(void);
++void xbox_Nv2aIdleWake(void);
++int xbox_Nv2aSegmentsEnabled(void);
++void xbox_Nv2aPublishPut(uint32_t put, uint32_t caller);
+ /* Registered counters the title turned out to move itself (its vblank DPC),
+  * which the toolkit has stopped bumping; for the [GPU] report. */
+ uint32_t xbox_Nv2aFrameCountersOwned(void);
+diff --git a/tests/nv2a_idle_wait/CMakeLists.txt b/tests/nv2a_idle_wait/CMakeLists.txt
+new file mode 100644
+index 0000000..5a0a767
+--- /dev/null
++++ b/tests/nv2a_idle_wait/CMakeLists.txt
+@@ -0,0 +1,16 @@
++cmake_minimum_required(VERSION 3.20)
++project(nv2a_idle_wait_test C)
++set(CMAKE_C_STANDARD 11)
++add_subdirectory(../../src/platform platform)
++add_executable(nv2a_idle_wait_test
++    test_main.c
++    ../../src/kernel/nv2a_idle_wait.c
++    ../../src/kernel/nv2a_pfb_flush.c)
++target_include_directories(nv2a_idle_wait_test PRIVATE ../../src ../../src/kernel)
++target_compile_definitions(nv2a_idle_wait_test PRIVATE
++    NV2A_IDLE_BACKSTOP_NS=20000000u NV2A_IDLE_SPIN_PASSES=2u)
++target_link_libraries(nv2a_idle_wait_test PRIVATE platform)
++enable_testing()
++foreach(mode IN ITEMS disabled pending idle-only flush-only combined shutdown)
++    add_test(NAME nv2a_idle_${mode} COMMAND nv2a_idle_wait_test ${mode})
++endforeach()
+diff --git a/tests/nv2a_idle_wait/test_main.c b/tests/nv2a_idle_wait/test_main.c
+new file mode 100644
+index 0000000..c9e615a
+--- /dev/null
++++ b/tests/nv2a_idle_wait/test_main.c
+@@ -0,0 +1,156 @@
++#include "nv2a_idle_wait.h"
++#include "nv2a_pfb_flush.h"
++#include "platform/xbox_winnt.h"
++
++#include <stdio.h>
++#include <stdlib.h>
++#include <string.h>
++
++static volatile LONG s_stop, s_passes, s_held, s_completed, s_safe_points;
++static volatile uint32_t s_flush;
++static int s_failures;
++
++static void check(int ok, const char *what)
++{
++    printf("  %-55s %s\n", what, ok ? "PASS" : "FAIL");
++    if (!ok) s_failures++;
++}
++
++static void set_option(const char *name, const char *value)
++{
++#if defined(_WIN32)
++    if (_putenv_s(name, value) != 0) abort();
++#else
++    if (setenv(name, value, 1) != 0) abort();
++#endif
++}
++
++static void safe_point(void)
++{
++    InterlockedIncrement(&s_safe_points);
++}
++
++static DWORD WINAPI worker(LPVOID unused)
++{
++    (void)unused;
++    while (!InterlockedCompareExchange(&s_stop, 0, 0)) {
++        int held = InterlockedCompareExchange(&s_held, 0, 0) != 0;
++        int work = nv2a_pfb_flush_ack(&s_flush, held);
++        InterlockedIncrement(&s_passes);
++        nv2a_idle_wait_after_pass(work);
++    }
++    return 0;
++}
++
++static DWORD WINAPI waiter(LPVOID unused)
++{
++    (void)unused;
++    nv2a_pfb_flush_wait(&s_flush, safe_point);
++    InterlockedExchange(&s_completed, 1);
++    return 0;
++}
++
++static void wait_for_pass(void)
++{
++    DWORD started = GetTickCount();
++    while (!InterlockedCompareExchange(&s_passes, 0, 0)) {
++        if ((DWORD)(GetTickCount() - started) > 1000) abort();
++        Sleep(1);
++    }
++}
++
++static void integration(int idle, int flush_wait)
++{
++    HANDLE thread, waiting = NULL;
++    DWORD started;
++    LONG initial_passes;
++    set_option("RECOMP_NV2A_IDLE_WAIT", idle ? "1" : "0");
++    set_option("RECOMP_PFB_FLUSH_WAIT", flush_wait ? "1" : "0");
++    check(nv2a_idle_wait_enabled() == idle, "idle option is independent");
++    check(nv2a_pfb_flush_wait_enabled() == flush_wait, "flush option is independent");
++    InterlockedExchange(&s_held, 1);
++    thread = CreateThread(NULL, 0, worker, NULL, 0, NULL);
++    if (!thread) abort();
++    wait_for_pass();
++    initial_passes = s_passes;
++    InterlockedOr((volatile LONG *)&s_flush, NV2A_PFB_FLUSH_BUSY_MASK);
++    if (flush_wait) {
++        waiting = CreateThread(NULL, 0, waiter, NULL, 0, NULL);
++        if (!waiting) abort();
++    }
++    Sleep(65);
++    check((s_flush & NV2A_PFB_FLUSH_BUSY_MASK) != 0 && !s_completed,
++          "a held flip never acknowledges the real flush");
++    check(s_passes > initial_passes, "idle backstop continues servicing loop duties");
++    InterlockedExchange(&s_held, 0);
++    /* No wake: idle-only must progress using its own timer, even when the
++     * producer's pre-store signal races the guest's busy-bit write. */
++    started = GetTickCount();
++    while ((s_flush & NV2A_PFB_FLUSH_BUSY_MASK) &&
++           (DWORD)(GetTickCount() - started) < 1000)
++        Sleep(1);
++    check(!(s_flush & NV2A_PFB_FLUSH_BUSY_MASK), "real acknowledgement follows release");
++    if (waiting) {
++        check(WaitForSingleObject(waiting, 1000) == WAIT_OBJECT_0 && s_completed,
++              "event waiter observes the actual acknowledgement");
++        check(s_safe_points > 0, "event waiter services IRQ safe points");
++        CloseHandle(waiting);
++    }
++    InterlockedExchange(&s_stop, 1);
++    nv2a_idle_wake();
++    check(WaitForSingleObject(thread, 1000) == WAIT_OBJECT_0,
++          "wake and join stop the idle worker");
++    CloseHandle(thread);
++}
++
++static void test_pending(void)
++{
++    DWORD started;
++    set_option("RECOMP_NV2A_IDLE_WAIT", "1");
++    check(nv2a_idle_wait_enabled(), "idle wait enabled");
++    nv2a_idle_wake();
++    started = GetTickCount();
++    nv2a_idle_wait_after_pass(0);
++    check((DWORD)(GetTickCount() - started) < 15,
++          "a wake before blocking remains pending");
++    started = GetTickCount();
++    nv2a_idle_wait_after_pass(0);
++    check((DWORD)(GetTickCount() - started) >= 10,
++          "the independent timer supplies a finite backstop");
++}
++
++static void test_shutdown(void)
++{
++    HANDLE thread;
++    set_option("RECOMP_NV2A_IDLE_WAIT", "1");
++    thread = CreateThread(NULL, 0, worker, NULL, 0, NULL);
++    if (!thread) abort();
++    wait_for_pass();
++    InterlockedExchange(&s_stop, 1);
++    nv2a_idle_wake();
++    check(WaitForSingleObject(thread, 1000) == WAIT_OBJECT_0,
++          "shutdown wakes and joins a waiting worker");
++    CloseHandle(thread);
++}
++
++int main(int argc, char **argv)
++{
++    const char *mode = argc > 1 ? argv[1] : "";
++    if (strcmp(mode, "disabled") == 0) {
++        set_option("RECOMP_NV2A_IDLE_WAIT", "0");
++        check(!nv2a_idle_wait_enabled(), "idle wait is off by default");
++        nv2a_idle_wait_after_pass(0);
++    } else if (strcmp(mode, "pending") == 0)
++        test_pending();
++    else if (strcmp(mode, "idle-only") == 0)
++        integration(1, 0);
++    else if (strcmp(mode, "flush-only") == 0)
++        integration(0, 1);
++    else if (strcmp(mode, "combined") == 0)
++        integration(1, 1);
++    else if (strcmp(mode, "shutdown") == 0)
++        test_shutdown();
++    else
++        return 2;
++    return s_failures ? 1 : 0;
++}
+diff --git a/tests/nv2a_pfb_flush/CMakeLists.txt b/tests/nv2a_pfb_flush/CMakeLists.txt
+index 3fdc4aa..3ddd7f9 100644
+--- a/tests/nv2a_pfb_flush/CMakeLists.txt
++++ b/tests/nv2a_pfb_flush/CMakeLists.txt
+@@ -13,7 +13,8 @@ add_executable(nv2a_pfb_flush_diag_test
+     test_main.c
+     ../../src/kernel/nv2a_pfb_flush.c)
+ target_include_directories(nv2a_pfb_flush_diag_test PRIVATE ../../src ../../src/kernel)
+-target_compile_definitions(nv2a_pfb_flush_diag_test PRIVATE NV2A_PFB_DIAG_INTERVAL_MS=1)
++target_compile_definitions(nv2a_pfb_flush_diag_test PRIVATE
++    NV2A_PFB_DIAG_INTERVAL_MS=1 NV2A_PFB_WAIT_LIMIT_MS=50)
+ target_link_libraries(nv2a_pfb_flush_diag_test PRIVATE platform)
+ enable_testing()
+ foreach(mode IN ITEMS disabled normal spurious timeout reuse)
+@@ -23,3 +24,6 @@ endforeach()
+ add_test(NAME nv2a_pfb_flush_diagnostics
+     COMMAND ${CMAKE_COMMAND} -DTEST_EXEC=$<TARGET_FILE:nv2a_pfb_flush_diag_test>
+             -P ${CMAKE_CURRENT_SOURCE_DIR}/check_diag.cmake)
++add_test(NAME nv2a_pfb_flush_deadline
++    COMMAND ${CMAKE_COMMAND} -DTEST_EXEC=$<TARGET_FILE:nv2a_pfb_flush_diag_test>
++            -P ${CMAKE_CURRENT_SOURCE_DIR}/check_deadline.cmake)
+diff --git a/tests/nv2a_pfb_flush/check_deadline.cmake b/tests/nv2a_pfb_flush/check_deadline.cmake
+new file mode 100644
+index 0000000..0e05d83
+--- /dev/null
++++ b/tests/nv2a_pfb_flush/check_deadline.cmake
+@@ -0,0 +1,8 @@
++execute_process(COMMAND "${TEST_EXEC}" deadline
++    RESULT_VARIABLE result OUTPUT_VARIABLE out ERROR_VARIABLE err TIMEOUT 5)
++if(NOT "${result}" STREQUAL "42")
++    message(FATAL_ERROR "timeout did not retain the busy bit: ${result}\n${out}\n${err}")
++endif()
++if(NOT err MATCHES "acknowledgement timed out")
++    message(FATAL_ERROR "timeout was not reported: ${err}")
++endif()
+diff --git a/tests/nv2a_pfb_flush/test_main.c b/tests/nv2a_pfb_flush/test_main.c
+index a0a604f..a4b0105 100644
+--- a/tests/nv2a_pfb_flush/test_main.c
++++ b/tests/nv2a_pfb_flush/test_main.c
+@@ -4,6 +4,7 @@
+ #include <stdio.h>
+ #include <stdlib.h>
+ #include <string.h>
++#include <signal.h>
+ 
+ static volatile uint32_t s_reg;
+ static volatile LONG s_started;
+@@ -134,6 +135,12 @@ static void test_reuse(void)
+     }
+ }
+ 
++static void deadline_abort(int sig)
++{
++    (void)sig;
++    _Exit((s_reg & NV2A_PFB_FLUSH_BUSY_MASK) && s_safe_points ? 42 : 43);
++}
++
+ int main(int argc, char **argv)
+ {
+     const char *mode = argc > 1 ? argv[1] : "";
+@@ -159,6 +166,12 @@ int main(int argc, char **argv)
+             test_timeout();
+         else if (strcmp(mode, "reuse") == 0)
+             test_reuse();
++        else if (strcmp(mode, "deadline") == 0) {
++            signal(SIGABRT, deadline_abort);
++            s_reg = NV2A_PFB_FLUSH_BUSY_MASK;
++            nv2a_pfb_flush_wait(&s_reg, safe_point);
++            return 44;
++        }
+         else {
+             fprintf(stderr, "unknown mode: %s\n", mode);
+             return 2;
+diff --git a/tests/nv2a_segments/CMakeLists.txt b/tests/nv2a_segments/CMakeLists.txt
+new file mode 100644
+index 0000000..c61e411
+--- /dev/null
++++ b/tests/nv2a_segments/CMakeLists.txt
+@@ -0,0 +1,24 @@
++cmake_minimum_required(VERSION 3.20)
++project(nv2a_segments_fixture C)
++enable_testing()
++if(NOT WIN32)
++    message(FATAL_ERROR "The guarded USER mapping fixture requires Windows")
++endif()
++add_executable(nv2a_segments_fixture
++    test_main.c
++    ../../src/kernel/nv2a_segments.c
++    ../../src/kernel/nv2a_user_page.c
++    ../../src/kernel/nv2a_idle_wait.c
++    ../../src/kernel/nv2a_pfb_flush.c
++    ../../src/kernel/nv2a_pb_scan.c)
++target_include_directories(nv2a_segments_fixture PRIVATE ../../src ../../src/kernel)
++target_compile_definitions(nv2a_segments_fixture PRIVATE
++    _CRT_SECURE_NO_WARNINGS NV2A_SEGMENT_QUEUE_CAPACITY=2 NV2A_SEGMENT_WAIT_MS=100)
++foreach(mode flow bootstrap guard backpressure ordering)
++    add_test(NAME ${mode} COMMAND nv2a_segments_fixture ${mode})
++endforeach()
++foreach(mode timeout invalid reset guard-store)
++    add_test(NAME ${mode} COMMAND ${CMAKE_COMMAND}
++        -DPROGRAM=$<TARGET_FILE:nv2a_segments_fixture> -DMODE=${mode}
++        -P ${CMAKE_CURRENT_SOURCE_DIR}/check_error.cmake)
++endforeach()
+diff --git a/tests/nv2a_segments/check_error.cmake b/tests/nv2a_segments/check_error.cmake
+new file mode 100644
+index 0000000..de4d5bf
+--- /dev/null
++++ b/tests/nv2a_segments/check_error.cmake
+@@ -0,0 +1,17 @@
++execute_process(COMMAND "${PROGRAM}" "${MODE}" RESULT_VARIABLE result
++                OUTPUT_VARIABLE output ERROR_VARIABLE error TIMEOUT 5)
++if(result STREQUAL "0" OR result MATCHES "timeout")
++    message(FATAL_ERROR "${MODE} did not fail promptly: ${result}\n${output}\n${error}")
++endif()
++if(MODE STREQUAL "timeout")
++    set(expected "queue-space wait timed out")
++elseif(MODE STREQUAL "invalid")
++    set(expected "PUT is outside aligned physical RAM")
++elseif(MODE STREQUAL "reset")
++    set(expected "untracked GET write or reset")
++else()
++    set(expected "untracked guest USER write")
++endif()
++if(NOT error MATCHES "${expected}")
++    message(FATAL_ERROR "${MODE} did not report ${expected}: ${result}\n${error}")
++endif()
+diff --git a/tests/nv2a_segments/test_main.c b/tests/nv2a_segments/test_main.c
+new file mode 100644
+index 0000000..8f22df2
+--- /dev/null
++++ b/tests/nv2a_segments/test_main.c
+@@ -0,0 +1,211 @@
++#include <windows.h>
++#include <stdint.h>
++#include <stddef.h>
++#include <stdio.h>
++#include <stdlib.h>
++#include <string.h>
++
++#include "nv2a_segments.h"
++#include "nv2a_pfb_flush.h"
++#include "nv2a_user_page.h"
++
++#define REQUIRE(c, message) do { if (!(c)) { \
++    fprintf(stderr, "FAIL: %s\n", message); return 1; } } while (0)
++
++static Nv2aUserPage page;
++static volatile uint32_t *put_reg, *get_reg;
++static uint8_t *ram;
++static volatile LONG safe_points;
++static uint32_t dma_subroutine;
++static unsigned seen_count;
++static uint32_t seen[16];
++static int flip_held;
++
++void nv2a_pb_resync(uint32_t);
++void nv2a_pb_scan_staged(uint32_t);
++ptrdiff_t xbox_GetMemoryOffset(void) { return (ptrdiff_t)ram - 0x80000000u; }
++volatile uint32_t *xbox_Nv2aRegPtr(uint32_t offset)
++{
++    if (offset == 0x00324Cu) return &dma_subroutine;
++    if (offset == 0x800044u) return get_reg;
++    return NULL;
++}
++void nv2a_pb_exec_report(void) {}
++void nv2a_pb_exec_walk_begin(void) {}
++void xbox_Nv2aAckBusyBits(void) {}
++int nv2a_pb_exec_constant_word(uint32_t method, uint32_t value)
++{ (void)method; (void)value; return 0; }
++void nv2a_pb_exec_method(uint32_t subchannel, uint32_t method, uint32_t value)
++{
++    (void)subchannel; (void)method;
++    if (!nv2a_segments_pending() || seen_count >= 16)
++        abort();
++    seen[seen_count++] = value;
++    if (value == 4) flip_held = 1;
++}
++static void safe_point(void) { InterlockedIncrement(&safe_points); }
++static void *map_readonly(HANDLE mapping, size_t size, void *address)
++{
++    (void)address;
++    return MapViewOfFile(mapping, FILE_MAP_READ, 0, 0, size);
++}
++static void word(uint32_t offset, uint32_t value)
++{ memcpy(ram + offset, &value, sizeof value); }
++static DWORD WINAPI producer(void *ignored)
++{
++    (void)ignored;
++    nv2a_segments_publish(0x100, 3, safe_point);
++    return 0;
++}
++
++int main(int argc, char **argv)
++{
++    const char *mode = argc == 2 ? argv[1] : "";
++    HANDLE thread;
++    DWORD started;
++    volatile uint32_t flush = NV2A_PFB_FLUSH_BUSY_MASK;
++    SetErrorMode(SEM_NOGPFAULTERRORBOX | SEM_FAILCRITICALERRORS);
++#if defined(_MSC_VER)
++    _set_abort_behavior(0, _WRITE_ABORT_MSG | _CALL_REPORTFAULT);
++#endif
++    _putenv_s("RECOMP_NV2A_SEGMENTS", "1");
++    _putenv_s("RECOMP_PB_EXEC", "1");
++    _putenv_s("RECOMP_PB_WALK", "staged");
++    _putenv_s("RECOMP_PGRAPH_IRQ", "1");
++    REQUIRE(nv2a_user_page_create(&page, NULL, map_readonly), "create guarded alias");
++    put_reg = (volatile uint32_t *)((char *)page.host + 0x40);
++    get_reg = (volatile uint32_t *)((char *)page.host + 0x44);
++    *put_reg = *get_reg = strcmp(mode, "bootstrap") == 0 ? 0 : 0x100;
++    REQUIRE(*(volatile uint32_t *)((char *)page.guest + 0x40) == *put_reg,
++            "guest view sees writable alias");
++    if (strcmp(mode, "guard-store") == 0) {
++        *(volatile uint32_t *)((char *)page.guest + 0x40) = 0x104;
++        return 2;
++    }
++    nv2a_segments_bind(put_reg, get_reg);
++    if (strcmp(mode, "guard") == 0) {
++        nv2a_segments_shutdown();
++        nv2a_user_page_destroy(&page);
++        return 0;
++    }
++    if (strcmp(mode, "invalid") == 0) {
++        nv2a_segments_publish(0x04000000u, 1, safe_point);
++        return 2;
++    }
++    if (strcmp(mode, "reset") == 0) {
++        *get_reg = 0x104;
++        nv2a_segments_publish(0x108, 1, safe_point);
++        return 2;
++    }
++    if (strcmp(mode, "timeout") == 0 || strcmp(mode, "backpressure") == 0) {
++        nv2a_segments_publish(0x100, 1, safe_point);
++        nv2a_segments_publish(0x100, 2, safe_point);
++        if (strcmp(mode, "timeout") == 0) {
++            nv2a_segments_publish(0x100, 3, safe_point);
++            return 2;
++        }
++        thread = CreateThread(NULL, 0, producer, NULL, 0, NULL);
++        REQUIRE(thread != NULL, "start blocked producer");
++        started = GetTickCount();
++        while (!safe_points && (DWORD)(GetTickCount() - started) < 70)
++            Sleep(1);
++        REQUIRE(safe_points, "full queue executes producer IRQ safe points");
++        REQUIRE(nv2a_segments_service(0, nv2a_pb_resync, nv2a_pb_scan_staged),
++                "consume to release queue space");
++        REQUIRE(WaitForSingleObject(thread, 1000) == WAIT_OBJECT_0,
++                "producer wakes after space becomes available");
++        CloseHandle(thread);
++        REQUIRE(nv2a_segments_service(0, nv2a_pb_resync, nv2a_pb_scan_staged) &&
++                nv2a_segments_service(0, nv2a_pb_resync, nv2a_pb_scan_staged) &&
++                !nv2a_segments_pending(), "all publications are consumed in order");
++        nv2a_segments_shutdown();
++        nv2a_user_page_destroy(&page);
++        return 0;
++    }
++    if (strcmp(mode, "bootstrap") == 0) {
++        ram = VirtualAlloc(NULL, 64u * 1024u * 1024u,
++                           MEM_RESERVE | MEM_COMMIT, PAGE_READWRITE);
++        REQUIRE(ram != NULL, "allocate bootstrap RAM");
++        word(0, 0x101u);
++        word(0x100, (1u << 18) | 0x0100u);
++        word(0x104, 7);
++        nv2a_segments_publish(0x108, 1, safe_point);
++        REQUIRE(*get_reg == 0 && nv2a_segments_service(0, nv2a_pb_resync, nv2a_pb_scan_staged) &&
++                *get_reg == 0x108 && seen_count == 1 && seen[0] == 7,
++                "first publication follows the real bootstrap JUMP before advancing GET");
++        nv2a_segments_shutdown();
++        nv2a_user_page_destroy(&page);
++        VirtualFree(ram, 0, MEM_RELEASE);
++        return 0;
++    }
++    if (strcmp(mode, "ordering") == 0) {
++        ram = VirtualAlloc(NULL, 64u * 1024u * 1024u,
++                           MEM_RESERVE | MEM_COMMIT, PAGE_READWRITE);
++        REQUIRE(ram != NULL, "allocate ordering RAM");
++        word(0x100, (4u << 18) | 0x0100u);
++        word(0x104, 1); word(0x108, 2); word(0x10C, 3); word(0x110, 4);
++        word(0x114, (1u << 18) | 0x0300u); word(0x118, 5);
++        nv2a_segments_publish(0x114, 1, safe_point);
++        nv2a_segments_publish(0x11C, 2, safe_point);
++        REQUIRE(!nv2a_pfb_flush_ack(&flush, flip_held || nv2a_segments_pending()) &&
++                flush == NV2A_PFB_FLUSH_BUSY_MASK, "queued work keeps PFB busy");
++        REQUIRE(nv2a_segments_service(0, nv2a_pb_resync, nv2a_pb_scan_staged) &&
++                seen_count == 4 && seen[0] == 1 && seen[1] == 2 &&
++                seen[2] == 3 && seen[3] == 4 && *get_reg == 0x114,
++                "semaphore, report, trap and flip markers precede first GET");
++        REQUIRE(!nv2a_pfb_flush_ack(&flush, flip_held || nv2a_segments_pending()) &&
++                !nv2a_segments_service(flip_held, nv2a_pb_resync, nv2a_pb_scan_staged) &&
++                flush == NV2A_PFB_FLUSH_BUSY_MASK && *get_reg == 0x114,
++                "held flip preserves PFB busy and blocks next segment");
++        flip_held = 0;
++        REQUIRE(!nv2a_pfb_flush_ack(&flush, flip_held || nv2a_segments_pending()) &&
++                nv2a_segments_service(0, nv2a_pb_resync, nv2a_pb_scan_staged) &&
++                seen_count == 5 && seen[4] == 5 && *get_reg == 0x11C,
++                "remaining segment completes before acknowledgement");
++        REQUIRE(nv2a_pfb_flush_ack(&flush, flip_held || nv2a_segments_pending()) &&
++                flush == 0, "real acknowledgement follows GET and queue drain");
++        nv2a_segments_shutdown();
++        nv2a_user_page_destroy(&page);
++        VirtualFree(ram, 0, MEM_RELEASE);
++        return 0;
++    }
++    REQUIRE(strcmp(mode, "flow") == 0, "known test mode");
++    ram = VirtualAlloc(NULL, 64u * 1024u * 1024u,
++                       MEM_RESERVE | MEM_COMMIT, PAGE_READWRITE);
++    REQUIRE(ram != NULL, "allocate synthetic physical RAM");
++    word(0x100, (4u << 18) | 0x0100u);
++    word(0x104, 1); word(0x108, 2); word(0x10C, 3); word(0x110, 4);
++    word(0x114, (1u << 18) | 0x0300u); word(0x118, 5);
++    nv2a_segments_publish(0x10C, 1, safe_point);
++    nv2a_segments_publish(0x114, 2, safe_point);
++    REQUIRE(*get_reg == 0x100, "GET is not published by producer");
++    REQUIRE(nv2a_segments_service(0, nv2a_pb_resync, nv2a_pb_scan_staged),
++            "service first partial packet");
++    REQUIRE(*get_reg == 0x10C && seen_count == 2 && seen[0] == 1 && seen[1] == 2,
++            "first segment carries semaphore then report before GET");
++    nv2a_segments_publish(0x11C, 3, safe_point);
++    REQUIRE(nv2a_segments_service(0, nv2a_pb_resync, nv2a_pb_scan_staged),
++            "service remaining partial packet");
++    REQUIRE(*get_reg == 0x114 && seen_count == 4 && seen[2] == 3 && seen[3] == 4,
++            "trap then flip precede completion");
++    REQUIRE(!nv2a_segments_service(flip_held, nv2a_pb_resync, nv2a_pb_scan_staged) &&
++            *get_reg == 0x114 && seen_count == 4,
++            "held flip blocks the next segment without advancing GET");
++    flip_held = 0;
++    REQUIRE(nv2a_segments_service(flip_held, nv2a_pb_resync, nv2a_pb_scan_staged) &&
++            *get_reg == 0x11C && seen_count == 5 && seen[4] == 5,
++            "next segment follows the released flip");
++    word(0x11C, 0x181u);
++    word(0x180, 0x202u);
++    word(0x184, (1u << 18) | 0x0304u); word(0x188, 7);
++    word(0x200, (1u << 18) | 0x0308u); word(0x204, 6);
++    word(0x208, 0x00020000u);
++    nv2a_segments_publish(0x18C, 4, safe_point);
++    REQUIRE(nv2a_segments_service(0, nv2a_pb_resync, nv2a_pb_scan_staged) &&
++            *get_reg == 0x18C && seen_count == 7 && seen[5] == 6 && seen[6] == 7,
++            "queued segment follows JUMP and CALL/RETURN in order");
++    nv2a_segments_shutdown();
++    nv2a_user_page_destroy(&page);
++    VirtualFree(ram, 0, MEM_RELEASE);
++    return 0;
++}
+diff --git a/tools/recomp/__main__.py b/tools/recomp/__main__.py
+index 62df65c..16a63e7 100644
+--- a/tools/recomp/__main__.py
++++ b/tools/recomp/__main__.py
+@@ -108,10 +108,11 @@ def _load_manual_protection(manual_functions, exclude_manual):
+     protected = _load_addrs(manual_functions)
+     scan_result = None
+     if exclude_manual:
+-        from .manual_scan import scan as _scan_manual, entry_hooks
++        from .manual_scan import scan as _scan_manual, entry_hooks, store32_hooks
+         scan_result = _scan_manual(exclude_manual)
+         protected.update(set().union(*scan_result))
+         protected.update(entry_hooks(exclude_manual))
++        protected.update(store32_hooks(exclude_manual))
+     return protected, scan_result
+ 
+ 
+@@ -294,9 +295,11 @@ def main():
+ 
+     # Reset on every CLI invocation, including one with no manual file.
+     from . import translator as translator_module
+-    from .manual_scan import entry_hooks
++    from .manual_scan import entry_hooks, store32_hooks
+     translator_module.ENTRY_HOOKS = (entry_hooks(args.exclude_manual)
+                                     if args.exclude_manual else set())
++    translator_module.STORE32_HOOKS = (store32_hooks(args.exclude_manual)
++                                      if args.exclude_manual else set())
+ 
+     # Boundary repair is destructive: an interior function start disappears
+     # once it is coalesced into its owner. Load hand-written entry points before
+diff --git a/tools/recomp/lifter.py b/tools/recomp/lifter.py
+index 01c7d77..5947a5c 100644
+--- a/tools/recomp/lifter.py
++++ b/tools/recomp/lifter.py
+@@ -1458,6 +1458,7 @@ class Lifter:
+         self._fp_top = 0  # FPU stack top index
+         self.func_start = 0  # Set per-function by translator
+         self.func_end = 0
++        self.store32_hook = None
+         self.needs_cf = False  # Set per-function by translator (has adc/sbb)
+         # Set per-function by translator: the call, ret and jump addresses
+         # where the flags must be in g_eflags, and the calls whose returned
+@@ -2033,6 +2034,11 @@ class Lifter:
+         if nops := len(ops) < 2:
+             return [f"/* mov: bad operands */"]
+         src = _fmt_operand_read(ops[1])
++        if (self.store32_hook and ops[0].type == "mem"
++                and ops[0].mem_size == 4 and not ops[0].mem_seg
++                and ops[1].type in ("reg", "imm")):
++            return [f"{self.store32_hook}((uint32_t)({_fmt_mem(ops[0])}), "
++                    f"(uint32_t)({src}));"]
+         out = [_fmt_operand_write(ops[0], src)]
+         # `mov ebp, esp` establishes this function's frame. Publish it, because
+         # ebp is a per-function local and a callee with no prologue of its own
+diff --git a/tools/recomp/manual_scan.py b/tools/recomp/manual_scan.py
+index b74a7c7..43c59d4 100644
+--- a/tools/recomp/manual_scan.py
++++ b/tools/recomp/manual_scan.py
+@@ -60,6 +60,9 @@ _REF_RE = re.compile(r"\bsub_([0-9A-Fa-f]{8})\b")
+ # code stays generated: the way to trace, or hold, a function that is called
+ # directly without writing its body out by hand.
+ _ENTER_RE = re.compile(r"^void sub_([0-9A-Fa-f]{8})_enter\(void\)\s*(?:\{|$)", re.M)
++_STORE32_RE = re.compile(
++    r"^void sub_([0-9A-Fa-f]{8})_store32\s*\("
++    r"\s*uint32_t\s+\w+\s*,\s*uint32_t\s+\w+\s*\)\s*(?:\{|$)", re.M)
+ 
+ 
+ def entry_hooks(path):
+@@ -69,6 +72,13 @@ def entry_hooks(path):
+     live = strip_disabled(open(path, encoding="utf-8", errors="replace").read())
+     return {int(m.group(1), 16) for m in _ENTER_RE.finditer(live)}
+ 
++def store32_hooks(path):
++    """Functions whose ordinary 32-bit MOV stores are handled by a callback."""
++    if not os.path.exists(path):
++        return set()
++    live = strip_disabled(open(path, encoding="utf-8", errors="replace").read())
++    return {int(m.group(1), 16) for m in _STORE32_RE.finditer(live)}
++
+ 
+ def scan(path):
+     """(skip, wrap, referenced) for functions the manual file handles.
+diff --git a/tools/recomp/test_store32_hooks.py b/tools/recomp/test_store32_hooks.py
+new file mode 100644
+index 0000000..13affb6
+--- /dev/null
++++ b/tools/recomp/test_store32_hooks.py
+@@ -0,0 +1,98 @@
++"""Function-scoped MOV-store hooks leave all other instructions unchanged."""
++
++import os
++import subprocess
++
++import pytest
++
++from tools.recomp import config, translator
++from tools.recomp.c_fixture import command, compiler
++from tools.recomp.manual_scan import store32_hooks
++from tools.recomp.__main__ import _load_manual_protection
++
++
++def test_discovery_and_boundary_protection(tmp_path):
++    manual = tmp_path / "manual.c"
++    manual.write_text("""
++void sub_00010000_store32(uint32_t address, uint32_t value)
++{
++}
++void sub_00010010_store32(uint32_t address, uint32_t value);
++#if 0
++void sub_00010020_store32(uint32_t address, uint32_t value) {}
++#endif
++""", encoding="utf-8")
++    assert store32_hooks(manual) == {0x10000}
++    protected, _ = _load_manual_protection(None, manual)
++    assert 0x10000 in protected
++    assert 0x10010 not in protected and 0x10020 not in protected
++
++
++def test_only_mov_dword_stores_in_the_named_function_are_redirected(monkeypatch):
++    base = 0x10000
++    # MOV [eax+40],ecx; MOV [eax+44],imm; MOV [eax+48],cl;
++    # MOV edx,[eax+4c]; RET.
++    image = bytes.fromhex("89 48 40 c7 40 44 78 56 34 12 88 48 48 8b 50 4c c3")
++    config._install([config.Section(".text", base, len(image), 0, len(image), True)],
++                    entry_point=base, kernel_thunk_addr=base, origin="store-hook-test")
++    db = {base: {"end": base + len(image), "size": len(image)}}
++    monkeypatch.setattr(translator, "STORE32_HOOKS", {base})
++    code = translator.FunctionTranslator(image, db).translate_function(base, db[base])
++    assert code.count("sub_00010000_store32((uint32_t)") == 2
++    assert "MEM8(eax + 0x48)" in code
++    assert "edx = MEM32(eax + 0x4C)" in code
++    monkeypatch.setattr(translator, "STORE32_HOOKS", set())
++    code = translator.FunctionTranslator(image, db).translate_function(base, db[base])
++    assert "store32" not in code
++    assert "MEM32(eax + 0x40) = ecx" in code
++
++
++def test_generated_store_hooks_compile_and_preserve_store_order(tmp_path, monkeypatch):
++    cc = compiler()
++    if not cc:
++        pytest.skip("C compiler unavailable")
++    base = 0x10000
++    image = bytes.fromhex("89 48 40 c7 40 44 78 56 34 12 88 48 48 8b 50 4c c3")
++    config._install([config.Section(".text", base, len(image), 0, len(image), True)],
++                    entry_point=base, kernel_thunk_addr=base, origin="store-hook-c-test")
++    db = {base: {"end": base + len(image), "size": len(image)}}
++    monkeypatch.setattr(translator, "STORE32_HOOKS", {base})
++    generated = translator.FunctionTranslator(image, db).translate_function(base, db[base])
++    source = tmp_path / "store_hook.c"
++    source.write_text(r"""
++#include <stdint.h>
++#include <string.h>
++static uint8_t memory[512];
++static uint32_t eax = 0x100, ecx = 0x9abcdef0, edx, esp, count;
++static uint32_t addresses[2], values[2];
++#define MEM8(a) (memory[(a)])
++#define MEM32(a) (*(uint32_t *)(memory + (a)))
++#define LO8(x) ((uint8_t)(x))
++void sub_00010000_store32(uint32_t address, uint32_t value)
++{
++    if (count < 2) {
++        addresses[count] = address;
++        values[count] = value;
++    }
++    count++;
++    memcpy(memory + address, &value, sizeof(value));
++}
++""" + generated + r"""
++int main(void)
++{
++    uint32_t expected = 0x87654321;
++    memcpy(memory + 0x14c, &expected, sizeof(expected));
++    sub_00010000();
++    return count != 2 || addresses[0] != 0x140 || values[0] != 0x9abcdef0 ||
++           addresses[1] != 0x144 || values[1] != 0x12345678 ||
++           MEM8(0x148) != 0xf0 || edx != expected || esp != 4;
++}
++""", encoding="utf-8")
++    exe = tmp_path / "store_hook.exe"
++    env = dict(os.environ, TEMP=str(tmp_path), TMP=str(tmp_path), TMPDIR=str(tmp_path))
++    result = subprocess.run(command(cc, [source], exe), cwd=tmp_path, env=env,
++                            capture_output=True, text=True, timeout=30)
++    assert result.returncode == 0, result.stderr
++    result = subprocess.run([str(exe)], cwd=tmp_path, env=env,
++                            capture_output=True, text=True, timeout=5)
++    assert result.returncode == 0, result.stderr
+diff --git a/tools/recomp/translator.py b/tools/recomp/translator.py
+index 7b5cb3d..b15f5d4 100644
+--- a/tools/recomp/translator.py
++++ b/tools/recomp/translator.py
+@@ -212,6 +212,7 @@ def write_if_changed(path, text):
+ 
+ # Hooked starts are protected before boundary repair by the CLI.
+ ENTRY_HOOKS = set()
++STORE32_HOOKS = set()
+ 
+ 
+ def _is_safe_icall(line):
+@@ -2905,6 +2906,8 @@ class FunctionTranslator:
+         name = _func_ident(start, func_info.get("name", f"sub_{start:08X}"))
+         size = end - start
+         instructions, blocks = self.decode_function(start, end)
++        self.lifter.store32_hook = (
++            f"sub_{start:08X}_store32" if start in STORE32_HOOKS else None)
+         # Classify the actual immediately following guest instruction;
+         # generated ADD snapshots must not hide caller cleanup.
+         self.lifter.caller_cleanup_sites = {
+@@ -3067,6 +3070,8 @@ class FunctionTranslator:
+         if func_addr in ENTRY_HOOKS:
+             lines.append(f"    extern void sub_{func_addr:08X}_enter(void);")
+             lines.append(f"    sub_{func_addr:08X}_enter();")
++        if func_addr in STORE32_HOOKS:
++            lines.append(f"    extern void sub_{func_addr:08X}_store32(uint32_t, uint32_t);")
+ 
+         # Optional entry trace. Bring-up is mostly "which of these ten init
+         # calls does it not come back from", and answering that by overriding

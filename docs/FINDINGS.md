@@ -9,6 +9,30 @@ organization and importer research are tracked in
 in [RENDERING.md](./RENDERING.md), and general framework contributions are
 in [UPSTREAM.md](./UPSTREAM.md).
 
+## Phase 4 synthetic integration boundary
+
+On the supported `20261111-002138-a9dbc18a` generated code, static
+inspection found two principal real PUT store sites in `sub_00371FA0` and
+`sub_00372050`. The first also writes shadow RAM, so the hook distinguishes
+the effective USER PUT address. Device setup writes a bootstrap JUMP at
+physical zero before a KickOff call; this observation does not establish that
+all runtime PUT/GET writes or resets use those sites.
+
+On private framework tree `bfbf6d32c4f184332e1db90e975e0caf839a4b10`,
+synthetic fixtures passed 7 bounded-PFB, 6 idle-wait and 9 guarded-segment
+cases. The latter exercises a zero-origin JUMP, split packets, ordered
+synthetic semaphore/report/trap/flip markers, backpressure, a held flip and
+fail-closed invalid/reset/untracked writes. One simulated loop combines the
+real acknowledgement primitive with queued work and a held flip. Three
+store-hook translation tests, including compiled generated stores, and 64
+fence, pushbuffer, interrupt and PGRAPH cases also passed. A D3D11 WARP
+fixture verified that an uncached synthetic pixel-shader compile contributes
+to the opt-in timing counter and resets with the other interval counters.
+The ordered markers do not execute the full production backend. The old
+generated title builds against this tree but lacks the new generated store
+callbacks; a new generation is required. No retail or xemu campaign was run,
+and no performance or G2–G5 claim follows from these synthetic results.
+
 ## Executable and provenance
 
 - The supported `default.xbe` has title ID `0x4D53001E`, entry point

@@ -735,9 +735,10 @@ so do not report that maximum as a shader hitch without event evidence.
 
 Use `--profile-callers` for a complete G3 diagnostic. It enables the
 profiler's more expensive stack walk and attributes kernel waits to their
-first executable caller. The benchmark counts only the two known guest GPU
-polls and kernel waits attributed to those polls as GPU/NV2A wait time; other
-game-thread kernel waits are reported separately. Without this option,
+first executable caller. The benchmark counts the two known guest GPU polls
+and kernel waits attributed to those polls, the PFB event wait, and the
+segment queue-space/lock wait helper as GPU/NV2A wait time; other game-thread
+kernel waits are reported separately. Without this option,
 `gpu_wait_pct` is a direct-poll lower bound rather than a complete G3 result.
 Structured D3D11 interval diagnostics also retain synchronous visibility
 reads and wait time, asynchronous reports written, and polls that found the
@@ -866,7 +867,7 @@ records the exclusion; reads and writes on that page are not observed.
 Neither a clean report with an excluded page nor this diagnostic's other
 coverage limitations justify skipping guest readback.
 
-## Experimental event-driven PFB flush wait
+## Experimental NV2A wait and segment options
 
 The latest Phase 4 candidate can replace the title's busy poll with a wait on
 the real framework acknowledgement:
@@ -881,16 +882,118 @@ Unset or `0` retains the generated polling routine; any other value stops with
 a diagnostic. This option does not clear the PFB bit itself and does not bypass
 flip holds. Its event is signalled only after the framework's real
 acknowledgement clears the bit, while a short timer provides IRQ safe points
-and mandatory rechecks. It is default-off and has completed only one corrected
-automated movement smoke. It has not passed the reviewed alternating
+and mandatory rechecks. It is default-off; the earlier version completed
+only one corrected automated movement smoke, while this bounded revision has
+not been measured in-game. It has not passed the reviewed alternating
 performance comparison, G2, G3, or CPU-reference equivalence, and may change
 guest interrupt timing. Do not use it as a general performance preset yet.
+The wait now stops with an error after 30 seconds if the real busy bit remains
+set; it does not clear the bit on timeout.
 
 To investigate a long event-driven wait, set `RECOMP_NV2A_WAIT_DIAG=1` as
 well. It logs the still-busy register, elapsed time, last observed flip hold
 and counters after two seconds, at most eight times. It never clears the bit,
 acknowledges a flush or bypasses a hold; the diagnostic is off unless set to
 the exact value `1` and does not apply to the original polling path.
+
+Two other switches are independent and default off:
+
+- `RECOMP_NV2A_IDLE_WAIT=1` lets the worker spin briefly after work, then
+  wait on a retained wake event with a 200 µs timer backstop. All normal
+  service work still runs each pass; a stalled timer or failed wait stops
+  with an error.
+- `RECOMP_NV2A_SEGMENTS=1` requires Windows, `RECOMP_PB_EXEC` present,
+  `RECOMP_PB_WALK=staged`, `RECOMP_PGRAPH_IRQ=1`, and a fresh generation
+  with the current store hooks. It walks each captured PUT separately,
+  advances GET only after the walk, and defers the next segment during a
+  held flip. The USER block is read-only to guest code and writable through
+  a separate host alias. Any untracked guest write, GET reset, invalid PUT,
+  unavailable mapping, queue-lock timeout or full-queue timeout stops the
+  process instead of silently losing commands. Such a failure requires
+  investigation; do not disable the guard to obtain a result.
+
+The queue has 128 entries and a five-second producer/lock limit. It does not
+bypass guest fence or GET waits. A flush is not acknowledged while an older
+queued segment or flip hold remains. `BRUTEFORCE_PERF_COUNTERS=1` records
+interval PFB and PUT calls and elapsed wall time by verified guest call site
+and return address; unknown callers are zero, and table overflow is reported.
+The same flag records interval pixel-shader compile/create time and failures
+even with the persistent shader cache disabled; cache-hit timings remain in
+the existing `GPU-PSCACHE` diagnostics when that cache is enabled.
+The framework emits cumulative idle and queue snapshots. These counters and
+`--profile-callers` add overhead and must be equal on both sides. Synthetic
+fixtures cover the mechanisms but not their combined behavior in this game.
+
+For each experiment after regenerating and building the final tree, collect a
+separate baseline/variant pair (example: PFB only). The Release build must
+include debug symbols for the complete caller-attribution gate; see the
+[symbolized-build instructions](#requirements-and-build-workflow).
+
+```powershell
+python tools\bench.py --performance --scene movement --readiness manual `
+  --ready-state "precise visible tutorial state" --no-auto-panels `
+  --capture-world --profile-callers --runs 3 `
+  --variant "baseline:BRUTEFORCE_PERF_COUNTERS=1" `
+  --variant "pfb:BRUTEFORCE_PERF_COUNTERS=1,RECOMP_PFB_FLUSH_WAIT=1"
+```
+
+Repeat with idle only, segments only, and all three switches. `--performance`
+requires two variants, at least three runs each, manual readiness, fixed
+input, continuous reviewed-capture material and caller profiling; it rejects
+variant overrides of harness-owned inputs, thread counts, output paths and
+profiling controls. It records the effective options, executable hash,
+generation and framework tree. Collection itself remains inconclusive.
+Continuous guest-surface capture does not prove presented pixels and changes
+timing. Every run needs independent scene, alignment and presentation review.
+Enabled `BRUTEFORCE_PERF_COUNTERS=1` and non-overflowed PFB/PUT interval
+records are required in each run, so diagnostic collection is comparable.
+PFB/PUT and shader records carry QPC-based report-window timestamps on the
+same clock as the flip log; calls are counted when they complete, so a call
+can begin before its recorded window. The first report has unknown start
+(`0`). A reviewed movement window must contain a complete later report
+interval with both PFB and PUT caller records, or comparison is inconclusive.
+Unknown/zero callers in those intervals and any caller-table overflow also
+make it inconclusive.
+
+`python tools\bench.py --compare-performance MATCHES.json` is an offline
+review gate. `MATCHES.json` contains `reviewer`, `state`,
+`input_tolerance_ms` (0–500), and at least three consecutive A/B `pairs`.
+Each pair names `baseline_result`, `candidate_result`, `baseline_labels`
+and `candidate_labels`, sets `matched` to true, and supplies nonempty
+`start_match`, `end_match` and `interval_match` descriptions. Paths are
+relative to the manifest. Label manifests follow `tools\bench_world.py`;
+each interval needs at least 100 reviewed world changes over 10 seconds.
+The output includes each cadence's p50/p90/p99 and 1% low, not flip-based
+world FPS. It refuses differing generations, hashes, toolkit trees, thread
+counts, input, or nonexperimental options.
+
+Optional gate evidence in the same manifest is deliberately explicit:
+
+- `native`: `labels`, `matched: true`, and `evidence` for a reviewed native
+  movement interval. The review must use the same image dimensions, region,
+  HUD exclusions and tolerance as the candidate. G2 requires each candidate
+  run to reach its distinct world rate, with 1% low at least 80% of that
+  rate.
+- `g4`: `reviewer`, `matched: true`, `matching_evidence`, and `pairs` with
+  `cpu_result`, `gpu_result`, `cpu_image` and `gpu_image`. Images must be
+  recorded stationary captures from the same generation, thread count and
+  options except the renderer, with the candidate switches enabled. List
+  differences in `difference_explanation` and explicitly set
+  `all_differences_explained` if pixels differ.
+- `g5`: `reviewer`, `matched: true`, `matching_evidence`,
+  `native_hold_labels`, and `scaled_results` naming at least three distinct
+  2× stationary capture results. `scaled_review_evidence` maps each exact
+  result path to its separate nonempty stationary/presentation review.
+  Scaled runs need completed holds of at least 100 flips; native hold labels
+  must review at least 100 consecutive presented flips over 10 seconds. G5
+  compares those stationary **flip** rates, not world FPS.
+
+G3 requires a complete symbolized game-thread profile for every candidate
+run and less than 10% GPU wait. Attributed queue-space/lock waits count;
+ordinary PUT-store work does not. Missing, unmatched, unreviewed or insufficient
+evidence makes the relevant gate and overall result inconclusive. Failed gates
+are reported separately; the offline command exits 0 only when all gates pass,
+otherwise 2. Human match and presentation statements remain assertions.
 
 ## Experimental face culling
 

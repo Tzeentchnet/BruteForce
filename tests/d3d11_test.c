@@ -804,9 +804,14 @@ static int scene_perf_counters(const char *out_path)
             counters.texture.snapshot_copy_bytes > 0 &&
             counters.texture.rewrites >= 2,
             "texture snapshot and rewrite counters");
+    REQUIRE(counters.pixel_shader_compile.calls >= 1 &&
+            counters.pixel_shader_compile.failures == 0 &&
+            counters.pixel_shader_compile.ticks > 0,
+            "uncached pixel-shader compile timing counters");
     REQUIRE(reset_counters.guest_range.calls == 0 &&
             reset_counters.texture.lookups == 0 &&
-            reset_counters.texture.exact_checks == 0,
+            reset_counters.texture.exact_checks == 0 &&
+            reset_counters.pixel_shader_compile.calls == 0,
             "performance counter snapshot resets the interval");
 
     f = fopen(out_path, "wb");

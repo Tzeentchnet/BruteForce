@@ -97,6 +97,57 @@ shared setup was not rerun. The earlier integrated framework reported
 backend-contract, PFB-flush, GPU-audit, raster-batch and EEPROM fixtures also
 pass.
 
+Patch [0045](../patches/xboxrecomp/0045-bounded-nv2a-segments-and-waits.patch)
+adds a 42nd local patch; its separately reconstructed tree is
+`bfbf6d32c4f184332e1db90e975e0caf839a4b10`. Both the private implementation
+checkout and an independent local replay verify against that tree. No shared
+toolkit or generated output was changed.
+
+### Bounded acknowledgement, idle waiting and guarded PUT segments
+
+- **Problem:** a PFB event wait lacked a total deadline; an NV2A worker
+  busy-polls when idle; sampling only the latest PUT can collapse publication
+  boundaries and place a later segment on the wrong side of a flip hold.
+  Complete interception is not guaranteed by a small static list of guest
+  functions.
+- **Evidence:** earlier Brute Force profiles and the dated PFB smoke are
+  recorded in item 17 below; neither establishes a new speedup. In the
+  supported `20261111-002138-a9dbc18a` generated code, the device setup writes
+  a physical-zero bootstrap JUMP before calling KickOff. The two observed PUT
+  stores occur in `sub_00371FA0` and `sub_00372050`; the former also stores
+  to a shadow RAM register, not always the USER aperture. This is static
+  evidence, not proof that every runtime write is covered.
+- **Change:** patch 0045 bounds real PFB acknowledgement waits, implements
+  independent default-off `RECOMP_NV2A_IDLE_WAIT=1`, and adds default-off
+  `RECOMP_NV2A_SEGMENTS=1`. The latter requires the staged executor, IRQs,
+  producer integration and a Windows read-only USER view with writable host
+  alias. A bounded FIFO preserves PUT order, GET advances only after each
+  completed walk, pending work/flip holds defer PFB acknowledgement, and
+  untracked guest writes, resets, invalid PUTs and timeouts abort. A generic
+  function-scoped 32-bit MOV-store callback is opt-in at generation time;
+  Brute Force addresses and callbacks stay in `src/recomp_manual.c`.
+  Enabled diagnostics report bounded caller-attributed counters. The guard
+  intentionally refuses unmodeled USER writes rather than claiming support.
+- **Tests:** 7 PFB, 6 idle and 9 segmented native fixture cases passed; the
+  latter covers guarded aliases, untracked writes/reset, bootstrap JUMP,
+  queue backpressure/timeout, split packets, control flow and held-flip
+  dispatch using synthetic executor markers. One case combines the real PFB
+  acknowledgement primitive with the queue and held-flip boundary. Three
+  translator tests, including compiled generated stores, and 64 title
+  fence/pushbuffer/interrupt/PGRAPH cases passed, including the new
+  store-hook and PFB-attribution cases. These do not
+  execute the full production worker against a title or prove presentation.
+- **Overlap:** the existing #184/open-and-merged comparison was last checked
+  2026-11-03 for PFB and 2026-11-10 for the broader snapshot. Blood Wake's
+  idle and event concepts are prior art; no code was copied. This task did
+  not contact upstream, so overlap must be rechecked before a submission.
+- **Before filing:** independently split the generic pieces, test the full
+  worker/guard integration and another title, exercise unsupported hosts,
+  review native/CPU matching and alternating title measurements, and check
+  current upstream with approval before any upstream interaction.
+- **Status:** local patch, default off; no upstream submission or new
+  gameplay/performance measurement.
+
 ### Submission queue
 
 The four submissions from the previous queue merged in v0.17.0. These are the

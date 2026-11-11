@@ -20,7 +20,8 @@ def run_fence(mode):
     "mode",
     ["disabled", "valid", "low-semaphore", "concurrent", "event-valid",
      "event-concurrent", "trap-disabled", "trap-matched", "trap-unmatched",
-     "pfb-disabled", "pfb-enabled", "perf-counters"],
+     "pfb-disabled", "pfb-enabled", "perf-counters", "store-hook",
+     "pfb-attribution"],
 )
 def test_fence_registration(mode):
     result = run_fence(mode)

@@ -56,6 +56,7 @@ import time
 import build
 import bench_control
 import bench_match
+import bench_performance
 import bench_world
 
 MENU_SCRIPT = (
@@ -98,7 +99,9 @@ MOVEMENT_CAPTURE_OFFSETS = (2.0, 5.0)
 PANEL_SECONDS = 3.0
 # Guest functions that poll for GPU progress (FINDINGS: the PFB flush poll and
 # the fence wait). A game thread in them is waiting for the NV2A thread.
-GUEST_GPU_WAITS = ("sub_00372180", "sub_00371CE0")
+GUEST_GPU_WAITS = ("sub_00372180", "sub_00371CE0", "pfb_flush_wait_once",
+                   "nv2a_pfb_flush_wait", "xbox_Nv2aPfbFlushWait",
+                   "nv2a_segment_wait_once")
 KERNEL_WAIT_SYMBOL_MARKERS = (
     "!NtWaitFor", "!ZwWaitFor", "!NtDelayExecution", "!ZwDelayExecution",
     "!NtYieldExecution", "!ZwYieldExecution", "!NtRemoveIoCompletion",
@@ -124,9 +127,34 @@ RUNTIME_OPTION_KEYS = (
     "RECOMP_GPU_DEPTH_TEXTURE", "RECOMP_GPU_STENCIL_ALIAS",
     "RECOMP_GPU_DIRECT_PRESENT", "RECOMP_GPU_SCALE", "RECOMP_GPU_OUTPUT",
     "RECOMP_GPU_AUDIT", "RECOMP_GPU_AUDIT_FILE",
-    "RECOMP_PROGRAM_NEAR_ZERO", "RECOMP_PFB_FLUSH_WAIT", "RECOMP_AUDIO",
+    "RECOMP_PROGRAM_NEAR_ZERO", "RECOMP_PFB_FLUSH_WAIT",
+    "RECOMP_NV2A_IDLE_WAIT", "RECOMP_NV2A_SEGMENTS", "RECOMP_PB_WALK",
+    "RECOMP_PB_EXEC", "RECOMP_PGRAPH_IRQ", "RECOMP_VBLANK", "RECOMP_AUDIO",
     "BRUTEFORCE_PERF_COUNTERS", "BRUTEFORCE_PROFILE_CALLERS",
 )
+PERFORMANCE_SWITCHES = frozenset(("RECOMP_PFB_FLUSH_WAIT", "RECOMP_NV2A_IDLE_WAIT",
+                                  "RECOMP_NV2A_SEGMENTS"))
+OWNED_ENV = frozenset((
+    "RECOMP_RASTER_THREADS", "RECOMP_PAD_SCRIPT", "RECOMP_PAD_LIVE",
+    "RECOMP_FRAME_STATS", "RECOMP_WATCHDOG_SECS", "BRUTEFORCE_PROFILE",
+    "BRUTEFORCE_PROFILE_GATE", "BRUTEFORCE_PROFILE_FROM", "BRUTEFORCE_PROFILE_TO",
+    "BRUTEFORCE_PROFILE_CALLERS", "RECOMP_GPU_CENSUS", "RECOMP_GPU_CENSUS_GATE",
+    "RECOMP_FB_DUMP", "RECOMP_FB_DUMP_FLIPS", "RECOMP_FB_DUMP_FLIPS_ONLY",
+    "RECOMP_FB_DUMP_FLIP_ID", "RECOMP_FRAME_TRACE", "RECOMP_PB_REPORT_MS",
+    "RECOMP_AUDIO_WAV", "RECOMP_AUDIO_WAV_SECS", "BRUTEFORCE_SAVE_ROOT",
+    "RECOMP_SAVE_DIR", "RECOMP_GPU_AUDIT_FILE", "RECOMP_USB", "RECOMP_PB_WALK",
+    "RECOMP_PB_EXEC", "RECOMP_PGRAPH_IRQ", "RECOMP_VBLANK", "RECOMP_FB_WINDOW",
+    "RECOMP_D3D_PRESENT",
+))
+SUBMIT_PERF_RE = re.compile(
+    r"^\[PERF-SUBMIT\] kind=(?P<kind>pfb|put) site=(?P<site>[0-9A-Fa-f]{8}) "
+    r"caller=(?P<caller>[0-9A-Fa-f]{8}) calls=(?P<calls>\d+) "
+    r"elapsed_ms=(?P<elapsed_ms>[\d.]+)"
+    r"(?: window_start_us=(?P<start_us>\d+) window_end_us=(?P<end_us>\d+))?$", re.MULTILINE)
+SHADER_PERF_RE = re.compile(
+    r"^\[PERF-SHADER\] kind=pixel-compile calls=(?P<calls>\d+) "
+    r"failures=(?P<failures>\d+) elapsed_ms=(?P<elapsed_ms>[\d.]+)"
+    r"(?: window_start_us=(?P<start_us>\d+) window_end_us=(?P<end_us>\d+))?$", re.MULTILINE)
 
 D3D11_DEVICE_RE = re.compile(
     r'^\[GPU-D3D11\] device adapter="(?P<adapter>.*)" '
@@ -178,6 +206,17 @@ PFB_FLUSH_WAIT_RE = re.compile(
     r'safe_points=(?P<safe_points>\d+)$',
     re.MULTILINE,
 )
+IDLE_WAIT_RE = re.compile(
+    r"^\[NV2A-IDLE\] waits=(?P<waits>\d+) events=(?P<events>\d+) "
+    r"timers=(?P<timers>\d+)$", re.MULTILINE)
+SEGMENT_RE = re.compile(
+    r"^\[NV2A-SEGMENT\] published=(?P<published>\d+) completed=(?P<completed>\d+) "
+    r"pending=(?P<pending>\d+) high_water=(?P<high_water>\d+) "
+    r"queue_waits=(?P<queue_waits>\d+) caller_overflow=(?P<caller_overflow>\d+)$",
+    re.MULTILINE)
+SEGMENT_CALLER_RE = re.compile(
+    r"^\[NV2A-SEGMENT-CALLER\] caller=(?P<caller>[0-9A-Fa-f]{8}) "
+    r"published=(?P<published>\d+) completed=(?P<completed>\d+)$", re.MULTILINE)
 
 
 class BenchError(Exception):
@@ -188,6 +227,19 @@ def clean_environment(parent):
     """Do not inherit title/framework switches; audio defaults on afterward."""
     return {key: value for key, value in parent.items()
             if not key.upper().startswith(("RECOMP_", "BRUTEFORCE_"))}
+
+
+def validate_owned_overrides(overrides):
+    seen = set()
+    for key in overrides:
+        upper = key.upper()
+        if upper in seen:
+            raise BenchError(f"duplicate environment key with different casing: {key}")
+        seen.add(upper)
+        if not upper.startswith(("RECOMP_", "BRUTEFORCE_")):
+            raise BenchError(f"variant environment must use RECOMP_ or BRUTEFORCE_: {key}")
+        if upper in OWNED_ENV:
+            raise BenchError(f"{upper} is managed by the benchmark and cannot be supplied by a variant")
 
 
 def validate_gpu_audit_overrides(overrides):
@@ -209,8 +261,34 @@ def parse_env(spec):
         if "=" not in item:
             raise BenchError(f"Expected K=V, got {item!r}")
         key, value = item.split("=", 1)
+        if key in env:
+            raise BenchError(f"duplicate variant environment key: {key}")
         env[key] = value
     return name or ",".join(f"{k}={v}" for k, v in env.items()) or "default", env
+
+
+def validate_performance_variants(variants, args):
+    if len(variants) != 2 or args.runs < 3:
+        raise BenchError("performance comparisons require exactly two variants and at least three runs each")
+    if (args.scene != "movement" or args.readiness != "manual" or
+            not args.no_auto_panels or not args.capture_world or
+            args.no_profile or not args.profile_callers):
+        raise BenchError("performance comparisons require movement, manual readiness, fixed input, "
+                         "--capture-world and --profile-callers")
+    options = [{key.upper(): value for key, value in env.items()} for _, env in variants]
+    for item in options:
+        for key in PERFORMANCE_SWITCHES:
+            if item.get(key, "0") not in ("0", "1"):
+                raise BenchError(f"{key} must be 0 or 1")
+    if any(options[0].get(key, "0") != "0" for key in PERFORMANCE_SWITCHES):
+        raise BenchError("the first performance variant must be the all-switches-off baseline")
+    if not any(options[1].get(key, "0") == "1" for key in PERFORMANCE_SWITCHES):
+        raise BenchError("the second performance variant must enable at least one performance switch")
+    if options[0].get("BRUTEFORCE_PERF_COUNTERS") != "1":
+        raise BenchError("performance comparisons require BRUTEFORCE_PERF_COUNTERS=1 in both variants")
+    if ({key: value for key, value in options[0].items() if key not in PERFORMANCE_SWITCHES} !=
+            {key: value for key, value in options[1].items() if key not in PERFORMANCE_SWITCHES}):
+        raise BenchError("performance variants must have identical nonexperimental options")
 
 
 class FrameLog:
@@ -382,6 +460,28 @@ def caller_gpu_wait_shares(text):
     return {thread: round(share, 2) for thread, share in shares.items()}, True
 
 
+def unresolved_caller_wait(text, thread):
+    marker = "== Outside the exe, by first exe caller"
+    if marker not in text:
+        return True
+    section = text.split(marker, 1)[1].split("\n== All threads", 1)[0]
+    current = None
+    for line in section.splitlines():
+        match = re.fullmatch(r"T(\d+)", line.strip())
+        if match:
+            current = int(match.group(1))
+            continue
+        match = re.match(r"^\s+[\d.]+%\s+(.+?)\s+<-\s+(.+?)\s*$", line)
+        if current == thread and match:
+            outside, caller = match.groups()
+            if "!+0x" in outside or outside.startswith("0x"):
+                return True
+            if (any(wait in outside for wait in KERNEL_WAIT_SYMBOL_MARKERS) and
+                    (caller == "(no exe frame)" or "!+0x" in caller or caller.startswith("0x"))):
+                return True
+    return False
+
+
 def parse_profile(path):
     """Per-thread activity plus strictly attributable game-thread GPU waits."""
     path = Path(path)
@@ -389,6 +489,7 @@ def parse_profile(path):
         return None
     text = path.read_text(encoding="utf-8", errors="replace")
     caller_waits, callers_available = caller_gpu_wait_shares(text)
+    caller_manifest = re.search(r"^CALLERS,complete_v1,(\d+)$", text, re.MULTILINE)
     threads = {}
     for line in text.splitlines():
         if line.startswith("THREAD,"):
@@ -404,6 +505,8 @@ def parse_profile(path):
             continue
         info = threads[int(match.group(1))]
         functions = re.findall(r"^\s+([\d.]+)%\s+(\S+)$", block, re.MULTILINE)
+        info["unresolved_symbols"] = any("!+0x" in name or name.startswith("0x")
+                                         for _, name in functions)
         info["top"] = [(name, float(share)) for share, name in functions[:12]]
         info["guest_gpu_wait_pct"] = round(sum(
             float(share) for share, name in functions
@@ -412,11 +515,12 @@ def parse_profile(path):
             info["kernel_gpu_wait_pct"] = caller_waits.get(int(match.group(1)), 0.0)
     header = text.splitlines()[0] if text else ""
     summary = {"header": header, "threads": threads}
-    game = [t for t in threads.values() if t["start"].endswith("!mainCRTStartup")]
+    game = [(index, t) for index, t in threads.items()
+            if t["start"].endswith("!mainCRTStartup") and t["samples"]]
     nv2a = [t for t in threads.values() if t["start"].endswith("!nv2a_ack_thread")]
     raster = [t for t in threads.values() if t["start"].endswith("!raster_worker")]
     if game:
-        g = game[0]
+        game_index, g = game[0]
         kernel = 100.0 * g["kernel_wait"] / g["samples"]
         guest_gpu = g.get("guest_gpu_wait_pct", 0.0)
         kernel_gpu = g.get("kernel_gpu_wait_pct") if callers_available else None
@@ -430,6 +534,12 @@ def parse_profile(path):
                 round(max(0.0, kernel - kernel_gpu), 2) if kernel_gpu is not None else None),
             "gpu_wait_pct": round(min(100.0, gpu_wait), 2),
             "caller_attribution_available": callers_available,
+            "caller_attribution_complete": bool(
+                callers_available and caller_manifest and caller_manifest.group(1) == "0"
+                and re.search(r"\b0 dropped\b", header)
+                and not g.get("unresolved_symbols", True)
+                and not unresolved_caller_wait(text, game_index) and g["samples"] >= 1000),
+            "samples": g["samples"],
             "gpu_wait_scope": (
                 "known guest GPU polls plus caller-attributed kernel waits"
                 if callers_available else
@@ -480,7 +590,45 @@ def parse_runtime_diagnostics(text):
             "snapshots": [],
             "latest": None,
         },
+        "submit_intervals": [],
+        "submit_caller_overflow": "[PERF-SUBMIT] caller table overflow:" in text,
+        "pixel_shader_compile_intervals": [],
+        "idle_wait": {
+            "enabled": "[NV2A-IDLE] independent idle wait enabled" in text,
+            "snapshots": [],
+        },
+        "segments": {
+            "enabled": "[NV2A-SEGMENT] guarded per-PUT queue enabled" in text,
+            "snapshots": [], "callers": [],
+        },
     }
+    for match in SUBMIT_PERF_RE.finditer(text):
+        item = match.groupdict()
+        diagnostics["submit_intervals"].append({
+            "kind": item["kind"], "site": item["site"].upper(),
+            "caller": item["caller"].upper(), "calls": int(item["calls"]),
+            "elapsed_ms": float(item["elapsed_ms"]),
+            "window_start_us": int(item["start_us"]) if item["start_us"] is not None else None,
+            "window_end_us": int(item["end_us"]) if item["end_us"] is not None else None,
+        })
+    for match in SHADER_PERF_RE.finditer(text):
+        diagnostics["pixel_shader_compile_intervals"].append({
+            "calls": int(match["calls"]), "failures": int(match["failures"]),
+            "elapsed_ms": float(match["elapsed_ms"]),
+            "window_start_us": int(match["start_us"]) if match["start_us"] is not None else None,
+            "window_end_us": int(match["end_us"]) if match["end_us"] is not None else None,
+        })
+    for match in IDLE_WAIT_RE.finditer(text):
+        diagnostics["idle_wait"]["snapshots"].append(
+            {key: int(value) for key, value in match.groupdict().items()})
+    for match in SEGMENT_RE.finditer(text):
+        diagnostics["segments"]["snapshots"].append(
+            {key: int(value) for key, value in match.groupdict().items()})
+    for match in SEGMENT_CALLER_RE.finditer(text):
+        diagnostics["segments"]["callers"].append({
+            "caller": match["caller"].upper(), "published": int(match["published"]),
+            "completed": int(match["completed"]),
+        })
     match = D3D11_DEVICE_RE.search(text)
     if match:
         values = match.groupdict()
@@ -628,6 +776,7 @@ def run_once(out_dir, label, scene, env_overrides, threads, watchdog, profile, c
             "RECOMP_FB_DUMP", "RECOMP_FB_DUMP_FLIPS", "RECOMP_FB_DUMP_FLIPS_ONLY",
             "RECOMP_FB_DUMP_FLIP_ID"}):
         raise BenchError("flip capture owns the framebuffer dump paths and gate")
+    validate_owned_overrides(env_overrides)
     out_dir = Path(out_dir).resolve()
     out_dir.mkdir(parents=True, exist_ok=False)
     save = out_dir / "save"
@@ -669,10 +818,10 @@ def run_once(out_dir, label, scene, env_overrides, threads, watchdog, profile, c
         # RECOMP_FRAME_TRACE logs every batch of one frame once the flag
         # exists; it is created TRACE_AFTER seconds into the movement window.
         env["RECOMP_FRAME_TRACE"] = str(trace_flag)
-    env.update(env_overrides)
+    env.update({key.upper(): value for key, value in env_overrides.items()})
     audit_path = None
     if audit_key is not None:
-        env["RECOMP_GPU_AUDIT"] = env.pop(audit_key)
+        env["RECOMP_GPU_AUDIT"] = env.pop(audit_key.upper())
         if env["RECOMP_GPU_AUDIT"] == "1":
             audit_path = out_dir / "gpu_audit.csv"
             env["RECOMP_GPU_AUDIT_FILE"] = str(audit_path)
@@ -730,6 +879,9 @@ def run_once(out_dir, label, scene, env_overrides, threads, watchdog, profile, c
         },
         "boot_dir": str(cwd), "out_dir": str(out_dir),
         "runtime_options": {key: env.get(key) for key in RUNTIME_OPTION_KEYS},
+        "runtime_environment": {key.upper(): value for key, value in env.items()
+                                if key.upper().startswith(("RECOMP_", "BRUTEFORCE_"))
+                                and key.upper() not in OWNED_ENV},
         "options": {
             "config": config, "watchdog_seconds": watchdog,
             "profile": bool(profile), "profile_callers": profile_callers_enabled,
@@ -1176,6 +1328,10 @@ def main(argv=None):
     parser.add_argument("--compare-matched", type=Path, metavar="MATCHES.json",
                         help="compare only reviewer-matched, fully labeled captured intervals; "
                              "schema in tools\\bench_match.py")
+    parser.add_argument("--performance", action="store_true",
+                        help="enforce a controlled, alternating baseline/experiment performance collection")
+    parser.add_argument("--compare-performance", type=Path, metavar="MATCHES.json",
+                        help="evaluate reviewed performance pairs and G2/G3/G4/G5 offline")
     parser.add_argument("--readiness", choices=("legacy", "manual"), default="legacy",
                         help="legacy timed menu script, or operator-confirmed visible state")
     parser.add_argument("--ready-state", help="precise visible state the operator must confirm")
@@ -1195,8 +1351,9 @@ def main(argv=None):
     parser.add_argument("--out", type=Path, help="results directory (default analysis/bench/<time>)")
     args = parser.parse_args(argv)
     try:
-        if args.analyze_world and args.compare_matched:
-            raise BenchError("--analyze-world and --compare-matched are separate offline modes")
+        if sum(bool(value) for value in (args.analyze_world, args.compare_matched,
+                                         args.compare_performance)) > 1:
+            raise BenchError("offline analysis modes are mutually exclusive")
         if args.analyze_world:
             analysis = bench_world.analyze_manifest(args.analyze_world)
             print(json.dumps(analysis, indent=2))
@@ -1205,6 +1362,11 @@ def main(argv=None):
             comparison = bench_match.compare_manifest(args.compare_matched, MOVEMENT_INPUT)
             print(json.dumps(comparison, indent=2))
             return 0 if comparison["status"] == "reviewer_asserted" else 1
+        if args.compare_performance:
+            comparison = bench_performance.compare_manifest(args.compare_performance,
+                                                             MOVEMENT_INPUT)
+            print(json.dumps(comparison, indent=2))
+            return 0 if comparison["status"] == "pass" else 2
         if args.no_profile and args.profile_callers:
             raise BenchError("--profile-callers cannot be combined with --no-profile")
         variants = [parse_env(spec) for spec in (args.variant or ["cpu:"])]
@@ -1231,6 +1393,7 @@ def main(argv=None):
             raise BenchError("Variant names must be distinct")
         for _, env in variants:
             validate_gpu_audit_overrides(env)
+            validate_owned_overrides(env)
             for key, value in env.items():
                 if key.upper() == "RECOMP_AC97_READY" and value.strip() in ("", "0"):
                     message = ("legacy RECOMP_AC97_READY is enabled by presence, even for 0; "
@@ -1240,6 +1403,10 @@ def main(argv=None):
                     print(f"[bench] warning: {message}", file=sys.stderr, flush=True)
                 if key.upper() == "RECOMP_AUDIO_WAV":
                     raise BenchError("RECOMP_AUDIO_WAV cannot be supplied by a variant; use --capture-audio")
+        performance_collection = args.performance or (len(variants) > 1 and any(
+                key.upper() in PERFORMANCE_SWITCHES for _, env in variants for key in env))
+        if performance_collection:
+            validate_performance_variants(variants, args)
         audio_modes = {name: "on" if bench_control.audio_enabled(env) else "off"
                        for name, env in variants}
         mixed_audio = len(set(audio_modes.values())) > 1
@@ -1266,6 +1433,7 @@ def main(argv=None):
         out.mkdir(parents=True, exist_ok=False)
         results = []
         generation = None
+        executable_identity = None
         sequence = [v for _ in range(args.runs) for v in variants]
         if mixed_audio:
             print("[bench] audio-on/off runs are collection only; do not compare rates until "
@@ -1290,6 +1458,15 @@ def main(argv=None):
                         result["error"] = "game generation changed during the benchmark campaign"
                     else:
                         generation = run_generation
+                    if performance_collection:
+                        current_identity = (result.get("toolkit_tree"),
+                                            result.get("executable", {}).get("sha256"))
+                        if not all(current_identity):
+                            result["error"] = "toolkit tree or executable hash missing"
+                        elif executable_identity is not None and current_identity != executable_identity:
+                            result["error"] = "toolkit tree or executable changed during the benchmark campaign"
+                        else:
+                            executable_identity = current_identity
                 if not result.get("error"):
                     break
                 attempt_errors.append({"attempt": attempt + 1, "error": result["error"],

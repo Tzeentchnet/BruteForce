@@ -33,6 +33,13 @@ Default-off clean-surface readback elision has synthetic coverage only; dirty
 frames still read back and tracked-surface flips still wait. Retail correctness and
 performance of this experiment are unverified.
 
+Three independent default-off Phase 4 switches now have synthetic coverage:
+event-driven PFB acknowledgement, NV2A idle waiting and guarded per-PUT
+segment walking. The latter requires a regenerated title and fails closed on
+untracked USER-register writes or resets. None has a reviewed performance
+campaign or a new gameplay correctness result; see the
+[user guide](docs/USER_GUIDE.md#experimental-nv2a-wait-and-segment-options).
+
 Packed depth/stencil aliases and window clipping remain default-off experiments;
 their expanded ownership and clipping coverage is synthetic, not a gameplay
 or original-hardware guarantee. Movement benchmark collection exits 2 as

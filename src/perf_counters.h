@@ -35,10 +35,24 @@ typedef struct {
     uint64_t unsupported_hits;
 } BruteForceTexturePerfCounters;
 
+#define BRUTEFORCE_PERF_MAX_CALLERS 32u
+typedef struct {
+    uint32_t site, caller;
+    uint64_t calls, ticks;
+} BruteForceSubmitPerfCounter;
+
+typedef struct {
+    uint64_t calls, failures, ticks;
+} BruteForceShaderPerfCounters;
+
 typedef struct {
     BruteForceValidationPerfCounters guest_word;
     BruteForceValidationPerfCounters guest_range;
     BruteForceTexturePerfCounters texture;
+    BruteForceShaderPerfCounters pixel_shader_compile;
+    BruteForceSubmitPerfCounter pfb[BRUTEFORCE_PERF_MAX_CALLERS];
+    BruteForceSubmitPerfCounter put[BRUTEFORCE_PERF_MAX_CALLERS];
+    uint64_t pfb_overflow, put_overflow;
 } BruteForcePerfCounters;
 
 extern int g_bruteforce_perf_counters_enabled;
@@ -63,5 +77,8 @@ void bruteforce_perf_record_texture_eviction(void);
 void bruteforce_perf_record_texture_snapshot_eviction(void);
 void bruteforce_perf_record_texture_discard(void);
 void bruteforce_perf_record_texture_unsupported_hit(void);
+void bruteforce_perf_record_submit(int is_put, uint32_t site, uint32_t caller,
+                                   uint64_t ticks);
+void bruteforce_perf_record_pixel_shader_compile(int success, uint64_t ticks);
 
 #endif

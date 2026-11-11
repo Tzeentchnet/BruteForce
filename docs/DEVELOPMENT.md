@@ -93,6 +93,30 @@ For hardware-device coverage as well as WARP, set
 `BRUTEFORCE_TEST_D3D11_HARDWARE=1` before the pytest command.
 The host fixture does not contain game code and cannot run the game.
 
+For the camera-trace and presenter-size safety fixtures:
+
+```powershell
+cmake -S . -B build\smoke -G "Visual Studio 17 2022" -A x64 `
+  "-DBRUTEFORCE_GEN_DIR=$PWD\tests\fixtures\generated"
+cmake --build build\smoke --config Release --target `
+  bruteforce_camera_trace_test bruteforce_gpu_shared_present_test bruteforce_present_test
+$env:BRUTEFORCE_TEST_CAMERA_TRACE = "$PWD\build\smoke\Release\bruteforce_camera_trace_test.exe"
+$env:BRUTEFORCE_TEST_GPU_SHARED_PRESENT = "$PWD\build\smoke\Release\bruteforce_gpu_shared_present_test.exe"
+$env:BRUTEFORCE_TEST_PRESENT = "$PWD\build\smoke\Release\bruteforce_present_test.exe"
+$env:BRUTEFORCE_TEST_D3D11_HARDWARE = "1" # omit to use WARP only
+python -m pytest -q --basetemp build\smoke\pytest-camera-present `
+  tests\test_camera_trace.py tests\test_present.py
+```
+
+The generated camera function in this fixture is a stub: it produces
+synthetic 4:3, 16:9 and 64:27 perspective-shaped matrices or leaves
+orthographic/degenerate inputs unchanged. It checks trace output and
+guest/host state equivalence, including a split-shaped *candidate* viewport.
+The presenter fixture demonstrates that different clients can yield the
+same fitted 4:3 size. These tests do not establish camera ownership, reject
+split screen, or implement a wide mode. The shared-frame protocol case uses
+WARP; hardware coverage remains opt-in.
+
 For the focused render-scale transaction and launcher checks, use the
 configured synthetic build above:
 

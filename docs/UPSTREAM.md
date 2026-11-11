@@ -1499,6 +1499,11 @@ own GPU back end, an extended interface for it, and its own pacing fixes.
     it consistently for target sizing and presentation. The local fixed
     diagnostic-output path also previously treated the whole client as the
     4:3 picture, producing an incorrect native scale for letterboxed output.
+    A local fixture now confirms that 1280x960 and 1600x960 clients both
+    produce the same 1280x960 query result, although their fitted 16:9 and
+    64:27 pictures differ. A later shared-frame rejection can also choose the
+    CPU picture after projection, so sizing alone is not a frame/epoch and
+    fallback contract.
     *Change:* the project backend now fits fixed diagnostic dimensions to
     4:3, matching the existing live 4:3 query; no framework patch changed.
     For widescreen, add an aspect-aware output-size query or
@@ -1510,8 +1515,9 @@ own GPU back end, an extended interface for it, and its own pacing fixes.
     zero/minimized sizes; resize transitions; invalid aspects; submitted
     source dimensions; exact regression coverage for the existing 4:3
     output and CPU fallback. Local synthetic tests now cover 3840x2160 and
-    portrait fixed bounds, plus a hidden 600x800 live presenter resize;
-    they do not implement or validate widescreen.
+    portrait fixed bounds, a hidden 600x800 live presenter resize, the 4:3
+    size collision, and shared-frame fallback on WARP and the default
+    hardware adapter; they do not implement or validate widescreen.
     *Overlap:* checked 2026-11-11.
     [#215](https://github.com/sp00nznet/xboxrecomp/pull/215) supplies the
     merged scalable D3D11 presenter, while tracking

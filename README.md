@@ -33,6 +33,9 @@ Default-off clean-surface readback elision has synthetic coverage only; dirty
 frames still read back and tracked-surface flips still wait. Retail correctness and
 performance of this experiment are unverified.
 
+True Hor+ widescreen is not implemented; internal-resolution choices retain
+the 4:3 picture. The camera trace is diagnostic only.
+
 The pinned framework has been updated to xboxrecomp v0.17.0 plus selected
 post-release fixes. Fresh Release generation `20261111-002138-a9dbc18a`
 completed focused CPU and D3D11 tutorial/movement bring-up on the prior

@@ -130,6 +130,61 @@ def test_nonfinite_float_bits_are_preserved_exactly_in_json(native):
     assert record["owner"]["hyp_tangent_h_bits"] == "7F800000"
 
 
+@pytest.mark.parametrize(
+    ("mode", "aspect", "horizontal"),
+    [
+        ("perspective-4-3", "3FAAAAAB", "3F400000"),
+        ("perspective-16-9", "3FE38E39", "3F100000"),
+        ("perspective-64-27", "4017B426", "3ED80000"),
+    ],
+)
+def test_synthetic_perspective_outputs_are_observed_without_changes(
+    native, mode, aspect, horizontal
+):
+    assert records(run_camera(native, mode, switch="0")) == []
+    [record] = records(run_camera(native, mode, switch="1"))
+    assert record["args"] == {
+        "fov_bits": "42B40000", "aspect_bits": aspect,
+        "near_bits": "3F800000", "far_bits": "40C00000",
+    }
+    assert record["output_matrix_bits"] == [
+        horizontal, "00000000", "00000000", "00000000",
+        "00000000", "3F800000", "00000000", "00000000",
+        "00000000", "00000000", "3F99999A", "BF99999A",
+        "00000000", "00000000", "3F800000", "00000000",
+    ]
+
+
+@pytest.mark.parametrize("mode", ["orthographic-unchanged", "degenerate-unchanged"])
+def test_unchanged_nonperspective_matrix_is_observed_without_changes(native, mode):
+    assert records(run_camera(native, mode, switch="0")) == []
+    [record] = records(run_camera(native, mode, switch="1"))
+    assert record["input_matrix_bits"] == record["output_matrix_bits"]
+    expected = ["00000000"] * 16
+    if mode == "orthographic-unchanged":
+        for i in (0, 5, 10, 15):
+            expected[i] = "3F800000"
+    else:
+        expected[0] = "7FC12345"
+    assert record["output_matrix_bits"] == expected
+
+
+def test_split_shaped_viewport_remains_only_a_candidate(native):
+    assert records(run_camera(native, "split-candidate", switch="0")) == []
+    [full] = records(run_camera(native, "perspective-4-3", switch="1"))
+    [record] = records(run_camera(native, "split-candidate", switch="1"))
+    for key in ("caller_va", "return_va", "parent_return_va", "args",
+                "output_matrix_bits"):
+        assert record[key] == full[key]
+    assert record["viewport"]["scope"] == "caller_context_candidate"
+    assert full["viewport"]["rect_candidate_bits"] == [
+        "00000000", "00000000", "3F800000", "3F800000",
+    ]
+    assert record["viewport"]["rect_candidate_bits"] == [
+        "00000000", "00000000", "3F000000", "3F800000",
+    ]
+
+
 @pytest.mark.parametrize("mode", ["unmapped-matrix", "partial-matrix", "outside-matrix",
                                   "guard-matrix"])
 def test_unreadable_matrix_is_null_without_changing_execution(native, mode):

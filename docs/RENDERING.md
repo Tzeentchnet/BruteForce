@@ -256,7 +256,20 @@ and guest-facing frame statistics continue to receive a guest-sized centre
 crop, downsampled first when `S` is not one. The presenter's current
 `gpu_present_output_size` query computes only a 4:3 rectangle, so native
 wide sizing requires an aspect-aware framework API even though the shared
-presenter already respects submitted source dimensions.
+presenter already respects submitted source dimensions. It is not possible
+to reconstruct a wide output from the returned 4:3 rectangle: the synthetic
+presenter fixture shows that 1280x960 and 1600x960 clients both report
+1280x960, while their fitted 16:9 pictures would be 1280x720 and 1600x900.
+Their 64:27 pictures would likewise be 1280x540 and 1600x675.
+
+The requested aspect alone is not an authority for the displayed frame.
+The presenter can reject a shared frame because it is unavailable, stale,
+blocked on its keyed mutex, disallowed by CPU/PVIDEO composition or a pinned
+framebuffer, or incompatible with capture. It may then use the CPU picture,
+or fail the presentation path. A wide projection therefore also requires
+an ordered frame/resize-epoch and fallback contract that prevents a stale
+or rejected wide picture from being treated as an accepted wide frame.
+No such Hor+ contract is implemented.
 
 ### Textures and caching
 

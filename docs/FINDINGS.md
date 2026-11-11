@@ -2382,6 +2382,42 @@ complete E2. Menus, movie/cutscene identity, the second caller, split screen,
 frustum rebuilds, projected markers and object/world/effect culling still
 need operator-classified coverage.
 
+#### Hor+ implementation safety review
+
+Read-only inspection of North American retail generated code
+`20261111-002138-a9dbc18a` shows that the observed parent returns
+`0x00177DBC` and `0x00177E34` are two calls from `0x00177D50` to
+`0x0006BE90`: the latter call reuses values saved from virtual getters
+earlier in the routine. Their scene meanings remain unclassified, so neither
+the parent returns nor the candidate viewport identify safe single-player
+gameplay. On some paths `0x0006BE90` calls `0x0006C840` before invoking the
+perspective builder. That routine uses the candidate angle/tangent fields to
+construct plane-like values; their complete visibility role is a hypothesis.
+After the builder returns, `0x0006BE90` can also modify the matrix using the
+candidate rectangle before passing it to `0x0036F610`. A final-matrix change
+alone is therefore not evidence of synchronized culling or view ownership.
+
+The 4:3 `picture_size` helper used by the current output query returns
+1280x960 for both a 1280x960 client and a 1600x960 client. A 16:9 fit would
+instead be 1280x720 and 1600x900 respectively; a 64:27 fit would be
+1280x540 and 1600x675. Thus the query loses information needed to size a
+wide picture. Shared-frame selection can also fall back to CPU pixels after
+the guest has built its projection. A viable implementation must bind
+projection, source dimensions, resize epoch and actual presentation
+fallback coherently; a cached requested aspect does not establish that.
+
+The Release synthetic camera and presenter fixtures passed 59 pytest cases
+with WARP and the default hardware adapter enabled. They verify trace state
+equivalence with stub-generated perspective-shaped matrices, unchanged
+orthographic/degenerate inputs and a split-shaped candidate viewport, plus
+the 4:3 output-size collision and WARP and hardware shared-frame fallback
+protocol. They do not establish title scene classification or test a Hor+
+mode. A separate 42-case WARP/hardware selection of existing 4:3 scale
+fixtures passed stale-proposal, native resize rollback/retry and flip
+fallback cases; it does not exercise a wide-frame epoch. No emulator or
+retail run was performed for this review; the existing renderer and 4:3
+presentation remain unchanged.
+
 #### Required Brute Force boundary
 
 A first functional mode must be opt-in, D3D11-only and default to unchanged
@@ -2408,11 +2444,11 @@ A first functional mode must be opt-in, D3D11-only and default to unchanged
    culling, effects, HUD, movies and split-screen differences rather than
    hiding them.
 
-The safest first code slice is diagnostic only: an opt-in trace at the
-camera/projection boundary that records bounded call-site and camera-state
-classes without changing matrices. It requires regeneration because
-`recomp_manual.c` participates in the generated-source fingerprint. No such
-hook has been added yet.
+The implemented first slice is diagnostic only: the opt-in trace records
+bounded call-site and camera-state candidates without changing matrices.
+It requires regeneration because `recomp_manual.c` participates in the
+generated-source fingerprint. The remaining classification and rendering
+gates above are not satisfied.
 
 #### Blood Wake v0.2.5-v0.3.3 refresh
 

@@ -111,13 +111,13 @@ optional persistent pixel shader cache. Internal-resolution choices are
 **Native (match output)**, 2160p, 1440p, 1080p, 720p and the default
 480p guest resolution. These are 4:3 picture heights: for example, 2160p is
 a 2880x2160 rendered picture inside a 3840x2160 output. They do not add
-widescreen. The Experimental tab exposes window clipping, asynchronous
-visibility reports, programmable near-plane clipping, depth and stencil
-aliases, and shared GPU presentation. The launcher defaults to Direct3D 11
-at 480p with experimental options off or using their existing defaults;
-existing saved renderer choices are retained. Graphical `build.py` runs also
-default to D3D11 unless `RECOMP_GPU` explicitly selects another path. The
-individual GPU paths have the limitations below.
+widescreen; true Hor+ is not implemented. The Experimental tab exposes
+window clipping, asynchronous visibility reports, programmable near-plane
+clipping, depth and stencil aliases, and shared GPU presentation. The launcher
+defaults to Direct3D 11 at 480p with experimental options off or using their
+existing defaults; existing saved renderer choices are retained. Graphical
+`build.py` runs also default to D3D11 unless `RECOMP_GPU` explicitly selects
+another path. The individual GPU paths have the limitations below.
 
 The guest-visible EEPROM video preference defaults to NTSC 4:3 480i/60.
 Set either option to the exact value `1` before launch to advertise widescreen

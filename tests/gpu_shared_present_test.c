@@ -49,6 +49,24 @@ static int wait_for_discard(IDXGIKeyedMutex *producer, int allow_shared, uint64_
     return 0;
 }
 
+static int run_picture_size_test(void)
+{
+    uint32_t first_width, first_height, second_width, second_height;
+
+    REQUIRE(picture_size(1280, 960, &first_width, &first_height),
+            "fit a 4:3 client");
+    REQUIRE(picture_size(1600, 960, &second_width, &second_height),
+            "fit a wider client");
+    REQUIRE(first_width == 1280 && first_height == 960 &&
+            second_width == first_width && second_height == first_height,
+            "different clients have the same 4:3 picture-size result");
+    REQUIRE(!picture_size(0, 960, &first_width, &first_height) &&
+            !picture_size(1280, 0, &first_width, &first_height),
+            "reject empty clients");
+    puts("4:3 picture-size ambiguity passed");
+    return 1;
+}
+
 static int run_shared_test(int hardware)
 {
     D3D_FEATURE_LEVEL feature = D3D_FEATURE_LEVEL_11_0, obtained;
@@ -169,6 +187,8 @@ static int run_shared_test(int hardware)
 
 int main(int argc, char **argv)
 {
+    if (argc == 2 && strcmp(argv[1], "sizes") == 0)
+        return run_picture_size_test() ? 0 : 1;
     if (argc != 2 || (strcmp(argv[1], "warp") && strcmp(argv[1], "hardware")))
         return 2;
     return run_shared_test(strcmp(argv[1], "hardware") == 0) ? 0 : 1;

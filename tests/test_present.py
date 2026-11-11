@@ -23,6 +23,18 @@ def test_presentation_snapshots_are_consistent():
     not SHARED_EXE,
     reason="set BRUTEFORCE_TEST_GPU_SHARED_PRESENT to the native shared presentation fixture",
 )
+def test_4_3_output_size_does_not_identify_the_client():
+    result = subprocess.run(
+        [SHARED_EXE, "sizes"], capture_output=True, text=True, check=False, timeout=15
+    )
+    assert result.returncode == 0, result.stderr
+    assert "4:3 picture-size ambiguity passed" in result.stdout
+
+
+@pytest.mark.skipif(
+    not SHARED_EXE,
+    reason="set BRUTEFORCE_TEST_GPU_SHARED_PRESENT to the native shared presentation fixture",
+)
 @pytest.mark.parametrize("device", [
     "warp",
     pytest.param("hardware", marks=pytest.mark.skipif(

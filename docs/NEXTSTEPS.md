@@ -756,6 +756,19 @@ readback and wide presentation. Brute Force has a conventional perspective
 builder and camera aspect/tangent state that appear suitable, but their
 runtime roles and all culling paths are not yet classified.
 
+**Safety gate:** no Hor+ mode is enabled or exposed. The existing trace does
+not identify a gameplay-only caller, a safe full-screen view, or split
+screen. A matrix-only change cannot provide the requested 4:3 fallbacks or
+preserve title culling. The presenter reports only a fitted 4:3 size, and
+its shared frame can subsequently be rejected in favour of CPU pixels.
+Implementing a wide mode requires a coherent per-frame picture/resize epoch
+and fallback contract as well as operator-classified title evidence; do not
+treat a requested aspect or a candidate viewport as proof of the displayed
+picture. The new synthetic fixtures cover trace state preservation for
+perspective-shaped and unchanged matrices and demonstrate the presenter's
+4:3 size collision; they do not implement or validate Hor+ or split-screen
+rejection.
+
 1. **Implemented; retail coverage pending: diagnostic-only camera trace.**
    `BRUTEFORCE_CAMERA_TRACE=1` wraps the central perspective builder and
    records bounded JSON lines containing its caller, entry arguments,
@@ -780,7 +793,10 @@ runtime roles and all culling paths are not yet classified.
 3. **Add one aspect authority.** Plan an opt-in `RECOMP_*` control for 4:3,
    16:9, 64:27/21:9 and display matching, with 4:3 the default and invalid
    input rejected. Keep `K` independent of `RECOMP_GPU_SCALE`; CPU rendering
-   remains 4:3. Decide an ultrawide cap only after side-region validation.
+   remains 4:3. Bind it to the picture and resize epoch actually eligible
+   for presentation, and define how a later shared-frame rejection remains
+   consistent with projection and the 4:3 fallback. Decide an ultrawide cap
+   only after side-region validation.
 4. **Implement title Hor+.** Preserve vertical FOV, widen horizontal
    projection and matching culling by `K`, and correct world-to-screen
    markers. Keep addresses and structure knowledge in `src/`, not a framework

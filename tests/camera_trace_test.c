@@ -51,6 +51,7 @@ static uint8_t expected_low[REGION_SIZE], expected_global[REGION_SIZE];
 static uint8_t expected_high[REGION_SIZE];
 static volatile LONG generated_calls;
 static int write_stack, write_matrix;
+static uint32_t generated_horizontal;
 static RECOMP_TLS int incoming_errno;
 static RECOMP_TLS DWORD incoming_last_error;
 static RECOMP_TLS unsigned incoming_host_mxcsr;
@@ -79,14 +80,23 @@ static void put32(uint32_t va, uint32_t value)
 
 void sub_0006EE30_gen(void)
 {
+    static const uint32_t perspective[16] = {
+        0, 0, 0, 0,
+        0, 0x3F800000u, 0, 0,
+        0, 0, 0x3F99999Au, 0xBF99999Au,
+        0, 0, 0x3F800000u, 0
+    };
     unsigned i;
     incoming_last_error = GetLastError();
     incoming_errno = errno;
     incoming_host_mxcsr = _mm_getcsr();
     InterlockedIncrement(&generated_calls);
     if (write_matrix)
-        for (i = 0; i < 16; ++i)
-            put32(g_ecx + i * 4u, 0x40000000u + i);
+        for (i = 0; i < 16; ++i) {
+            uint32_t value = generated_horizontal ?
+                (i == 0 ? generated_horizontal : perspective[i]) : 0x40000000u + i;
+            put32(g_ecx + i * 4u, value);
+        }
     if (write_stack)
         put32(g_esp + 0x18u, 0xA1B2C3D4u);
 
@@ -223,6 +233,7 @@ static void initialize_common(void)
     put32(MANAGER + 0x2Cu, 0x3F800000u);
     put32(MANAGER + 0x30u, 0x3F800000u);
     write_stack = write_matrix = 1;
+    generated_horizontal = 0;
 }
 
 static int has_guard(const char *mode)
@@ -237,7 +248,35 @@ static void prepare_case(const char *mode)
                          strcmp(mode, "unknown") == 0 ? 0x00123456u : 0x0006BFA2u;
     initialize_common();
     initialize_stack_and_matrix(STACK, MATRIX, FRAME, return_va);
-    if (strcmp(mode, "high") == 0) {
+    if (strcmp(mode, "perspective-4-3") == 0 ||
+        strcmp(mode, "perspective-16-9") == 0 ||
+        strcmp(mode, "perspective-64-27") == 0 ||
+        strcmp(mode, "split-candidate") == 0) {
+        uint32_t aspect = 0x3FAAAAABu;
+        generated_horizontal = 0x3F400000u;
+        if (strcmp(mode, "perspective-16-9") == 0) {
+            aspect = 0x3FE38E39u;
+            generated_horizontal = 0x3F100000u;
+        } else if (strcmp(mode, "perspective-64-27") == 0) {
+            aspect = 0x4017B426u;
+            generated_horizontal = 0x3ED80000u;
+        } else if (strcmp(mode, "split-candidate") == 0) {
+            put32(MANAGER + 0x2Cu, 0x3F000000u);
+        }
+        put32(STACK + 4u, 0x42B40000u);
+        put32(STACK + 8u, aspect);
+        put32(STACK + 16u, 0x40C00000u);
+    } else if (strcmp(mode, "orthographic-unchanged") == 0 ||
+               strcmp(mode, "degenerate-unchanged") == 0) {
+        unsigned i;
+        int orthographic = strcmp(mode, "orthographic-unchanged") == 0;
+        for (i = 0; i < 16; ++i)
+            put32(MATRIX + i * 4u, orthographic && i % 5u == 0 ?
+                  0x3F800000u : 0u);
+        if (!orthographic)
+            put32(MATRIX, 0x7FC12345u);
+        write_matrix = 0;
+    } else if (strcmp(mode, "high") == 0) {
         unsigned i;
         matrix_va = HIGH_BASE + 0x1000u;
         for (i = 0; i < 16; ++i)

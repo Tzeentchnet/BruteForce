@@ -82,10 +82,12 @@ python -m pytest -q tests\test_d3d11.py::test_detailed_performance_counters `
 
 The segment fixture checks the read-only alias, fail-closed untracked stores
 and resets, initial GET/JUMP, partial packets, JUMP/CALL/RETURN, producer
-backpressure and held-flip dispatch. Its executor uses synthetic ordered
-markers, not the real PGRAPH/report backend; the existing fence, pushbuffer,
-PGRAPH and interrupt fixtures cover those components separately. These tests
-do not establish integrated retail timing, presented pixels or performance.
+backpressure and held-flip dispatch. Its ordering case also verifies that a
+pending PGRAPH trap can release PFB without advancing GET or consuming the
+queued segment. Its executor uses synthetic ordered markers, not the real
+PGRAPH/report backend; the existing fence, pushbuffer, PGRAPH and interrupt
+fixtures cover those components separately. These tests do not establish
+integrated retail timing, presented pixels or performance.
 The title fence fixture also checks the opt-in aggregate shader compile
 counter's success, failure and reset behavior; the WARP fixture checks an
 actual uncached pixel-shader compile, and the benchmark parser checks its

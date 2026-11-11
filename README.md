@@ -35,9 +35,12 @@ performance of this experiment are unverified.
 
 Three independent default-off Phase 4 switches now have synthetic coverage:
 event-driven PFB acknowledgement, NV2A idle waiting and guarded per-PUT
-segment walking. The latter requires a regenerated title and fails closed on
-untracked USER-register writes or resets. None has a reviewed performance
-campaign or a new gameplay correctness result; see the
+segment walking. The latter requires current generated store hooks and fails
+closed on untracked USER-register writes or resets. A reproduced
+segment/PGRAPH/PFB deadlock is fixed without advancing GET or completing the
+queued segment. One no-retry segment-only smoke and one no-retry all-three
+smoke reached reviewed tutorial gameplay; neither is an A/B/A performance
+campaign, distinct-world FPS result or CPU-reference match. See the
 [user guide](docs/USER_GUIDE.md#experimental-nv2a-wait-and-segment-options).
 
 Packed depth/stencil aliases and window clipping remain default-off experiments;
@@ -58,11 +61,19 @@ True Hor+ widescreen is not implemented; internal-resolution choices retain
 the 4:3 picture. The camera trace is diagnostic only.
 
 The pinned framework has been updated to xboxrecomp v0.17.0 plus selected
-post-release fixes. Fresh Release generation `20261111-002138-a9dbc18a`
-completed focused CPU and D3D11 tutorial/movement bring-up on the prior
-v0.17 tree, before the current pipeline and compatibility changes.
-Matched-reference and reviewed performance gates remain open, and the
-published measurements still belong to the previous reviewed generation.
+post-release fixes. Integrated Release generation
+`20261111-084222-7bdb6e56` completed one audio-off CPU and one D3D11
+tutorial/movement bring-up without retries. Reviewed sample frames show
+gameplay without the controls panel or a cinematic, but the single pair is
+not an A/B/A performance result. Matched-reference and reviewed performance
+gates remain open, and the published measurements still belong to the
+previous reviewed generation.
+
+One additional integrated D3D11 attempt reached the same movement window at
+the 4K preset with mipmaps and anisotropy enabled. It confirms the 2880x2160
+4:3 render path can run on the available hardware, but the observed tutorial
+texture declared no lower levels and the 3440x1440 display cannot establish
+native 4K output.
 
 See [current findings](docs/FINDINGS.md) and
 [next steps](docs/NEXTSTEPS.md) for the detailed validation boundary.

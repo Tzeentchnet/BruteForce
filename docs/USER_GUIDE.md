@@ -882,11 +882,11 @@ Unset or `0` retains the generated polling routine; any other value stops with
 a diagnostic. This option does not clear the PFB bit itself and does not bypass
 flip holds. Its event is signalled only after the framework's real
 acknowledgement clears the bit, while a short timer provides IRQ safe points
-and mandatory rechecks. It is default-off; the earlier version completed
-only one corrected automated movement smoke, while this bounded revision has
-not been measured in-game. It has not passed the reviewed alternating
-performance comparison, G2, G3, or CPU-reference equivalence, and may change
-guest interrupt timing. Do not use it as a general performance preset yet.
+and mandatory rechecks. It is default-off. The bounded revision reached
+reviewed movement once in a no-retry all-three bring-up, but it has not passed
+the reviewed alternating performance comparison, G2, G3, or CPU-reference
+equivalence and may change guest interrupt timing. Do not use it as a general
+performance preset yet.
 The wait now stops with an error after 30 seconds if the real busy bit remains
 set; it does not clear the bit on timeout.
 
@@ -913,16 +913,22 @@ Two other switches are independent and default off:
   investigation; do not disable the guard to obtain a result.
 
 The queue has 128 entries and a five-second producer/lock limit. It does not
-bypass guest fence or GET waits. A flush is not acknowledged while an older
-queued segment or flip hold remains. `BRUTEFORCE_PERF_COUNTERS=1` records
-interval PFB and PUT calls and elapsed wall time by verified guest call site
-and return address; unknown callers are zero, and table overflow is reported.
+bypass guest fence or GET waits. A flush is normally not acknowledged while
+an older queued segment or flip hold remains. If the executor is waiting for
+a guest PGRAPH software-trap acknowledgement, PFB may acknowledge so the
+guest can leave its poll and service the interrupt; GET, the queued segment,
+the flip hold and PGRAPH interrupt state remain unchanged until normal
+completion. `BRUTEFORCE_PERF_COUNTERS=1` records interval PFB and PUT calls
+and elapsed wall time by verified guest call site and return address; unknown
+callers are zero, and table overflow is reported.
 The same flag records interval pixel-shader compile/create time and failures
 even with the persistent shader cache disabled; cache-hit timings remain in
 the existing `GPU-PSCACHE` diagnostics when that cache is enabled.
 The framework emits cumulative idle and queue snapshots. These counters and
 `--profile-callers` add overhead and must be equal on both sides. Synthetic
-fixtures cover the mechanisms but not their combined behavior in this game.
+fixtures cover the mechanisms. One no-retry segment-only and one no-retry
+all-three smoke reached reviewed tutorial movement, but they do not establish
+matched presentation or performance.
 
 For each experiment after regenerating and building the final tree, collect a
 separate baseline/variant pair (example: PFB only). The Release build must

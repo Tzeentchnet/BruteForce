@@ -7,33 +7,41 @@ tracked in [UPSTREAM.md](UPSTREAM.md). The current
 toolkit uses xboxrecomp v0.17.0 at
 `343b6d8901723b37ce568b2418c5df4e1fe1d223`, selected post-release commits
 from #314, #319 and #320, and 42 local patches. Its isolated and independently
-replayed tree is `64ce266664a875084be63cb32148b3ae78c55185`.
-The integrated synthetic build is clean: the framework tools report 995
-passed, 2 skipped and 134 subtests passed; the project suite reports 966
-passed with WARP and the available hardware adapter; nine focused framework
-fixture groups report 41 CTests passed; and the presenter suite reports 19
-passed. The validation found and fixed missing display-awake linkage in the
-presenter script and missing Phase 4 stubs in the camera fixture. No retail
-or xemu run was used for those fixes.
+replayed tree is `3164795a5ed52658abb41f2630ed8153e6b2cce0`.
+The framework tools on that tree report 995 passed, 2 skipped and 134
+subtests passed; the project suite reports 966 passed with WARP and the
+available hardware adapter; nine focused framework groups report 41 CTests
+passed; and the presenter suite reports 19 passed. The Phase 4 subset
+comprises 22 of those CTests, while generated-store coverage reports 3 passed
+and the title-side fence, pushbuffer, PGRAPH, interrupt and toolkit selection
+reports 67 passed. The validation includes the runtime PGRAPH/PFB deadlock
+fix and its segment-ordering fixture.
 
-Supported retail generation `20261111-002138-a9dbc18a` is a Release build on
-the earlier v0.17 tree `131abd8d1f4559bb36dba4391e4c644925cff5df`;
-it does not contain the new pipeline changes. Its executable SHA-256 is
-`f1bf8622df3b651af6747566b4628a1d8ca18d7a01a4c196df910124cb9f7844`;
+Supported retail generation `20261111-084222-7bdb6e56` is a Release build on
+the current runtime tree `3164795a5ed52658abb41f2630ed8153e6b2cce0`; the
+generation's `tools` and `templates` fingerprints exactly match that tree, so
+no unchanged title code was regenerated. Its
+37,575,168-byte executable SHA-256 is
+`132bece507c1773c41eeaa6549687d2c493a121c2c102452a10465d5a584f073`;
 it translated all 22,295 identified functions with zero failures, six
-unresolved direct-call targets and 11 untranslated instruction sites. One
-audio-off, four-thread CPU run and one D3D11 run each reached the scripted
-tutorial world, stationary hold and movement window without a retry, reached
-generated stub, untranslated-instruction hit, ICALL failure, renderer-device
-error or crash.
+unresolved direct-call targets and 11 untranslated instruction sites. Before
+the runtime-only fix, the codegen-identical executable completed one
+audio-off, four-thread CPU run and one D3D11 run through the scripted tutorial
+world, stationary hold and movement window without retry, generated stub,
+untranslated-instruction hit, ICALL failure, renderer-device error or crash.
+Reviewed sample captures show gameplay, the character and HUD without the
+controls panel, a cinematic or a solid-black frame. The rebuilt executable
+then completed the two fixed-tree Phase 4 smokes described below. The earlier
+`20261111-002138-a9dbc18a` generation remains the exact xemu-matched reference
+because the reference comparison predates the integrated pipeline.
 
 The reviewed performance campaigns still use old generation
 `20261103-145850-21e3091e` on tree
-`25a2a713738b7aabb1c21ef6720765ff93ccffea`. The new bring-up runs have one
-attempt per renderer and no reviewed world labels; their flip and whole-frame
-change figures are not a performance comparison. Do not compare the old
-campaign measurements with the v0.17 generation without a fresh A/B/A
-campaign.
+`25a2a713738b7aabb1c21ef6720765ff93ccffea`. The integrated bring-up has one attempt per renderer and only representative
+reviewed frames, not a continuously labeled world interval. Its flip and
+whole-frame change figures are not a performance comparison. Do not compare
+the old campaign measurements with the current generation without a fresh
+A/B/A campaign.
 
 sp00nznet/xboxrecomp#297, sp00nznet/xboxrecomp#298,
 sp00nznet/xboxrecomp#299 and sp00nznet/xboxrecomp#300 merged in v0.17.0;
@@ -184,18 +192,26 @@ Direct3D 12 work remain deferred. See
   fixtures. Title captures were visually matched but not byte-identical or
   frame-locked, so strict output identity remains open and the cache stays
   opt-in.
-- Phase 4's three separately selectable mechanisms are now implemented and
-  synthetic-tested: `RECOMP_PFB_FLUSH_WAIT`, `RECOMP_NV2A_IDLE_WAIT`, and
-  `RECOMP_NV2A_SEGMENTS`. Patch 0045 bounds waits and queues; segmented mode
-  guards the USER mapping, consumes captured PUTs in order and fails closed
-  on untracked writes or resets. It needs a newly regenerated title. No new
-  title or xemu campaign was run for these changes. The next performance
-  work is four separate baseline/candidate A/B/A campaigns (flush, idle,
-  segment, and all three), at least three runs per variant, one generation,
-  scene, script, thread count and otherwise identical options. Review
-  distinct-world frames and complete caller profiles, then separately check
-  matched CPU-reference G4 and 2× stationary G5. Guard/reset failures are
-  evidence to investigate, not permission to bypass the handshake.
+- Phase 4's three separately selectable mechanisms are implemented behind
+  `RECOMP_PFB_FLUSH_WAIT`, `RECOMP_NV2A_IDLE_WAIT`, and
+  `RECOMP_NV2A_SEGMENTS`. The first combined smoke exposed a real deadlock:
+  the segment queue kept PFB busy while the executor synchronously waited for
+  a PGRAPH software-trap acknowledgement, but the guest could not service the
+  interrupt until its PFB poll returned. A segment-only run reproduced the
+  same boundary as a 60-second stall after flip 12,611. Patch 0045 now permits
+  PFB acknowledgement while a PGRAPH trap is pending without advancing GET,
+  completing the segment or clearing the interrupt. The fixed tree passed
+  exactly one no-retry segment-only smoke and one no-retry all-three smoke;
+  both reached reviewed tutorial movement with the character and HUD visible
+  and no Basic Controls panel, cinematic, solid-black sample, queue wait or
+  overflow. These are bring-up checks, not distinct-world FPS or an A/B/A
+  result. The next performance work remains four separate baseline/candidate
+  A/B/A campaigns (flush, idle, segment, and all three), at least three runs
+  per variant, one generation, scene, script, thread count and otherwise
+  identical options. Review distinct-world frames and complete caller
+  profiles, then separately check matched CPU-reference G4 and 2× stationary
+  G5. Guard/reset failures remain evidence to investigate, not permission to
+  bypass the handshake.
 - Both variants of the new movement campaign logged unsupported texture
   format `0x2E` (`LIN_D24S8`). Its effect on the visible image is not yet
   established; the CPU reference also lacks a decoder for that format.
@@ -500,8 +516,14 @@ refusal. Scale 1 remains the launcher default. The main executable and
 fixtures build. The synthetic D3D11 matrix passed 234 cases with hardware
 coverage enabled, and 22 launcher and three presenter cases passed. Bounded
 scale-1 and 4.5x runs retained CPU-decoded opening movies, including the intro
-montage. No matched retail gameplay or native-4K-display campaign has been
-run, so G4/G5 and the reported default 6 fps remain open.
+montage. One integrated 4.5x D3D11 attempt now reached the scripted movement
+window without retry, logged a 2880x2160 4:3 render size, and produced reviewed
+sample gameplay frames without a panel, cinematic, missing character or
+solid-black image. Mipmaps and 8x anisotropy were enabled, but the bounded
+runtime diagnostic observed only a tutorial texture with no additional levels
+declared, so the run does not establish lower-level sampling. It was not a
+matched or A/B/A campaign, and the 3440x1440 display cannot validate native
+4K output; G4/G5 remain open.
 
 1. **Implemented: add the scale to the D3D11 back end.** Adapt the generic parts only:
    the single place that decides the scale, the surface sizing, the epoch
@@ -559,7 +581,7 @@ run, so G4/G5 and the reported default 6 fps remain open.
    contents migrate, but changed-size depth/stencil contents do not; guest
    reinitialization after resize is not yet verified. A VRAM budget and device
    recovery remain open in D; fixed launcher preset changes require a restart.
-8. **Synthetic hardware implemented; retail gameplay pending.** Synthetic WARP and hardware fixtures: scale 1 matches the
+8. **Synthetic hardware and one retail bring-up implemented; matched gameplay pending.** Synthetic WARP and hardware fixtures: scale 1 matches the
    current output exactly; scale 2 downsampled matches scale 1 within a
    stated tolerance on a fixture with draws, partial clears, window clips
    and render-to-texture; readback is at guest size; aliases and visibility
@@ -573,8 +595,9 @@ run, so G4/G5 and the reported default 6 fps remain open.
    applicable. Hardware also exercises a hidden live presenter resize and its
    flip-only fallback. These are synthetic, not a title run. Bounded earlier
    4.5x hardware captures show all three opening movie stages. Add a
-   controlled retail gameplay and live-resize campaign, including evidence
-   that depth/stencil is reinitialized.
+   controlled matched gameplay and live-resize campaign, including evidence
+   that depth/stencil is reinitialized. The integrated 4.5x movement attempt
+   establishes only successful bring-up and representative visible gameplay.
 9. **Recast G5.** "G1 holds at 2× internal resolution" becomes a measurement
    at 1080p and 4K presets, A/B/A against scale 1, reporting distinct world
    frames and the GPU, driver and scale used. Record results in FINDINGS.
@@ -749,12 +772,14 @@ These are synthetic results, not a title comparison.
   current implementation on one generation with matched scene/input and
   alternating A/B/A runs; retain an uninstrumented baseline because detailed
   counters add overhead.
-- First measure the event-driven flush acknowledgement alone with three
-  poll/event pairs, caller profiles, fixed counters and reviewed world
+- The fixed segment-only and all-three bring-up smokes reached reviewed
+  movement once each without retry. They do not replace the required
+  campaign. First measure the event-driven flush acknowledgement alone with
+  three poll/event pairs, caller profiles, fixed counters and reviewed world
   captures. Explain its high smoke-run timer/recheck counts and keep it
-  default-off until G2, G3 and correctness gates pass. Only then add the idle
-  NV2A-thread wait and segment-at-a-time walking behind separate switches;
-  compare the combined milestone and isolate switches to diagnose regressions.
+  default-off until G2, G3 and correctness gates pass. Then measure the idle
+  NV2A-thread wait and segment-at-a-time walking independently before the
+  combined milestone; isolate switches to diagnose regressions.
 - Validate the checked cache, explicit logical-bound registrations, alias and
   layout-replacement behavior and framework P8 decoder on the title and
   additional drivers;
@@ -784,10 +809,11 @@ These are synthetic results, not a title comparison.
   and precompiles raw, gathered, point, and fixed-function variants during
   loading. Reuse the cache/preparation concept only through Brute Force's own
   routes and identities; do not copy its wrapper addresses or shader groups.
-- Investigate the intermittent loading hang, including the stalled candidate
-  boot. Default-off bounded PFB-wait and shader-preparation diagnostics and
-  bounded verification-skip reports provide evidence without satisfying a
-  wait or changing shader-worker ordering; no hang root cause is established.
+- The reproduced Phase 4 loading hang was a segment/PGRAPH/PFB dependency
+  cycle and is fixed on the current tree. Retain the bounded PFB-wait,
+  shader-preparation and verification-skip diagnostics for any unrelated
+  loading hang; they provide evidence without satisfying a wait or changing
+  shader-worker ordering.
 - The independent `RECOMP_DISPLAY_AWAKE=1` candidate requests a display hold
   only for a visible foreground, non-minimized host and releases on background,
   minimize or close. Synthetic API-substitution covers failures and window

@@ -98,14 +98,21 @@ backend-contract, PFB-flush, GPU-audit, raster-batch and EEPROM fixtures also
 pass.
 
 Patch [0045](../patches/xboxrecomp/0045-bounded-nv2a-segments-and-waits.patch)
-adds a 42nd local patch; its separately reconstructed tree is
-`64ce266664a875084be63cb32148b3ae78c55185`. Both the private implementation
-checkout and a second independent local replay verify against that tree. The
-shared local toolkit now uses this verified tree; generated title output has
-not yet been regenerated. Integrated validation also corrected patch 0039's
+adds a 42nd local patch. Its initial separately reconstructed tree was
+`64ce266664a875084be63cb32148b3ae78c55185`; the PGRAPH/PFB deadlock fix
+supersedes it with independently replayed tree
+`3164795a5ed52658abb41f2630ed8153e6b2cce0`. The shared local toolkit uses
+the latter tree. Generated title output `20261111-084222-7bdb6e56` has the
+same `tools` and `templates` fingerprints, so it was rebuilt against the
+runtime-only fix without regenerating unchanged title code. Integrated
+validation also corrected patch 0039's
 presenter script so each direct `fb_present.c` consumer links
 `display_awake.c`. The framework tools report 995 passed, 2 skipped and 134
-subtests passed; 41 focused CTests and 19 presenter cases also pass.
+subtests passed on the fixed tree; the project suite reports 966 passed with
+WARP and the available hardware adapter; nine focused framework groups report
+41 CTests passed; and the presenter suite reports 19 passed. The Phase 4
+subset comprises 22 CTests, generated-store coverage reports 3 passed, and 67
+title-side synchronization/toolkit cases pass.
 
 ### Bounded acknowledgement, idle waiting and guarded PUT segments
 
@@ -113,34 +120,46 @@ subtests passed; 41 focused CTests and 19 presenter cases also pass.
   busy-polls when idle; sampling only the latest PUT can collapse publication
   boundaries and place a later segment on the wrong side of a flip hold.
   Complete interception is not guaranteed by a small static list of guest
-  functions.
+  functions. The initial segment implementation also treated every queued
+  segment as a reason to hold PFB busy. That deadlocks when the executor is
+  synchronously waiting for a PGRAPH software-trap acknowledgement: the
+  guest cannot leave its PFB poll to service the interrupt.
 - **Evidence:** earlier Brute Force profiles and the dated PFB smoke are
   recorded in item 17 below; neither establishes a new speedup. In the
   supported `20261111-002138-a9dbc18a` generated code, the device setup writes
   a physical-zero bootstrap JUMP before calling KickOff. The two observed PUT
   stores occur in `sub_00371FA0` and `sub_00372050`; the former also stores
   to a shadow RAM register, not always the USER aperture. This is static
-  evidence, not proof that every runtime write is covered.
+  evidence, not proof that every runtime write is covered. On current
+  generation `20261111-084222-7bdb6e56`, one all-three attempt waited on
+  PGRAPH trap `0x02FFC283` with PFB still busy and fail-stopped after the
+  30-second bounded wait. One segment-only attempt reproduced the cycle as a
+  60-second stall after flip 12,611. Neither attempt was retried.
 - **Change:** patch 0045 bounds real PFB acknowledgement waits, implements
   independent default-off `RECOMP_NV2A_IDLE_WAIT=1`, and adds default-off
   `RECOMP_NV2A_SEGMENTS=1`. The latter requires the staged executor, IRQs,
   producer integration and a Windows read-only USER view with writable host
   alias. A bounded FIFO preserves PUT order, GET advances only after each
-  completed walk, pending work/flip holds defer PFB acknowledgement, and
-  untracked guest writes, resets, invalid PUTs and timeouts abort. A generic
-  function-scoped 32-bit MOV-store callback is opt-in at generation time;
-  Brute Force addresses and callbacks stay in `src/recomp_manual.c`.
-  Enabled diagnostics report bounded caller-attributed counters. The guard
-  intentionally refuses unmodeled USER writes rather than claiming support.
+  completed walk, and pending work/flip holds normally defer PFB
+  acknowledgement. If a PGRAPH trap is pending, PFB may acknowledge so the
+  guest can leave its poll and run the ISR; GET, the queue, segment completion
+  and PGRAPH interrupt state remain unchanged. Untracked guest writes, resets,
+  invalid PUTs and timeouts abort. A generic function-scoped 32-bit MOV-store
+  callback is opt-in at generation time; Brute Force addresses and callbacks
+  stay in `src/recomp_manual.c`. Enabled diagnostics report bounded
+  caller-attributed counters. The guard intentionally refuses unmodeled USER
+  writes rather than claiming support.
 - **Tests:** 7 PFB, 6 idle and 9 segmented native fixture cases passed; the
   latter covers guarded aliases, untracked writes/reset, bootstrap JUMP,
   queue backpressure/timeout, split packets, control flow and held-flip
-  dispatch using synthetic executor markers. One case combines the real PFB
-  acknowledgement primitive with the queue and held-flip boundary. Three
-  translator tests, including compiled generated stores, and 64 title
-  fence/pushbuffer/interrupt/PGRAPH cases passed, including the new
-  store-hook and PFB-attribution cases. These do not
-  execute the full production worker against a title or prove presentation.
+  dispatch using synthetic executor markers. The ordering case proves that
+  the trap exception releases PFB without advancing GET or consuming the
+  queued segment. Three translator tests, including compiled generated
+  stores, and 64 title fence/pushbuffer/interrupt/PGRAPH cases passed,
+  including the store-hook and PFB-attribution cases. One no-retry
+  segment-only and one no-retry all-three retail smoke then reached reviewed
+  tutorial movement with no queue wait, overflow or prolonged PFB wait.
+  Those two attempts do not prove presentation parity or performance.
 - **Overlap:** the existing #184/open-and-merged comparison was last checked
   2026-11-03 for PFB and 2026-11-10 for the broader snapshot. Blood Wake's
   idle and event concepts are prior art; no code was copied. This task did
@@ -149,8 +168,9 @@ subtests passed; 41 focused CTests and 19 presenter cases also pass.
   worker/guard integration and another title, exercise unsupported hosts,
   review native/CPU matching and alternating title measurements, and check
   current upstream with approval before any upstream interaction.
-- **Status:** local patch, default off; no upstream submission or new
-  gameplay/performance measurement.
+- **Status:** local patch, default off; fixed-tree retail bring-up passed once
+  for segment-only and all-three, but the reviewed A/B/A campaign remains
+  open. No upstream submission or contact.
 
 ### Submission queue
 
@@ -231,7 +251,7 @@ performed.
 | 0041, 0043 | Stack-dependent | Checked snapshots and allocation lifetime identities inform the shared surface-ownership contract; see item 46. |
 | 0042 | Stack-dependent | Bounded verification and stalled-work diagnostics cross executor and wait interfaces; see item 47. |
 | 0044 | Stack-dependent | Extends 0025's default-off audit and fixes stale frame-trace context; coordinate with #184 and extract the generic fixtures before proposing it. See item 28. |
-| 0045 | Stack-dependent | Bounded acknowledgement, idle waiting and guarded PUT segments overlap merged #97's GET/segment ordering, closed #219's wrapped reads, merged #247's wait diagnostics and #306's backend contract. Keep the switches independent and default off; coordinate the executor contract before proposing any part. |
+| 0045 | Stack-dependent | Bounded acknowledgement, idle waiting and guarded PUT segments overlap merged #97's GET/segment ordering, closed #219's wrapped reads, merged #247's wait diagnostics and #306's backend contract. The retail PGRAPH/PFB deadlock proves that queued-work acknowledgement and synchronous trap delivery must be designed together. Keep the switches independent and default off; coordinate the executor contract before proposing any part. |
 
 ### Already filed from this project's account
 

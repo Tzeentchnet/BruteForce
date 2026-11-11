@@ -25,14 +25,18 @@ features do not apply and must not be copied.
 Measurements are in [FINDINGS.md](./FINDINGS.md#performance-plan-phase-0-and-the-first-gpu-path-results);
 next steps are in [NEXTSTEPS.md](./NEXTSTEPS.md).
 
-Fresh v0.17 Release generation `20261111-002138-a9dbc18a` completed one CPU
-and one D3D11 scripted movement bring-up without retries. Those unreviewed,
-single-run figures are not a performance comparison. All reviewed phase
+Integrated v0.17 Release generation `20261111-084222-7bdb6e56` completed one
+CPU and one D3D11 scripted movement bring-up without retries. Representative
+captures show gameplay without the controls panel or a cinematic, but the
+116 CPU and 1,929 D3D11 movement flips do not have continuous reviewed world
+labels. The reported 2.919 and 48.231 whole-picture changes/s are therefore
+not distinct-world rates or a performance comparison. All reviewed phase
 measurements below remain tied to their explicitly named older generation
 until a fresh alternating campaign is complete.
 
 A native 640x480 xemu Basic Controls frame is now matched by content to the
-fresh generation. A focused one-run-per-variant correctness diagnostic held
+preceding `20261111-002138-a9dbc18a` reference generation. A focused
+one-run-per-variant correctness diagnostic held
 all other controls fixed and reduced D3D11 pixels over 8/255 against xemu
 from 43.4320% to 3.7119% when the packed-stencil alias was enabled. This
 identifies one rendering mechanism but is not an A/B/A throughput result and
@@ -49,11 +53,16 @@ G4 and the existing Phase 5 exit remain open.
 
 Patch 0045 now supplies bounded event acknowledgement, an independent idle
 wait, and guarded segment-at-a-time PUT consumption behind separate
-default-off switches. Their current evidence is synthetic; it does not
-establish retail behavior, a speedup, or any of G2–G5. The benchmark now
-checks reviewed, matched performance pairs and reports missing gate evidence
-as inconclusive. The old generation predates the new store hooks and must be
-regenerated before a segmented experiment.
+default-off switches. Initial retail isolation exposed a PGRAPH/PFB deadlock:
+queued work held PFB busy while the executor waited synchronously for a guest
+trap acknowledgement that could not run until the PFB poll returned. The
+fixed tree releases only that PFB dependency while preserving GET, the queued
+segment and PGRAPH interrupt state. One no-retry segment-only smoke and one
+no-retry all-three smoke then reached reviewed movement. They do not establish
+a speedup, distinct-world FPS or any of G2–G5. The benchmark checks reviewed,
+matched performance pairs and reports missing gate evidence as inconclusive.
+Current generation `20261111-084222-7bdb6e56` contains the required store
+hooks and its runtime-only rebuild pins the fixed tree.
 Opt-in interval timing also now covers pixel-shader compile/create failures
 and elapsed time when the persistent shader cache is off; existing
 cache-enabled hit/compile diagnostics remain separate.
@@ -64,7 +73,7 @@ cache-enabled hit/compile diagnostics remain separate.
 | 1 | Implemented, G4 not met. D3D11 back end (`src/gpu/`, `RECOMP_GPU=d3d11`) with the extended interface (0016). Synthetic WARP and hardware fixtures match apart from listed edge pixels. The new GPU-vertex tutorial capture differs from the CPU reference in 0.52% of pixels beyond 8/255; an older CPU-vertex capture differs substantially. |
 | 2 | Implemented (0017, on by default with the D3D11 back end). Stationary hold 3.20 → 30.41 rendered fps (3 runs each, alternating). An unreviewed retail diagnostic sampled 23,400 GPU-program batches without reported vertex differences through its last report. WARP and hardware fixtures cover additional packed formats, relative constants and culling against the CPU interpreter; matched-scene and complete format/hardware verification remain open. |
 | 3 | Partial. Async visibility reports (0018) and shared GPU presentation (0024) are opt-in. Three reviewed alternating runs per visibility mode measured 27.401 versus 30.606 world changes/s, but async still failed the 1%-low and G3 gates and remains opt-in. Submitted renderer work now has a two-event bound, and default-off elision skips copies only for demonstrably coherent, unscaled 32-bit guest surfaces. Tracked-surface flips still wait; dirty surfaces, diagnostics and scaled/16-bit frames still read back. General on-demand guest-reader interception is not implemented. CPU-written Bink frames synchronize before scaled submission. No new retail performance comparison was run. |
-| 4 | Steps 1–3 implemented behind independent default-off switches with synthetic coverage; title integration and reviewed isolation/combined campaigns remain open. The last measured G3 remains 65.467% with async visibility. PFB, GET, semaphore, report, interrupt and flip ordering remain mandatory. Step 4 is deferred pending G3. |
+| 4 | Steps 1–3 implemented behind independent default-off switches with synthetic coverage. One fixed-tree segment-only smoke and one all-three smoke reached reviewed movement after correcting the PGRAPH/PFB dependency cycle; the alternating isolation/combined campaign remains open. The last measured G3 remains 65.467% with async visibility. PFB, GET, semaphore, report, interrupt and flip ordering remain mandatory. Step 4 is deferred pending G3. |
 | 5 | In progress. GPU compute decodes common textures; exact D24 and packed D24S8/stencil surface aliases and GPU window clipping are experimental opt-ins. A native xemu Basic Controls match now establishes that packed-stencil reconstruction, rather than a global gamma change, removes the large brightness error in that state: 43.4320% of pixels exceed 8/255 without it and 3.7119% with it. Unsupported ownership cases and other scenes keep the option experimental and G4 unmet. D3D11 honors partial clear rectangles, and patch 0022 removes redundant software depth clears when a backend owns drawing and clearing. Patch 0019 cached hot `getenv` calls. Checked texture/colour snapshots and tracked lifetimes replace repeated page queries on those paths, but their performance and title correctness have not been measured. |
 
 ### Audio performance status
@@ -536,12 +545,16 @@ Measure flush-only, idle-only, segment-only and all-three separately against
 the all-off baseline, each in alternating A/B/A order with at least three
 runs per variant and otherwise identical controls.
 
-**Status:** steps 1–3 have focused synthetic coverage only on the new tree.
-An earlier corrected PFB-only title smoke was not reviewed or profiled and
-predates patch 0045. The bounded queue and USER guard have not been exercised
-by the title. No new retail or xemu run was made. Regenerate on the final
-tree, review world and presentation evidence, inspect event/timer/queue and
-caller counters, and retain the CPU reference before applying any gate.
+**Status:** steps 1–3 have focused synthetic coverage on tree
+`3164795a5ed52658abb41f2630ed8153e6b2cce0`. An earlier corrected PFB-only
+title smoke was not reviewed or profiled and predates patch 0045. The first
+all-three attempt exposed a PGRAPH/PFB deadlock, and a segment-only attempt
+reproduced it at flip 12,611. After the narrow dependency fix, one no-retry
+segment-only and one no-retry all-three attempt reached reviewed movement.
+Their flip and whole-picture-change rates are bring-up data only. Run the
+manual, matched A/B/A matrix with reviewed world and presentation evidence,
+event/timer/queue and caller counters, and the CPU reference before applying
+any gate.
 
 1. **Event-driven flush acknowledgement.** Identify the KickOff routine
    containing or calling the PFB flush poll at `0x00372180`. Replace its
@@ -614,9 +627,13 @@ explicitly rejected.
 This is not evidence that the performance gates hold. The synthetic D3D11
 matrix passes 293 cases with WARP and hardware enabled, including CPU-written
 frames before scaled presentation and the mipmap fixtures below. Bounded
-4.5x retail probes show the Microsoft, Digital Anvil and intro movies, but a
-matched retail gameplay campaign, VRAM headroom, mip/LOD behavior and a native
-4K display remain untested. G4 comparisons continue at scale 1. G5 requires
+4.5x retail probes show the Microsoft, Digital Anvil and intro movies. One
+integrated 4.5x attempt also reached movement without retry and produced
+reviewed representative gameplay frames, but it was not matched or
+continuously labeled. Its mip diagnostic found no additional levels declared
+for the observed tutorial texture. VRAM headroom, actual lower-level mip/LOD
+behavior and a native 4K display remain untested. G4 comparisons continue at
+scale 1. G5 requires
 the controlled 1080p/4K A/B/A campaign in
 [NEXTSTEPS.md](./NEXTSTEPS.md), and the reported default-settings movement
 regression remains a separate blocker.
@@ -625,7 +642,7 @@ NEXTSTEPS B10 now has a default-off mip/anisotropy implementation with
 synthetic WARP and hardware coverage, not a performance result. The CPU
 reference remains level zero; keep both options off for existing G4 baselines
 and list their intentional sampling differences in separate enabled-mode
-comparisons. The title's mip supply, xemu-matched frames, 4K VRAM cost and
+comparisons. The title's broader mip supply, xemu-matched frames, 4K VRAM cost and
 G5 remain open. Measure any performance change with at least A/B/A runs on
 the same generation, scene, scripted input, thread count and options, and
 report distinct world frames separately from flips.
@@ -694,7 +711,11 @@ semaphore, report or flip synchronization.
   separately from the steady state.
 - **Synchronization.** PGRAPH software-method traps, flip holds, and the
   semaphore hook all run on the NV2A thread. The backend must not block that
-  thread on the GPU while a trap is pending.
+  thread on the GPU while a trap is pending. A queued segment also cannot
+  hold the guest in its PFB poll while the executor waits for that guest to
+  service the trap. The current exception releases PFB only; GET, the queue,
+  interrupt state and segment completion remain unchanged until the ISR
+  acknowledges the trap.
 - **Patch stack.** The Blood Wake executor diff overlaps 0008–0013. Rebase it
   once onto a pinned tree and record the result in `toolkit.py`; do not
   maintain two variants.

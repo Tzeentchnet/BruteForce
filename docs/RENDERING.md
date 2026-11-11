@@ -587,13 +587,20 @@ shortens PFB flush, semaphore, report or flip-hold synchronization.
 
 The independent experimental per-PUT queue is upstream of this renderer:
 the producer publishes a captured PUT, and the NV2A worker walks that
-segment before publishing GET. A pending queue or held flip prevents PFB
-acknowledgement; a held flip also prevents starting the next segment.
-The read-only guest USER mapping rejects untracked writes, while framework
-GET/PUT updates use its writable alias. The 128-entry queue and five-second
-wait limit fail explicitly instead of dropping work. Synthetic marker tests
-cover this ordering boundary, but integrated title, backend and presentation
-behavior remain unverified.
+segment before publishing GET. A pending queue or held flip normally prevents
+PFB acknowledgement; a held flip also prevents starting the next segment.
+There is one narrower dependency exception: while the executor waits for a
+guest PGRAPH software-trap acknowledgement, PFB may acknowledge so the guest
+can leave its poll and run the ISR. This does not advance GET, consume the
+queued segment, clear PGRAPH interrupt state or release a held flip. Without
+that exception, the queue and synchronous trap wait deadlocked during retail
+tutorial loading. The read-only guest USER mapping rejects untracked writes,
+while framework GET/PUT updates use its writable alias. The 128-entry queue
+and five-second wait limit fail explicitly instead of dropping work.
+Synthetic marker tests cover this ordering boundary. One fixed-tree
+segment-only and one all-three retail smoke reached reviewed movement, but
+matched CPU output, presentation parity and the A/B/A performance campaign
+remain open.
 
 Window size and fullscreen determine native mode's output picture. The
 point/linear display filter applies to the CPU route and scale-1 fallback;
@@ -708,9 +715,11 @@ replace matched gameplay or original-hardware validation.
   not by itself define how Brute Force should settle pending PFB flush,
   semaphore, report, flip, shared-present, and guest-readback work.
 - Fixed and native resolution controls and mip sampling have synthetic
-  coverage, not a matched retail gameplay campaign. Performance, VRAM
-  headroom, title mip/LOD behavior, 4K display output and hardware-D3D11
-  scaled gameplay remain unvalidated. The launcher keeps 480p as its default.
+  coverage plus one integrated 4.5x movement bring-up. Representative gameplay
+  frames were valid, but the observed tutorial texture declared no lower mip
+  levels and the run was neither matched nor continuously reviewed.
+  Performance, VRAM headroom, broader title mip/LOD behavior and native 4K
+  display output remain unvalidated. The launcher keeps 480p as its default.
 
 Keep disc content, generated game code, screenshots, runtime captures and
 logs local. Use synthetic fixtures for shareable reproduction. Current

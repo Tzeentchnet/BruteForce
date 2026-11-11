@@ -12,45 +12,123 @@ in [UPSTREAM.md](./UPSTREAM.md).
 ## Integrated synthetic validation boundary
 
 The complete 42-patch v0.17 framework stack independently replayed to tree
-`64ce266664a875084be63cb32148b3ae78c55185` and passed
+`3164795a5ed52658abb41f2630ed8153e6b2cce0` and passed
 `python tools/toolkit.py --verify`. The framework tools reported 995 passed,
-2 skipped and 134 subtests passed. A production-style synthetic project build
-then built every native fixture; the project suite reported 966 passed with
-WARP and the available hardware adapter. Nine focused framework fixture
-groups reported 41 CTests passed, and the Windows presenter suite reported
-19 passed.
+2 skipped and 134 subtests passed. The production-style project suite
+reported 966 passed with WARP and the available hardware adapter. Nine
+focused framework fixture groups reported 41 CTests passed, and the Windows
+presenter suite reported 19 passed. The Phase 4 subset comprises 7
+bounded-PFB, 6 idle-wait and 9 guarded-segment CTests; three generated
+store-hook tests and 67 title-side fence, pushbuffer, PGRAPH, interrupt and
+toolkit-selection cases also passed.
 
-The integrated build exposed two fixture-only omissions that isolated
+The integrated validation exposed two fixture-only omissions that isolated
 milestone runs had missed: the camera fixture lacked the new idle/segment
 framework stubs, and the presenter script did not compile `display_awake.c`
-for its three `fb_present.c` consumers. Both are now covered by the same
-commands above. These results validate reconstruction, compilation and
-synthetic contracts only. They are not retail rendering, native-display,
-audio-listening, device-loss, Hor+, 4K or performance evidence.
+for its three `fb_present.c` consumers. The final tree also includes the
+runtime segment/PGRAPH/PFB deadlock fix and its ordering assertion. These
+results validate reconstruction, compilation and synthetic contracts only.
+They are not native-display, audio-listening, device-loss, Hor+, 4K or
+performance evidence.
+
+The resulting retail generation then completed exactly one audio-off,
+four-thread CPU attempt and one D3D11 attempt through tutorial stationary and
+movement windows without retry. Representative movement captures were
+reviewed: both show the character, world and HUD without the Basic Controls
+panel, a cinematic or a solid-black frame. The CPU attempt reported 2.643
+stationary flips/s and 2.919 whole-picture movement changes/s; D3D11 reported
+24.220 stationary flips/s and 48.231 whole-picture movement changes/s. Zero
+captured flips matched the two known solid-black hashes, but 116 CPU and 1,929
+D3D11 flips remain unclassified. These are bring-up figures, not distinct
+world-frame rates or an A/B/A comparison.
+
+A separate single D3D11 attempt enabled `RECOMP_GPU_SCALE=4.5`,
+`RECOMP_GPU_MIPS=1` and `RECOMP_GPU_ANISO=1`. It reached the same movement
+window without retry, reported the intended 2880x2160 4:3 render size, and
+showed no renderer-device, timeout or fatal diagnostic. Reviewed first/last
+sample captures show gameplay with the character and HUD and no panel,
+cinematic or solid-black frame. The run reported 24.385 stationary flips/s
+and 49.053 whole-picture movement changes/s; 1,963 movement flips remain
+unclassified, so this is not a distinct-world rate or comparison.
+
+The mip diagnostic repeatedly found the observed format-`0x0E` tutorial
+texture declared no additional levels and therefore sampled level zero,
+eventually suppressing duplicate reports. The run proves the switches and
+4.5x path can coexist, not that the title supplied or sampled lower mip
+levels. Guest-sized captures also do not prove physical 4K presentation, and
+the available 3440x1440 display is not a native 4K validation target.
 
 ## Phase 4 synthetic integration boundary
 
-On the supported `20261111-002138-a9dbc18a` generated code, static
-inspection found two principal real PUT store sites in `sub_00371FA0` and
+On current generation `20261111-084222-7bdb6e56` and its preceding
+`20261111-002138-a9dbc18a` reference, static inspection found two principal
+real PUT store sites in `sub_00371FA0` and
 `sub_00372050`. The first also writes shadow RAM, so the hook distinguishes
 the effective USER PUT address. Device setup writes a bootstrap JUMP at
 physical zero before a KickOff call; this observation does not establish that
 all runtime PUT/GET writes or resets use those sites.
 
-On private framework tree `64ce266664a875084be63cb32148b3ae78c55185`,
+On private framework tree `3164795a5ed52658abb41f2630ed8153e6b2cce0`,
 synthetic fixtures passed 7 bounded-PFB, 6 idle-wait and 9 guarded-segment
 cases. The latter exercises a zero-origin JUMP, split packets, ordered
 synthetic semaphore/report/trap/flip markers, backpressure, a held flip and
-fail-closed invalid/reset/untracked writes. One simulated loop combines the
-real acknowledgement primitive with queued work and a held flip. Three
-store-hook translation tests, including compiled generated stores, and 64
-fence, pushbuffer, interrupt and PGRAPH cases also passed. A D3D11 WARP
-fixture verified that an uncached synthetic pixel-shader compile contributes
-to the opt-in timing counter and resets with the other interval counters.
-The ordered markers do not execute the full production backend. The old
-generated title builds against this tree but lacks the new generated store
-callbacks; a new generation is required. No retail or xemu campaign was run,
-and no performance or G2–G5 claim follows from these synthetic results.
+fail-closed invalid/reset/untracked writes. Its ordering case now also proves
+that a pending PGRAPH trap can release PFB while GET and the queued segment
+remain unchanged. Three store-hook translation tests, including compiled
+generated stores, and 64 fence, pushbuffer, interrupt and PGRAPH cases also
+passed. A D3D11 WARP fixture verified that an uncached synthetic pixel-shader
+compile contributes to the opt-in timing counter and resets with the other
+interval counters. The ordered markers do not execute the full production
+backend. Current generation `20261111-084222-7bdb6e56` contains the required
+generated store callbacks. No performance or G2–G5 claim follows from these
+synthetic results.
+
+## Phase 4 PGRAPH/PFB deadlock and fixed bring-up
+
+The first all-three retail smoke on the pre-fix tree enabled
+`RECOMP_PFB_FLUSH_WAIT=1`, `RECOMP_NV2A_IDLE_WAIT=1` and
+`RECOMP_NV2A_SEGMENTS=1`. During tutorial loading, the executor reported
+PGRAPH software trap `0x02FFC283` and waited for the guest acknowledgement.
+PFB remained `0x00010000`; the bounded host wait stopped after 30 seconds,
+and the process fail-stopped with `0xC0000409`. A single segment-only
+isolation then stalled for 60 seconds after flip 12,611 at another pending
+software trap. Neither failed attempt was retried.
+
+This established a dependency cycle rather than permission to skip
+synchronization. Segment mode treated every queued segment as a reason to
+keep PFB busy. The executor could not finish that segment until the guest
+acknowledged its PGRAPH trap, while the guest could not leave its PFB poll to
+run the PGRAPH ISR. Patch 0045 now allows PFB acknowledgement only for this
+pending-trap boundary. It does not advance GET, complete or dequeue the
+segment, clear PGRAPH interrupt state, release a held flip, or bypass a
+semaphore/report wait. Once the guest ISR acknowledges the trap, the normal
+walk and GET publication continue.
+
+After an independent 42-patch replay and a runtime-only rebuild, exactly one
+segment-only and one all-three smoke were run with four raster threads, audio
+off, performance counters on and retries disabled:
+
+- Segment-only reached the world at 92.32 seconds, reported 20.721
+  stationary flips/s and 39.970 whole-picture movement changes/s, and
+  completed collection. Its last periodic queue report had 196,339
+  publications, 196,338 completions, one transient pending segment, a
+  high-water mark of 5, zero queue waits and zero caller overflow.
+- All-three reached the world at 92.23 seconds, reported 21.447 stationary
+  flips/s and 41.861 whole-picture movement changes/s, and completed
+  collection. Its last periodic report had 200,561 publications and
+  completions, high-water 5, zero queue waits and zero caller overflow.
+  The same snapshot reported 204,715 PFB waits, 200,565 real
+  acknowledgements, 200,358 event wakes, 113,588 timer wakes, zero spurious
+  wakes and 431,296 idle waits.
+
+Reviewed mid/late movement captures from both attempts show the tutorial
+world, player character and HUD without the Basic Controls panel, a cinematic
+or a solid-black frame. The collector found zero known solid-black hashes,
+but all 1,599 segment-only and 1,675 all-three movement flips remain
+unclassified. The rates above are flips or whole-picture changes, not
+distinct-world FPS. Two single attempts are bring-up evidence, not an
+alternating comparison, CPU-reference match, G2/G3/G4/G5 result or reason to
+enable any Phase 4 switch by default.
 
 ## Executable and provenance
 
@@ -74,7 +152,7 @@ and no performance or G2–G5 claim follows from these synthetic results.
   `0bd6a9835ebc411fb757ea510fb15dee4e4848b700ea6afef2e78a85d8904328`.
   The manifest and generated sources are ignored local artifacts, not
   distributed inputs.
-- Current supported generation `20261111-002138-a9dbc18a` is a Release build
+- Reference generation `20261111-002138-a9dbc18a` is a Release build
   from xboxrecomp v0.17.0 base
   `343b6d8901723b37ce568b2418c5df4e1fe1d223` and verified toolkit tree
   `131abd8d1f4559bb36dba4391e4c644925cff5df`. It translated all 22,295
@@ -84,6 +162,22 @@ and no performance or G2–G5 claim follows from these synthetic results.
   `f1bf8622df3b651af6747566b4628a1d8ca18d7a01a4c196df910124cb9f7844`.
   The manifest records manual-source SHA-256
   `cc52b2cb10b69716f603d499ce0f783ab1c995190a2873f286ffc4bcf58534f2`
+  and the same retail XBE fingerprint as above.
+- Current supported generation `20261111-084222-7bdb6e56` was generated from
+  the same v0.17.0 base on integrated toolkit tree
+  `64ce266664a875084be63cb32148b3ae78c55185`, then rebuilt against the
+  runtime-only fixed tree `3164795a5ed52658abb41f2630ed8153e6b2cce0`.
+  The recorded and current `tools`/`templates` fingerprints are identical, so
+  [build.py](../tools/build.py) accepted the existing generated code while
+  pinning the full runtime tree in build metadata. It translated all 22,295
+  identified functions with zero failures, six unresolved direct-call
+  targets and 11 untranslated instruction sites. The rebuilt 37,575,168-byte
+  executable has SHA-256
+  `132bece507c1773c41eeaa6549687d2c493a121c2c102452a10465d5a584f073`;
+  the pre-fix executable at the same size had SHA-256
+  `60c232ee1206e99b8587d7b85329710dc48786bc9835bede19fbfa68347c2705`.
+  The generation manifest records manual-source SHA-256
+  `82e0c2655a92d309b0a2d296f2417f435b04a2737dad7bea6f4048e9e44abae2`
   and the same retail XBE fingerprint as above.
 - [build.py](../tools/build.py) records and checks the XBE, fingerprint, seed,
   manual-source, and framework provenance. The pinned base, selected PR
@@ -2602,22 +2696,22 @@ The supported **reviewed comparison baseline** remains old generation
 `f0f8a461496a4f23d9b0aeaa284b8d70ba7ab82b` and verified patched tree
 `25a2a713738b7aabb1c21ef6720765ff93ccffea`. Its executable SHA-256 is
 `0bd6a9835ebc411fb757ea510fb15dee4e4848b700ea6afef2e78a85d8904328`.
-The newer Phase 4 candidate is generation `20261103-174033-74f83d80`, toolkit
+An earlier Phase 4 candidate is generation `20261103-174033-74f83d80`, toolkit
 tree `00079980c26aecf07a3686fa9912112f3b122649`, executable SHA-256
 `7e093b1273c850e14093c389f302ef9bfe00de5f49f8921a54c83dff84f19182`.
 Both report 12 unresolved call targets and 34 untranslated instruction sites.
-The Phase 4 candidate has one successful enabled movement smoke but no
+That candidate has one successful enabled movement smoke but no
 reviewed alternating comparison, so it does not replace the baseline evidence.
 
 The reviewed default and sync/async camera-pan campaigns use that exact old
 baseline generation. The focused benchmark, control, reviewed-world and
-matched comparison suite passes 83 tests. The current v0.17 integration passed
+matched comparison suite passes 83 tests. An earlier v0.17 integration passed
 992 framework tests with two skips, five focused framework fixture groups,
 and 632 project native/WARP/hardware tests with 23 hardware or platform skips
-before the new camera/audit diagnostics. Their integrated focused selection
-then passed 158 tests with three skips. These results do not establish G4 or
-physical presentation. The Phase 4 validation boundary and its narrower
-post-fix checks are recorded above. For current commands, see
+before the new camera/audit diagnostics. Its integrated focused selection
+then passed 158 tests with three skips. These historical results do not
+establish G4 or physical presentation. The final integrated matrix and Phase
+4 post-fix checks are recorded above. For current commands, see
 [DEVELOPMENT.md](./DEVELOPMENT.md#tests).
 
 Open work includes broader gameplay and input, physical controllers, audio,

@@ -397,10 +397,10 @@ index e08453a..3660e12 100644
                      fprintf(stderr, "[NV2A-WAIT] PFB flush still busy after %lu ms:"
 diff --git a/src/kernel/nv2a_segments.c b/src/kernel/nv2a_segments.c
 new file mode 100644
-index 0000000..fd84f1b
+index 0000000..6166566
 --- /dev/null
 +++ b/src/kernel/nv2a_segments.c
-@@ -0,0 +1,290 @@
+@@ -0,0 +1,295 @@
 +#include "nv2a_segments.h"
 +#include "nv2a_idle_wait.h"
 +#include "platform/xbox_winnt.h"
@@ -655,6 +655,11 @@ index 0000000..fd84f1b
 +    return s_enabled && InterlockedCompareExchange(&s_outstanding, 0, 0) != 0;
 +}
 +
++int nv2a_segments_pfb_blocked(int graph_trap_pending)
++{
++    return nv2a_segments_pending() && !graph_trap_pending;
++}
++
 +int nv2a_segments_service(int flip_held, void (*resync)(uint32_t),
 +                          void (*walk)(uint32_t))
 +{
@@ -693,10 +698,10 @@ index 0000000..fd84f1b
 +}
 diff --git a/src/kernel/nv2a_segments.h b/src/kernel/nv2a_segments.h
 new file mode 100644
-index 0000000..f4254f5
+index 0000000..ed1b254
 --- /dev/null
 +++ b/src/kernel/nv2a_segments.h
-@@ -0,0 +1,18 @@
+@@ -0,0 +1,19 @@
 +#ifndef NV2A_SEGMENTS_H
 +#define NV2A_SEGMENTS_H
 +
@@ -710,6 +715,7 @@ index 0000000..f4254f5
 +int nv2a_segments_peek(uint32_t *from, uint32_t *put, uint32_t *caller, int *first);
 +void nv2a_segments_complete(uint32_t put);
 +int nv2a_segments_pending(void);
++int nv2a_segments_pfb_blocked(int graph_trap_pending);
 +int nv2a_segments_service(int flip_held, void (*resync)(uint32_t),
 +                          void (*walk)(uint32_t));
 +void nv2a_segments_shutdown(void);
@@ -830,7 +836,7 @@ index 0000000..cfc4945
 +
 +#endif
 diff --git a/src/kernel/xbox_memory_layout.c b/src/kernel/xbox_memory_layout.c
-index 246148c..afb4413 100644
+index 246148c..cbe14ef 100644
 --- a/src/kernel/xbox_memory_layout.c
 +++ b/src/kernel/xbox_memory_layout.c
 @@ -21,6 +21,9 @@
@@ -906,7 +912,7 @@ index 246148c..afb4413 100644
              continue;
          }
          /* Once the vblank is delivered its two bits belong to the
-@@ -1476,14 +1499,17 @@ static void nv2a_ack_busy_bits(int flip_held)
+@@ -1476,14 +1499,18 @@ static void nv2a_ack_busy_bits(int flip_held)
          }
          /* Interlocked: the vblank-ack thread and the guest change other
           * bits of the same word meanwhile. */
@@ -923,11 +929,12 @@ index 246148c..afb4413 100644
  void xbox_Nv2aAckBusyBits(void)
  {
 -    nv2a_ack_busy_bits(0);
-+    nv2a_ack_busy_bits(nv2a_pb_exec_flip_poll() || nv2a_segments_pending());
++    nv2a_ack_busy_bits(nv2a_pb_exec_flip_poll() ||
++                       nv2a_segments_pfb_blocked(xbox_Nv2aGraphTrapPending()));
  }
  
  int xbox_Nv2aPfbFlushWait(void)
-@@ -1506,6 +1532,26 @@ int xbox_Nv2aPfbFlushWaitEnabled(void)
+@@ -1506,6 +1533,26 @@ int xbox_Nv2aPfbFlushWaitEnabled(void)
      return nv2a_pfb_flush_wait_enabled();
  }
  
@@ -954,7 +961,7 @@ index 246148c..afb4413 100644
  /* One word of the NV2A register file (offset from the register base), or NULL
   * before it is mapped. The pushbuffer executor writes what the GPU would when
   * it executes a command: PGRAPH state a title reads back, and DMA_GET. */
-@@ -1513,12 +1559,17 @@ volatile uint32_t *xbox_Nv2aRegPtr(uint32_t offset)
+@@ -1513,12 +1560,17 @@ volatile uint32_t *xbox_Nv2aRegPtr(uint32_t offset)
  {
      if (!g_nv2a_memory || offset + 4 > XBOX_NV2A_SIZE)
          return NULL;
@@ -972,7 +979,7 @@ index 246148c..afb4413 100644
      while (!InterlockedCompareExchange(&g_nv2a_ack_stop, 0, 0)) {
          /* A flip held for its vblank (nv2a_flip_hold.h): this pass walks
           * nothing, leaves DMA_GET where it is and acknowledges no PFB flush,
-@@ -1531,13 +1582,13 @@ static DWORD WINAPI nv2a_ack_thread(LPVOID param)
+@@ -1531,13 +1583,15 @@ static DWORD WINAPI nv2a_ack_thread(LPVOID param)
           * D3D present kicks off right after its stall, so the stall ends
           * its segment and the two are the same; a segment carrying two
           * flips paces only the last. */
@@ -984,12 +991,14 @@ index 246148c..afb4413 100644
           * visibility reports complete here even while nothing is walked. */
          nv2a_pb_exec_poll();
 -        nv2a_ack_busy_bits(flip_held);
-+        did_work = nv2a_ack_busy_bits(flip_held ||
-+                                      (segmented && nv2a_segments_pending()));
++        did_work = nv2a_ack_busy_bits(
++            flip_held ||
++            (segmented &&
++             nv2a_segments_pfb_blocked(xbox_Nv2aGraphTrapPending())));
          for (size_t i = 0; i < sizeof(NV2A_IDLE) / sizeof(NV2A_IDLE[0]); i++) {
              volatile uint32_t *r =
                  (volatile uint32_t *)((char *)regs + NV2A_IDLE[i].offset);
-@@ -1577,7 +1628,25 @@ static DWORD WINAPI nv2a_ack_thread(LPVOID param)
+@@ -1577,7 +1631,25 @@ static DWORD WINAPI nv2a_ack_thread(LPVOID param)
           * RECOMP_PB_EXEC asked for it. Gating the call as well meant
           * RECOMP_PB_EXEC on its own did nothing at all, and the executor
           * only ran when someone happened to also be tracing. */
@@ -1016,7 +1025,7 @@ index 246148c..afb4413 100644
              /* Is the title submitting GPU work at all? PUT is where the
               * title's pushbuffer writer has got to; if it never moves, nothing
               * is being drawn and the missing piece is upstream of the GPU. */
-@@ -1588,10 +1657,11 @@ static DWORD WINAPI nv2a_ack_thread(LPVOID param)
+@@ -1588,10 +1660,11 @@ static DWORD WINAPI nv2a_ack_thread(LPVOID param)
              uint32_t put = *(volatile uint32_t *)((char *)regs + NV2A_USER_DMA_PUT);
              if (!flip_held
                      && (put != last_put || (now_ms - last_put_ms) > 2000)) {
@@ -1029,7 +1038,7 @@ index 246148c..afb4413 100644
                      static DWORD last_report;
  
                      /* DMA_PUT holds a PHYSICAL address -- Xbox D3D writes
-@@ -1608,7 +1678,6 @@ static DWORD WINAPI nv2a_ack_thread(LPVOID param)
+@@ -1608,7 +1681,6 @@ static DWORD WINAPI nv2a_ack_thread(LPVOID param)
                       * The contiguous window IS the physical-address view, so
                       * OR-ing its base is the documented round trip, not a
                       * guess. */
@@ -1037,7 +1046,7 @@ index 246148c..afb4413 100644
                      extern int  nv2a_pb_dma_walk(void);
                      extern uint32_t nv2a_pb_scan_segment(uint32_t, uint32_t);
  
-@@ -1748,7 +1817,7 @@ static DWORD WINAPI nv2a_ack_thread(LPVOID param)
+@@ -1748,7 +1820,7 @@ static DWORD WINAPI nv2a_ack_thread(LPVOID param)
          *(volatile uint32_t *)((uintptr_t)(XBOX_KERNEL_DATA_BASE + KDATA_TICK_COUNT)
                                 + g_memory_offset) = GetTickCount();
  
@@ -1046,7 +1055,7 @@ index 246148c..afb4413 100644
      }
      return 0;
  }
-@@ -1763,6 +1832,12 @@ static void xbox_Nv2aAckStart(void)
+@@ -1763,6 +1835,12 @@ static void xbox_Nv2aAckStart(void)
      if (g_nv2a_ack_thread) {
          fprintf(stderr, "  NV2A busy-bit ack: %zu register(s) acknowledged\n",
                  sizeof(NV2A_ACK) / sizeof(NV2A_ACK[0]));
@@ -1059,7 +1068,7 @@ index 246148c..afb4413 100644
      }
  }
  
-@@ -3327,7 +3402,29 @@ BOOL xbox_MemoryLayoutInit(const void *xbe_data, size_t xbe_size)
+@@ -3327,7 +3405,29 @@ BOOL xbox_MemoryLayoutInit(const void *xbe_data, size_t xbe_size)
       */
      {
          uintptr_t nv2a_native = XBOX_NV2A_BASE + g_memory_offset;
@@ -1090,7 +1099,7 @@ index 246148c..afb4413 100644
          /* The pushbuffer survey rides on the same poll, so either
           * variable arms it. */
          s_nv2a_trace_kicks = getenv("RECOMP_NV2A_TRACE") != NULL;
-@@ -3757,20 +3854,35 @@ void xbox_ProtectMirrorsForDebug(void)
+@@ -3757,20 +3857,35 @@ void xbox_ProtectMirrorsForDebug(void)
  void xbox_MemoryLayoutShutdown(void)
  {
      advance_layout_generation();
@@ -1458,10 +1467,10 @@ index 0000000..de4d5bf
 +endif()
 diff --git a/tests/nv2a_segments/test_main.c b/tests/nv2a_segments/test_main.c
 new file mode 100644
-index 0000000..8f22df2
+index 0000000..e5d8e45
 --- /dev/null
 +++ b/tests/nv2a_segments/test_main.c
-@@ -0,0 +1,211 @@
+@@ -0,0 +1,218 @@
 +#include <windows.h>
 +#include <stdint.h>
 +#include <stddef.h>
@@ -1611,6 +1620,13 @@ index 0000000..8f22df2
 +        word(0x114, (1u << 18) | 0x0300u); word(0x118, 5);
 +        nv2a_segments_publish(0x114, 1, safe_point);
 +        nv2a_segments_publish(0x11C, 2, safe_point);
++        REQUIRE(nv2a_segments_pfb_blocked(0) &&
++                !nv2a_segments_pfb_blocked(1),
++                "pending PGRAPH trap releases PFB without completing the segment");
++        REQUIRE(nv2a_pfb_flush_ack(&flush, nv2a_segments_pfb_blocked(1)) &&
++                flush == 0 && *get_reg == 0x100 && nv2a_segments_pending(),
++                "PGRAPH release preserves GET and the queued segment");
++        flush = NV2A_PFB_FLUSH_BUSY_MASK;
 +        REQUIRE(!nv2a_pfb_flush_ack(&flush, flip_held || nv2a_segments_pending()) &&
 +                flush == NV2A_PFB_FLUSH_BUSY_MASK, "queued work keeps PFB busy");
 +        REQUIRE(nv2a_segments_service(0, nv2a_pb_resync, nv2a_pb_scan_staged) &&

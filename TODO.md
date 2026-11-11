@@ -10,10 +10,12 @@ coverage, and the corrected segment-only and all-three smokes reached reviewed
 movement. Their 24-run comparison is explicitly deferred. The exact
 texture-descriptor index is now synthetic-tested without weakening exact
 source or palette comparison. A default-on index and diagnostic linear
-reference are now available in the same executable. The next active
-performance gate is the Milestone 2 matched A/B/A comparison; do not promote
-the shader cache or any Phase 4 switch without its separate correctness and
-measurement gates.
+reference are now available in the same executable. Retained audit evidence
+also establishes material index-word dispatch volume, and patch 0046 adds a
+separate default-off exact batching candidate with synthetic coverage. The
+next active performance gates are the two independent matched A/B/A
+comparisons; do not combine them or promote the shader cache or any Phase 4
+switch without its separate correctness and measurement gates.
 
 ## Milestone 0: trustworthy baseline
 
@@ -131,7 +133,8 @@ measurement gates.
   collect a separate reviewed six-attempt A/B/A campaign at the same Basic
   Controls state. Hold `RECOMP_GPU_TEX_INDEX=0` in both variants so this is
   not combined with the texture-index candidate.
-- [ ] Measure `/GL` and LTCG independently.
+- [ ] **Blocked on the reviewed Phase 5 profile and an isolated multi-binary
+  A/B protocol:** measure `/GL` with LTCG independently from `/arch:AVX2`.
 - [ ] Treat `/arch:AVX2` as an optional compatibility-reducing build, not a
   default assumption.
 - [ ] Require bit-exact corpus validation before any native title-function

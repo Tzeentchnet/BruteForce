@@ -596,10 +596,11 @@ The current consumer inventory is:
 | Flip dumps and frame statistics | `dump_surface_bmp` and `nv2a_frame_hash` read the completed guest colour surface after the flip readback. | Diagnostic settings force ordinary readback. |
 | Window BMP dumps and presenter-source capture | Window dumps serialize the converted CPU image. Presenter capture rejects direct shared presentation and binds captured pixels to the frame-statistics identity. | Requires the CPU/readback route and, for presenter capture, valid guest pixels and statistics. |
 | Render-to-texture and visibility reports | Colour aliases sample the GPU render target directly; D3D11 visibility reports retire query values into their report records. | Do not require whole-surface guest readback. |
-| Title CPU readers | The completed 2026-10-29 guard run observed one non-NV2A colour read that remains unsymbolized. Seven depth-range reads are provisionally attributed to USB rumble handling, not a title depth consumer. One page was excluded. | Unresolved; general readback removal remains unsafe. |
+| Title CPU readers | The current-generation 2026-11-11 rerun resolved two reads at `0x80000784` to generated title function `sub_003855B3+0x35C`. The accumulated `0x80000000..0x800FFFFF` colour range also contains staged pushbuffer reads and many writes, so the guard cannot prove that the range still had live render-target ownership. No depth read recurred. Page `0x80001000` remained excluded. | General readback removal remains unsafe without live lifetime tracking and arbitrary guest-access interception. |
 
-This closes the static framework-consumer inventory, not the dynamic
-title-reader investigation. A future on-demand contract needs a
+The current-generation rerun closes the planned diagnostic collection but
+does not prove an absence or presence of live title surface reads. A future
+on-demand contract needs a
 metadata-only shared flip publication, an explicit CPU snapshot request for
 fallback and diagnostics, and a way to synchronize arbitrary guest reads and
 writes. It cannot infer safety merely from shared-presentation eligibility.

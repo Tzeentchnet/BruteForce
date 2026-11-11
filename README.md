@@ -33,8 +33,10 @@ Default-off clean-surface readback elision has synthetic coverage only; dirty
 frames still read back and tracked-surface flips still wait. The static
 consumer inventory confirms that CPU presentation, PVIDEO composition,
 frame dumps, frame statistics and presenter capture currently depend on
-guest-visible colour pixels. A completed null-backend guard run still has one
-unresolved non-NV2A colour read and an excluded page, so it does not justify
+guest-visible colour pixels. A current-generation null-backend guard run
+resolved a non-NV2A access to generated title code, but the accumulated
+surface range also overlaps staged pushbuffer data and retains one excluded
+page. It therefore does not prove a live rendered-surface read or justify
 general on-demand readback. Retail correctness and performance of this
 experiment are unverified.
 

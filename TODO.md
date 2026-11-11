@@ -76,13 +76,15 @@ measurement gates.
 
 ## Phase 3: readback and presentation
 
-- [ ] Re-arm and complete the diagnostic surface-read investigation, recording
-  every excluded range and blind spot.
+- [x] Re-arm and complete the diagnostic surface-read investigation, recording
+  every excluded range and blind spot; retain readback because accumulated
+  ranges and arbitrary guest accesses cannot establish live ownership.
 - [x] Inventory known framework surface readers, CPU presentation, PVIDEO,
   screenshots, captures and frame-statistics consumers, while retaining the
   unresolved title-reader gate.
-- [ ] Implement on-demand readback without weakening semaphore or flip
-  ordering.
+- [ ] **Blocked:** implement on-demand readback only after live surface
+  lifetimes and arbitrary guest reads/writes can be intercepted without
+  weakening semaphore or flip ordering.
 - [x] Bound unfinished GPU frames, initially to two, with event queries.
 - [ ] Evaluate waitable or multi-slot GPU presentation only after ownership and
   readback are correct.

@@ -1685,6 +1685,59 @@ pages, kernel-mediated accesses, the unresolved colour read and concurrent
 ownership changes remain blind spots. No new retail or emulator run was made
 for this inventory, and per-flip readback remains required.
 
+#### Current-generation surface-guard rerun (2026-11-11)
+
+One justified no-retry native diagnostic reran the null surface guard on
+supported generation `20261111-084222-7bdb6e56`, toolkit tree
+`3164795a5ed52658abb41f2630ed8153e6b2cce0`, executable SHA-256
+`1d4da20c37be04347ed4e7f5f01b3752e0813c564ae87dc6c2e128cca87c5527`,
+12 raster threads and audio off. It was not an xemu run or a performance
+campaign. The legacy script skipped into the tutorial, automatically handled
+panels, reached a 104-flip stationary interval, completed the 40.01-second
+movement phase in one attempt, and shut down by an unforced console-control
+exit. The stationary interval did not meet the harness's 120-frame timing
+gate, so it is not a completed stationary measurement; that does not truncate
+the cumulative access report or movement coverage. The harness
+returned 2 because movement images were not reviewer-labeled; that expected
+status does not invalidate the memory-access report. No `RECOMP_UNIMPL`,
+untranslated-instruction, ICALL, watchdog, device, guard-protection or runtime
+fatal diagnostic was logged.
+
+The final local report at
+`analysis/bench/surface-guard-current-20261111-135529/guard.csv` records
+17,939 flips, 4,043,412 draws, 19,256 clears, 5,418,473 faults, the same seven
+colour/depth ranges, zero dropped sites and the explicit
+`0x80001000..0x80001FFF` exclusion. Its access groups are:
+
+- 5,381,598 NV2A-thread colour reads across four sites;
+- two other-thread colour reads at guest address `0x80000784`;
+- 36,873 other-thread colour writes across 336 sites; and
+- no depth reads.
+
+The exact 36,474,880-byte PDB used for offline resolution has SHA-256
+`21e89d365d4bb9bef3469ef62a3d23a95408a1b979520ed35df3212cd1464f09`.
+The report's module-relative `bruteforce.exe+0x1E850AC` read resolves through
+that PDB's public records to generated title function
+`sub_003855B3+0x35C`. This establishes title-code access to an address inside
+an accumulated programmed colour range. It does **not** establish a read of
+live rendered pixels: the guard never retires ranges, and two NV2A-thread
+sites in the same `0x80000000..0x800FFFFF` range resolve to
+`nv2a_pb_staged_walk`, showing that the range also covers staged pushbuffer
+memory. `sub_003855B3` is also the previously documented caller leading to
+the title's XPP/interrupt-masking sequence, which makes non-render use
+plausible but does not identify this exact load. The VCRUNTIME read sites are
+consistent with framework framebuffer publication. The previous run's
+provisionally USB-related depth reads did not recur.
+
+The Phase 3 diagnostic collection is complete with a negative design result:
+the guard cannot distinguish live render-target ownership from a stale or
+overlapping programmed range, cannot observe the excluded page or
+kernel-mediated accesses, and unprotects a page after its first fault until
+the next flip. Do not spend another run on the same diagnostic unless its
+lifetime/access model changes. Per-flip readback remains required; on-demand
+readback is blocked on live surface-lifetime tracking plus arbitrary guest
+read/write interception, not on another capture.
+
 The experimental D3D11 depth path uses D24S8/R24 views and a separate GPU
 snapshot when sampling a currently bound depth target. It accepts only exact
 address, format, linear layout, dimensions and pitch matches. A newly tracked

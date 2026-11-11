@@ -78,7 +78,7 @@ cache-enabled hit/compile diagnostics remain separate.
 
 | Phase | Status |
 | --- | --- |
-| 0 | Mostly done. Harness (`tools/bench.py`), frame statistics (patch 0014), census and ceiling probes (0015), profiler (`src/profile.c`), null back end and surface guard (`src/gpu/null_backend.c`) exist and were run. Reviewed movement manifests now report baseline-to-change and change-to-change cadence percentiles and 1% lows. The profile summary separates known guest GPU polls and caller-attributed kernel waits from unrelated kernel waits; `--profile-callers` enables the latter at additional diagnostic cost. `BRUTEFORCE_PERF_COUNTERS=1` adds atomic interval counts and opt-in timing for title pointer validation, `VirtualQuery`, exact texture-cache lookup/comparison, snapshot copies, rewrites and eviction; concurrent validation and exact P8 rewrite fixtures cover the counters. A three-run reviewed camera-pan campaign records G2, G3, readback, visibility, validation and texture-cache work on the final Release generation. A six-leg reviewed sync/async visibility campaign then isolated the existing visibility option: async improved reviewed throughput by 11.7%, but its 15.697/s mean 1% low and 65.467% G3 still fail. Guest-surface captures do not establish displayed-present cadence. Request audit 0025 now has a complete fresh-generation scripted report as well as the older partial diagnostic; neither has operator-reviewed scene identity or a matched xemu frame. The harness gives every enabled attempt and retry an isolated audit report, records its controls and rejects missing/incomplete output. Flip-ID capture mapping 0026 is synthetic-tested. Presenter capture 0027 verified one link per GDI and CPU-upload route in short, unmatched retail probes, but did not validate physical visibility. Matched CPU-reference output, native-rate confirmation and the surface-read answer remain open. The follow-up surface guard completed with one excluded page but retained documented blind spots. Missing: measurements for open #231 and current-base behavior from merged #272/#273. |
+| 0 | Mostly done. Harness (`tools/bench.py`), frame statistics (patch 0014), census and ceiling probes (0015), profiler (`src/profile.c`), null back end and surface guard (`src/gpu/null_backend.c`) exist and were run. Reviewed movement manifests now report baseline-to-change and change-to-change cadence percentiles and 1% lows. The profile summary separates known guest GPU polls and caller-attributed kernel waits from unrelated kernel waits; `--profile-callers` enables the latter at additional diagnostic cost. `BRUTEFORCE_PERF_COUNTERS=1` adds atomic interval counts and opt-in timing for title pointer validation, `VirtualQuery`, exact texture-cache lookup/comparison, snapshot copies, rewrites and eviction; concurrent validation and exact P8 rewrite fixtures cover the counters. A three-run reviewed camera-pan campaign records G2, G3, readback, visibility, validation and texture-cache work on the final Release generation. A six-leg reviewed sync/async visibility campaign then isolated the existing visibility option: async improved reviewed throughput by 11.7%, but its 15.697/s mean 1% low and 65.467% G3 still fail. Guest-surface captures do not establish displayed-present cadence. Request audit 0025 now has a complete fresh-generation scripted report as well as the older partial diagnostic; neither has operator-reviewed scene identity or a matched xemu frame. The harness gives every enabled attempt and retry an isolated audit report, records its controls and rejects missing/incomplete output. Flip-ID capture mapping 0026 is synthetic-tested. Presenter capture 0027 verified one link per GDI and CPU-upload route in short, unmatched retail probes, but did not validate physical visibility. Matched CPU-reference output and native-rate confirmation remain open. The current-generation surface guard completed in one attempt and resolved title-code access inside an accumulated colour range, but staged-pushbuffer overlap, one excluded page and missing live lifetime tracking prevent classification as a rendered-surface read. The current answer is to retain readback; do not repeat the same diagnostic without improving its model. Missing: measurements for open #231 and current-base behavior from merged #272/#273. |
 | 1 | Implemented, G4 not met. D3D11 back end (`src/gpu/`, `RECOMP_GPU=d3d11`) with the extended interface (0016). Synthetic WARP and hardware fixtures match apart from listed edge pixels. The new GPU-vertex tutorial capture differs from the CPU reference in 0.52% of pixels beyond 8/255; an older CPU-vertex capture differs substantially. |
 | 2 | Implemented (0017, on by default with the D3D11 back end). Stationary hold 3.20 → 30.41 rendered fps (3 runs each, alternating). An unreviewed retail diagnostic sampled 23,400 GPU-program batches without reported vertex differences through its last report. WARP and hardware fixtures cover additional packed formats, relative constants and culling against the CPU interpreter; matched-scene and complete format/hardware verification remain open. |
 | 3 | Partial. Async visibility reports (0018) and shared GPU presentation (0024) are opt-in. Three reviewed alternating runs per visibility mode measured 27.401 versus 30.606 world changes/s, but async still failed the 1%-low and G3 gates and remains opt-in. Submitted renderer work now has a two-event bound, and default-off elision skips copies only for demonstrably coherent, unscaled 32-bit guest surfaces. Tracked-surface flips still wait; dirty surfaces, diagnostics and scaled/16-bit frames still read back. General on-demand guest-reader interception is not implemented. CPU-written Bink frames synchronize before scaled submission. No new retail performance comparison was run. |
@@ -387,11 +387,16 @@ Done before writing renderer code. All evidence stays local.
    pre-clip GPU scopes and bounded temporal method context. Fresh tutorial
    counts exist but their scene identity remains unreviewed. Rank ignored methods and
    compare matched CPU/GPU/xemu captures before inferring visible impact.
-4. **Guest surface reads.** Determine whether the title's CPU code ever reads
-   a rendered colour or depth surface. Candidates: screenshots, the save
-   image, occlusion or lens-flare readbacks. Use page protection on surface
-   ranges in a diagnostic build, or a census of CPU reads in those ranges.
-   Phase 3 depends on the answer.
+4. **Guest surface reads.** The current-generation page-protection diagnostic
+   reached 104 stationary flips and completed the 40.01-second movement phase
+   in one attempt. The stationary timing gate itself was incomplete, but the
+   cumulative access report covered both phases. It resolved two reads inside
+   an accumulated colour range to generated title code, but that same range
+   overlaps staged pushbuffer memory and the guard does not retire ranges.
+   One page remained excluded and no depth read recurred. This completes the
+   planned probe with an inconclusive ownership result: retain readback until
+   live lifetimes and arbitrary guest accesses can be intercepted. Do not
+   repeat the same run without changing that model.
 5. **Ceiling probes.** These are throwaway measurements, not results.
    - **Null backend:** register an `Nv2aBackend` whose `draw` and `clear` do
      nothing and whose `flip` only counts. Run it with window clipping,
@@ -530,12 +535,13 @@ gameplay, apart from constant-writing programs. G4 still holds.
    frames, PVIDEO, dumps, statistics and presenter capture. This is not yet a
    fully GPU-authoritative presentation pipeline.
 2. **Readback only on demand.** Not implemented for GPU-dirty surfaces:
-   arbitrary title readers have not been comprehensively identified or
-   intercepted. The completed null-backend guard run still has one unresolved
-   non-NV2A colour read, seven provisionally USB-related depth reads and one
-   excluded page. A metadata-only shared flip and an explicit CPU-snapshot
-   request contract would address known framework consumers, but not those
-   title-side blind spots.
+   arbitrary title readers have not been comprehensively intercepted. The
+   current null-backend guard resolved generated title-code access inside an
+   accumulated colour range, but staged-pushbuffer overlap means it cannot
+   establish live render-target ownership. One page remains excluded. A
+   metadata-only shared flip and an explicit CPU-snapshot request contract
+   would address known framework consumers, but not those lifetime/access
+   blind spots.
    The separate default-off `RECOMP_GPU_SKIP_CLEAN_READBACK=1` experiment
    removes a copy only when native 32-bit guest bytes are already coherent;
    diagnostics and unsupported formats still copy, and the flip still waits.

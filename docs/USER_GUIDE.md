@@ -876,10 +876,14 @@ The current framework also needs guest-visible colour pixels for its CPU
 flip snapshot, GDI/SDL or D3D11 CPU upload, pinned/PVIDEO fallback, frame
 dumps, frame statistics, window dumps and presenter capture. Shared D3D11
 presentation can consume the GPU texture directly, but the current flip still
-publishes the CPU snapshot. The retained completed guard run has one
-unresolved non-NV2A colour read in addition to its excluded page, so
-`RECOMP_GPU_SKIP_CLEAN_READBACK=1` remains a narrow coherent-surface
-diagnostic rather than general on-demand readback.
+publishes the CPU snapshot. The current-generation guard run resolved
+non-NV2A access inside an accumulated colour range to generated title code,
+but that range also overlaps staged pushbuffer data, ranges are not retired,
+and one page remains excluded. Preserve the exact executable and adjacent PDB
+when collecting a report: unresolved sites fall back to
+`module+relative-address` for offline lookup. This diagnostic should not be
+rerun unchanged; `RECOMP_GPU_SKIP_CLEAN_READBACK=1` remains a narrow
+coherent-surface diagnostic rather than general on-demand readback.
 
 ## Texture-index performance comparison
 

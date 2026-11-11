@@ -748,19 +748,23 @@ memory, decoder, PFB and display-awake fixtures passed 17 cases, and the
 separate synchronization, presenter, pushbuffer and toolkit suite passed 61.
 These are synthetic results, not a title comparison.
 
-- Continue the guest surface-read investigation with the null backend and
-  `BRUTEFORCE_SURFACE_GUARD`, covering stationary and movement in one
-  scripted run. The static framework-consumer inventory is complete: flip
+- The current-generation guest surface-read diagnostic is complete. One
+  no-retry null-backend attempt reached 104 stationary flips, completed the
+  40.01-second movement phase, resolved two accesses inside an accumulated
+  colour range to generated title code, and recorded zero dropped sites. The
+  stationary timing gate was incomplete but did not truncate the cumulative
+  access report. The same range overlaps staged pushbuffer memory, page
+  `0x80001000` remained excluded, ranges are never retired and no depth read
+  recurred. The static framework-consumer inventory remains: flip
   publication, CPU/GDI/SDL upload, pinned/PVIDEO composition, dumps,
-  statistics and presenter capture currently consume the CPU path, while
+  statistics and presenter capture consume the CPU path, while
   render-to-texture and visibility queries do not require whole-surface
-  readback. The retained completed guard report has one unresolved non-NV2A
-  colour read, seven provisionally USB-related depth reads and one excluded
-  page. Account for those and the diagnostic's other blind spots; the run
-  cannot prove that no title readers exist. Keep output local. This determines
-  how much readback B2 can remove.
+  readback. Treat the result as a requirement to retain readback, not proof of
+  a live title surface read. Do not repeat the same diagnostic unless its live
+  lifetime/access model changes.
 - Extend the opt-in shared GPU presenter only after establishing guest
-  surface readers and a safe on-demand-readback contract. The bounded
+  surface lifetimes, intercepting arbitrary guest accesses and defining a safe
+  on-demand-readback contract. The bounded
   renderer queue and clean-surface-only copy elision are synthetic-tested;
   neither makes dirty surfaces generally GPU-authoritative. Retain readback
   for unproven readers and diagnostic consumers. Do not release fences before

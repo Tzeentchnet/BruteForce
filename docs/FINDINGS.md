@@ -30,6 +30,17 @@ in [UPSTREAM.md](./UPSTREAM.md).
   `0bd6a9835ebc411fb757ea510fb15dee4e4848b700ea6afef2e78a85d8904328`.
   The manifest and generated sources are ignored local artifacts, not
   distributed inputs.
+- Current supported generation `20261111-002138-a9dbc18a` is a Release build
+  from xboxrecomp v0.17.0 base
+  `343b6d8901723b37ce568b2418c5df4e1fe1d223` and verified toolkit tree
+  `131abd8d1f4559bb36dba4391e4c644925cff5df`. It translated all 22,295
+  identified functions with zero failures, six unresolved direct-call
+  targets, 11 untranslated instruction sites and three manual functions. Its
+  37,512,704-byte executable has SHA-256
+  `f1bf8622df3b651af6747566b4628a1d8ca18d7a01a4c196df910124cb9f7844`.
+  The manifest records manual-source SHA-256
+  `cc52b2cb10b69716f603d499ce0f783ab1c995190a2873f286ffc4bcf58534f2`
+  and the same retail XBE fingerprint as above.
 - [build.py](../tools/build.py) records and checks the XBE, fingerprint, seed,
   manual-source, and framework provenance. The pinned base, selected PR
   commits, local patches, and expected tree are in
@@ -2239,7 +2250,26 @@ C, assets and captures remain local.
 
 ## Current validation boundary
 
-The supported comparison baseline remains generation
+The supported executable is now generation `20261111-002138-a9dbc18a` on the
+v0.17 tree recorded above. One audio-off, four-thread CPU run and one D3D11
+run used the legacy isolated-save movement route. Both reached the scripted
+world, stationary hold and movement window without a retry. The CPU route
+reached the world at 93.61 seconds and reported 1.856 stationary flips/s,
+2.002 movement flips/s and 2.027 whole-frame changes/s. D3D11 reached it at
+93.97 seconds and reported 8.422 stationary flips/s, 11.846 movement flips/s
+and 11.871 whole-frame changes/s. Neither run matched a known black hash.
+Their 81 and 475 movement frames remain unreviewed, so no figure is distinct
+world FPS. The runs used different renderers only once each, omitted profiling
+and captures, and are a bring-up check rather than an A/B/A performance
+comparison.
+
+The two run logs contain no reached generated stub, untranslated-instruction
+hit, ICALL failure, renderer-device error or crash. They do retain expected
+filesystem diagnostics such as the `NtFsControlFile` stub and absent optional
+cache/content files; those did not stop the route. No retail camera trace was
+enabled.
+
+The supported **reviewed comparison baseline** remains old generation
 `20261103-145850-21e3091e`, built in Release against xboxrecomp base
 `f0f8a461496a4f23d9b0aeaa284b8d70ba7ab82b` and verified patched tree
 `25a2a713738b7aabb1c21ef6720765ff93ccffea`. Its executable SHA-256 is
@@ -2251,15 +2281,15 @@ Both report 12 unresolved call targets and 34 untranslated instruction sites.
 The Phase 4 candidate has one successful enabled movement smoke but no
 reviewed alternating comparison, so it does not replace the baseline evidence.
 
-The reviewed default and sync/async camera-pan campaigns use that exact
-baseline generation. The focused benchmark, control, reviewed-world and matched
-comparison suite passes 83 tests. The native suite previously passed 164
-tests with 67 hardware or platform skips, and the final Release executable,
-D3D11 fixture, fence fixture and interrupt fixture built successfully. The
-visibility comparison retained one failed synchronous boot attempt and its
-successful retry; all three asynchronous attempts completed. These results
-do not establish G4 or physical presentation. The Phase 4 validation boundary
-and its narrower post-fix checks are recorded above. For current commands, see
+The reviewed default and sync/async camera-pan campaigns use that exact old
+baseline generation. The focused benchmark, control, reviewed-world and
+matched comparison suite passes 83 tests. The current v0.17 integration passed
+992 framework tests with two skips, five focused framework fixture groups,
+and 632 project native/WARP/hardware tests with 23 hardware or platform skips
+before the new camera/audit diagnostics. Their integrated focused selection
+then passed 158 tests with three skips. These results do not establish G4 or
+physical presentation. The Phase 4 validation boundary and its narrower
+post-fix checks are recorded above. For current commands, see
 [DEVELOPMENT.md](./DEVELOPMENT.md#tests).
 
 Open work includes broader gameplay and input, physical controllers, audio,

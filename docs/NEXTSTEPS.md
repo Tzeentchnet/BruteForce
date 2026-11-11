@@ -9,14 +9,23 @@ toolkit uses xboxrecomp v0.17.0 at
 from #314, #319 and #320, and 34 local patches. Its verified tree is
 `131abd8d1f4559bb36dba4391e4c644925cff5df`.
 
-Supported retail generation `20261103-145850-21e3091e` is still the Release
-build from the previous framework tree
-`25a2a713738b7aabb1c21ef6720765ff93ccffea`; its executable SHA-256 is
-`0bd6a9835ebc411fb757ea510fb15dee4e4848b700ea6afef2e78a85d8904328`.
-It still reports 12 unresolved call targets and 34 untranslated instruction
-sites. Both current reviewed performance campaigns use this exact old
-generation; do not compare their measurements with a future v0.17 generation
-without a fresh A/B/A campaign.
+Supported retail generation `20261111-002138-a9dbc18a` is a Release build on
+that v0.17 tree. Its executable SHA-256 is
+`f1bf8622df3b651af6747566b4628a1d8ca18d7a01a4c196df910124cb9f7844`;
+it translated all 22,295 identified functions with zero failures, six
+unresolved direct-call targets and 11 untranslated instruction sites. One
+audio-off, four-thread CPU run and one D3D11 run each reached the scripted
+tutorial world, stationary hold and movement window without a retry, reached
+generated stub, untranslated-instruction hit, ICALL failure, renderer-device
+error or crash.
+
+The reviewed performance campaigns still use old generation
+`20261103-145850-21e3091e` on tree
+`25a2a713738b7aabb1c21ef6720765ff93ccffea`. The new bring-up runs have one
+attempt per renderer and no reviewed world labels; their flip and whole-frame
+change figures are not a performance comparison. Do not compare the old
+campaign measurements with the v0.17 generation without a fresh A/B/A
+campaign.
 
 sp00nznet/xboxrecomp#297, sp00nznet/xboxrecomp#298,
 sp00nznet/xboxrecomp#299 and sp00nznet/xboxrecomp#300 merged in v0.17.0;
@@ -28,9 +37,9 @@ sp00nznet/xboxrecomp#314 and sp00nznet/xboxrecomp#319 are also selected and
 validated. sp00nznet/xboxrecomp#315 remains unselected because the 32-bit
 MSVC differential test found 2,643 signed 16-bit `IDIV` mismatches.
 
-The next framework completion gate is a fresh retail generation and focused
-bring-up on tree `131abd8d1f4559bb36dba4391e4c644925cff5df`; until then the
-old generation remains the supported measurement baseline. Patch 0037's
+The fresh-generation and focused-bring-up completion gate is met. The next
+gate is the matched A1/E1-E2 retail and xemu reference evidence; the old
+generation remains only the reviewed measurement baseline. Patch 0037's
 one-line Windows raster diagnostic correction is the strongest small upstream
 candidate, followed by the software-interrupt ABI fix, immediate-entry guard,
 firmware-exit half of patch 0032, patch 0013, and the current-main half of
@@ -71,7 +80,7 @@ deferred. See
   each. The hold is visually static, so these are **rendered**, not distinct,
   frames. Native 30 Hz remains a hypothesis.
 - The user reported about 6 fps while moving with default D3D11 settings.
-  The final supported Release generation has now been rebenchmarked with three
+  The previous reviewed Release baseline was rebenchmarked with three
   reviewed camera-pan runs, fixed input, no retries and complete
   flip-ID-aligned labels. It averaged 27.349 guest-surface world changes/s,
   even with detailed counters, caller profiling and continuous captures.

@@ -26,9 +26,10 @@ reference renderer remains available from the launcher for comparison and
 troubleshooting.
 
 The pinned framework has been updated to xboxrecomp v0.17.0 plus selected
-post-release fixes. A fresh retail generation on that toolkit tree has not
-yet completed the project's bring-up and performance gates; the reviewed
-measurements still belong to the previous supported generation.
+post-release fixes. Fresh Release generation `20261111-002138-a9dbc18a`
+completed focused CPU and D3D11 tutorial/movement bring-up on that tree.
+Matched-reference and reviewed performance gates remain open, and the
+published measurements still belong to the previous reviewed generation.
 
 See [current findings](docs/FINDINGS.md) and
 [next steps](docs/NEXTSTEPS.md) for the detailed validation boundary.

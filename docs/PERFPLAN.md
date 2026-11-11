@@ -20,10 +20,16 @@ licensed, so they can be adapted here with attribution in
 `THIRD_PARTY_NOTICES.md`. Its title-specific hooks, addresses, and Remastered
 features do not apply and must not be copied.
 
-## Status (2026-11-03)
+## Status (2026-11-10)
 
 Measurements are in [FINDINGS.md](./FINDINGS.md#performance-plan-phase-0-and-the-first-gpu-path-results);
 next steps are in [NEXTSTEPS.md](./NEXTSTEPS.md).
+
+Fresh v0.17 Release generation `20261111-002138-a9dbc18a` completed one CPU
+and one D3D11 scripted movement bring-up without retries. Those unreviewed,
+single-run figures are not a performance comparison. All reviewed phase
+measurements below remain tied to their explicitly named older generation
+until a fresh alternating campaign is complete.
 
 | Phase | Status |
 | --- | --- |

@@ -70,6 +70,14 @@ int xbox_Nv2aGraphAcknowledgeTrap(uint32_t a, uint32_t b) { (void)a; (void)b; re
 void xbox_Nv2aGraphCompleteTrap(void) {}
 int xbox_Nv2aPfbFlushWaitEnabled(void) { return 0; }
 int xbox_Nv2aPfbFlushWait(void) { return 0; }
+int xbox_Nv2aIdleWaitEnabled(void) { return 0; }
+void xbox_Nv2aIdleWake(void) {}
+int xbox_Nv2aSegmentsEnabled(void) { return 0; }
+void xbox_Nv2aPublishPut(uint32_t put, uint32_t caller)
+{
+    (void)put;
+    (void)caller;
+}
 volatile uint32_t *xbox_Nv2aRegPtr(uint32_t value) { (void)value; return NULL; }
 recomp_func_t recomp_lookup_kernel(uint32_t value) { (void)value; return NULL; }
 

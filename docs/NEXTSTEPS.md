@@ -7,7 +7,14 @@ tracked in [UPSTREAM.md](UPSTREAM.md). The current
 toolkit uses xboxrecomp v0.17.0 at
 `343b6d8901723b37ce568b2418c5df4e1fe1d223`, selected post-release commits
 from #314, #319 and #320, and 42 local patches. Its isolated and independently
-replayed tree is `bfbf6d32c4f184332e1db90e975e0caf839a4b10`.
+replayed tree is `64ce266664a875084be63cb32148b3ae78c55185`.
+The integrated synthetic build is clean: the framework tools report 995
+passed, 2 skipped and 134 subtests passed; the project suite reports 966
+passed with WARP and the available hardware adapter; nine focused framework
+fixture groups report 41 CTests passed; and the presenter suite reports 19
+passed. The validation found and fixed missing display-awake linkage in the
+presenter script and missing Phase 4 stubs in the camera fixture. No retail
+or xemu run was used for those fixes.
 
 Supported retail generation `20261111-002138-a9dbc18a` is a Release build on
 the earlier v0.17 tree `131abd8d1f4559bb36dba4391e4c644925cff5df`;

@@ -9,6 +9,25 @@ organization and importer research are tracked in
 in [RENDERING.md](./RENDERING.md), and general framework contributions are
 in [UPSTREAM.md](./UPSTREAM.md).
 
+## Integrated synthetic validation boundary
+
+The complete 42-patch v0.17 framework stack independently replayed to tree
+`64ce266664a875084be63cb32148b3ae78c55185` and passed
+`python tools/toolkit.py --verify`. The framework tools reported 995 passed,
+2 skipped and 134 subtests passed. A production-style synthetic project build
+then built every native fixture; the project suite reported 966 passed with
+WARP and the available hardware adapter. Nine focused framework fixture
+groups reported 41 CTests passed, and the Windows presenter suite reported
+19 passed.
+
+The integrated build exposed two fixture-only omissions that isolated
+milestone runs had missed: the camera fixture lacked the new idle/segment
+framework stubs, and the presenter script did not compile `display_awake.c`
+for its three `fb_present.c` consumers. Both are now covered by the same
+commands above. These results validate reconstruction, compilation and
+synthetic contracts only. They are not retail rendering, native-display,
+audio-listening, device-loss, Hor+, 4K or performance evidence.
+
 ## Phase 4 synthetic integration boundary
 
 On the supported `20261111-002138-a9dbc18a` generated code, static
@@ -18,7 +37,7 @@ the effective USER PUT address. Device setup writes a bootstrap JUMP at
 physical zero before a KickOff call; this observation does not establish that
 all runtime PUT/GET writes or resets use those sites.
 
-On private framework tree `bfbf6d32c4f184332e1db90e975e0caf839a4b10`,
+On private framework tree `64ce266664a875084be63cb32148b3ae78c55185`,
 synthetic fixtures passed 7 bounded-PFB, 6 idle-wait and 9 guarded-segment
 cases. The latter exercises a zero-origin JUMP, split packets, ordered
 synthetic semaphore/report/trap/flip markers, backpressure, a held flip and

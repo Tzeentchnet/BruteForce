@@ -13,7 +13,7 @@ ROOT = Path(__file__).resolve().parents[1]
 TOOLKIT_DIR = ROOT / ".deps" / "xboxrecomp"
 TOOLKIT_URL = "https://github.com/sp00nznet/xboxrecomp.git"
 TOOLKIT_BASE = "343b6d8901723b37ce568b2418c5df4e1fe1d223"
-TOOLKIT_TREE = "bfbf6d32c4f184332e1db90e975e0caf839a4b10"
+TOOLKIT_TREE = "64ce266664a875084be63cb32148b3ae78c55185"
 LOCAL_PATCHES = (
     ROOT / "patches" / "xboxrecomp" / "0002-model-wbinvd.patch",
     ROOT / "patches" / "xboxrecomp" / "0003-synchronize-semaphore-target.patch",

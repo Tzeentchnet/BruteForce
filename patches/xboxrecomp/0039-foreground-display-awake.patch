@@ -361,3 +361,31 @@ index 0000000..ef6f7e1
 +    puts("display-awake window transitions passed");
 +    return 0;
 +}
+diff --git a/tests/presenter_capture/run_windows.ps1 b/tests/presenter_capture/run_windows.ps1
+--- a/tests/presenter_capture/run_windows.ps1
++++ b/tests/presenter_capture/run_windows.ps1
+@@ -40,14 +40,16 @@ $oldSkip = $env:PRESCAP_TEST_SKIP_HARDWARE
+ Push-Location $BuildDirectory
+ try {
+     Invoke-Checked "cl.exe" ($compile + @(
+         (Join-Path $PSScriptRoot "presenter_capture_test.c"),
++        (Join-Path $root "src\video\display_awake.c"),
+         "/Fe:presenter_capture_test.exe", "user32.lib", "gdi32.lib"))
+     Invoke-Checked "cl.exe" ($compile + @(
+         (Join-Path $PSScriptRoot "shared_gpu_capture_test.c"),
+         "/Fe:shared_gpu_capture_test.exe") + $gpuLibs)
+     Invoke-Checked "cl.exe" ($compile + @(
+         (Join-Path $PSScriptRoot "device_loss_test.c"),
+         "/Fe:device_loss_test.exe") + $gpuLibs)
+     Invoke-Checked "cl.exe" ($compile + @(
+         (Join-Path $PSScriptRoot "real_presenter_test.c"),
++        (Join-Path $root "src\video\display_awake.c"),
+         "/Fe:real_presenter_test.exe", "gdi32.lib") + $gpuLibs)
+@@ -68,6 +70,7 @@ try {
+         }
+         Invoke-Checked "cl.exe" ($compile + @(
+             $present, (Join-Path $PSScriptRoot "legacy_stubs.c"),
++            (Join-Path $root "src\video\display_awake.c"),
+             "/Fe:legacy_present_test.exe", "user32.lib", "gdi32.lib"))
+         Invoke-Checked "cl.exe" ($compile + @(
+             $shared, "/Fe:legacy_shared_test.exe") + $gpuLibs)

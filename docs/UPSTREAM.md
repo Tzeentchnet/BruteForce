@@ -99,9 +99,13 @@ pass.
 
 Patch [0045](../patches/xboxrecomp/0045-bounded-nv2a-segments-and-waits.patch)
 adds a 42nd local patch; its separately reconstructed tree is
-`bfbf6d32c4f184332e1db90e975e0caf839a4b10`. Both the private implementation
-checkout and an independent local replay verify against that tree. No shared
-toolkit or generated output was changed.
+`64ce266664a875084be63cb32148b3ae78c55185`. Both the private implementation
+checkout and a second independent local replay verify against that tree. The
+shared local toolkit now uses this verified tree; generated title output has
+not yet been regenerated. Integrated validation also corrected patch 0039's
+presenter script so each direct `fb_present.c` consumer links
+`display_awake.c`. The framework tools report 995 passed, 2 skipped and 134
+subtests passed; 41 focused CTests and 19 presenter cases also pass.
 
 ### Bounded acknowledgement, idle waiting and guarded PUT segments
 
@@ -186,6 +190,12 @@ guidance and not a duplicate of the ownership or configuration contracts below.
 
 ### Complete local-patch disposition
 
+The read-only overlap search was refreshed on 2026-11-11 against all PR
+titles through #321 and the #184 tracking index. Relevant existing work
+includes merged #89, #97, #145, #247, #253, #285 and #300, closed #219, open
+#231, #319 and #320, and design issue #306. No upstream interaction was
+performed.
+
 | Patch or range | Current-main isolation | Upstream overlap and disposition |
 | --- | --- | --- |
 | 0001 | Retired | Merged as #297 and included in v0.17.0. It intentionally does not solve in-range ordinal-shaped data at the lookbehind boundary. |
@@ -221,6 +231,7 @@ guidance and not a duplicate of the ownership or configuration contracts below.
 | 0041, 0043 | Stack-dependent | Checked snapshots and allocation lifetime identities inform the shared surface-ownership contract; see item 46. |
 | 0042 | Stack-dependent | Bounded verification and stalled-work diagnostics cross executor and wait interfaces; see item 47. |
 | 0044 | Stack-dependent | Extends 0025's default-off audit and fixes stale frame-trace context; coordinate with #184 and extract the generic fixtures before proposing it. See item 28. |
+| 0045 | Stack-dependent | Bounded acknowledgement, idle waiting and guarded PUT segments overlap merged #97's GET/segment ordering, closed #219's wrapped reads, merged #247's wait diagnostics and #306's backend contract. Keep the switches independent and default off; coordinate the executor contract before proposing any part. |
 
 ### Already filed from this project's account
 
@@ -1121,9 +1132,10 @@ own GPU back end, an extended interface for it, and its own pacing fixes.
     views. It is not a guest-depth-alias implementation. The
     [brute-force-2003-reloaded recreation](https://github.com/kduong-dev/brute-force-2003-reloaded)
     describes a stencil-aware glare pipeline but is not an xboxrecomp
-    renderer or an original-hardware oracle. The previous #184 index check was
-    2026-11-11; no fresh overlap search or upstream interaction was performed
-    for this follow-up.
+    renderer or an original-hardware oracle. A refreshed read-only search on
+    2026-11-11 found no exact depth/stencil-alias implementation. Design issue
+    #306 and open backend-contract fixture #319 remain the relevant ownership
+    coordination points; no upstream interaction was performed.
     *Before filing:* the darker Basic Controls image is now validated against
     a native xemu reference. Coordinate a generic ownership contract in #306,
     refresh upstream overlap with approval before action, preserve GPU
@@ -1252,8 +1264,10 @@ own GPU back end, an extended interface for it, and its own pacing fixes.
     `src/gpu/bw_gpu_audit.{c,h}` at `e631edddfe56d22344e9f696923aeb6d78a9e7ba`;
     the MIT notice is retained and credited in
     [THIRD_PARTY_NOTICES.md](../THIRD_PARTY_NOTICES.md).
-    No new overlap search or upstream contact was performed for patch 0044;
-    these are the prior recorded checks.
+    A refreshed read-only search on 2026-11-11 found no exact audit duplicate.
+    Open #231 changes raster scheduling and open #319 provides a reusable
+    backend-contract fixture; both are coordination points rather than
+    substitutes. No upstream contact was performed.
     *Before filing:* recheck upstream and coordinate with prior authors; move
     the executor integration cases into a standalone framework test, test
     Linux/pthread and other backends, assess disabled-path overhead and
@@ -1745,9 +1759,10 @@ own GPU back end, an extended interface for it, and its own pacing fixes.
     failed acquire/release retry and shutdown.
     *Overlap:* exact PR/issue searches for `SetThreadExecutionState`,
     `ES_DISPLAY_REQUIRED`, display-awake, and screensaver behavior found no
-    xboxrecomp equivalent through 2026-11-10. Blood Wake's implementation is
-    the identified prior art. A fresh overlap check is an external gate; no
-    upstream interaction was made for this work.
+    xboxrecomp equivalent through 2026-11-10. The full PR-title and #184 index
+    refresh on 2026-11-11 still found no equivalent. Blood Wake's
+    implementation is the identified prior art; no upstream interaction was
+    made for this work.
     *Before filing:* ask Blood Wake's authors whether they intend to upstream
     it, test the framework's hosted and standalone Windows topologies, decide
     whether SDL owns a separate cross-platform policy, and request approval
@@ -1842,7 +1857,7 @@ own GPU back end, an extended interface for it, and its own pacing fixes.
     failures. Pending/completed markers verify fatal paths do not resume.
     Existing capture-off presentation paths also run. These simulations do
     not test driver removal races, other adapters or device recreation.
-    *Overlap:* the last recorded read-only check on 2026-11-11 identified
+    *Overlap:* the refreshed read-only check on 2026-11-11 identified
     merged #215's Windows presenter, #220's PVIDEO work, #285's snapshot
     ordering and #306's backend contract under tracking index #184.
     No new upstream contact was made for this work.
@@ -1927,9 +1942,11 @@ own GPU back end, an extended interface for it, and its own pacing fixes.
     queued, compiled, ready and injected event-creation failure diagnostics.
     No title hang, actual device removal or prolonged real shader compile was
     reproduced.
-    *Overlap:* previous checks through #321 and tracking index #184 were
-    recorded 2026-11-10/11; no fresh overlap search or upstream contact was
-    made for this work.
+    *Overlap:* the read-only search through #321 and tracking index #184 was
+    refreshed on 2026-11-11. Merged #247 supplies generic long-wait logging
+    and open #319 supplies a backend-contract fixture, but neither duplicates
+    the bounded verification, PFB-hold or shader-preparation diagnostics. No
+    upstream contact was made for this work.
     *Before filing:* refresh the overlap search, separate verification,
     wait and project-backend diagnostics into independently reviewable
     changes, validate prolonged cases and log volume on real workloads, and

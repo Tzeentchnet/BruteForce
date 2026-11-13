@@ -969,7 +969,7 @@ listed differences, newly visible side geometry survives matching title
 culling, HUD and movies retain their shape, and guest readback remains 4:3.
 Split-screen support is a deferred follow-up, not part of this gate.
 
-## Decisions (settled 2026-10-30; updated 2026-11-11)
+## Decisions (settled 2026-10-30; updated 2026-11-13)
 
 1. **Rendering reference:** xemu, run on the same disc at matched states (A2).
 2. **DSP direction:** the xemu v0.8.139 DSP is implemented. Project-owned
@@ -996,6 +996,17 @@ Split-screen support is a deferred follow-up, not part of this gate.
 9. **Phase 4 campaign:** defer the 24-run flush/idle/segment/all-three A/B/A
    matrix. The two fixed-tree smokes remain bring-up evidence only; all
    switches stay default-off and no performance gate is waived.
+10. **Vulkan back end (2026-11-13):** deferred, like Direct3D 12. Direct3D
+    11 remains the only GPU target. The title submits NV2A pushbuffers, so a
+    Vulkan back end would sit behind the existing extended render-backend
+    interface (patch 0016) and would have to reproduce D3D11's surface
+    ownership, mandatory guest readback, render scaling, shared and scaled
+    presentation, two-event submission bound, and flip and semaphore
+    ordering. No measurement justifies it: the dominant G3 wait is the PFB
+    flush poll, which is independent of the host graphics API. Revisit only
+    after the open D3D11 performance and correctness gates close, starting
+    with a design note that maps the backend interface onto Vulkan rather
+    than with code.
 
 Still open: access to a native 4K display. Optional 5.1 output is deferred.
 

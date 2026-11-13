@@ -63,6 +63,12 @@ switch without its separate correctness and measurement gates.
   `RECOMP_GPU_TEX_INDEX=0` for an attributable comparison.
 - [ ] **Blocked on an operator-confirmed six-attempt campaign:** run matched
   A/B/A and record whether G2, G3, or NV2A busy time improves.
+- [ ] **Candidate, after the texture-index campaign:** assess whether
+  Windows write watching (`MEM_WRITE_WATCH`) or guarded pages can prove
+  unchanged guest texture and palette sources exactly, including DMA,
+  aliases, reprotection, and reset. Record the feasibility result before any
+  implementation; any mechanism stays default-off behind a `RECOMP_*` switch
+  and must not relax full comparison until a synthetic fixture proves it.
 
 ## Decision gate
 
@@ -121,7 +127,10 @@ switch without its separate correctness and measurement gates.
 ## Phase 5: residual work
 
 - [ ] **Blocked on the next reviewed campaign:** reprofile before choosing
-  state caching or constant-buffer dirty tracking.
+  state caching or constant-buffer dirty tracking. Include a RenderDoc
+  capture of a matched D3D11 frame to count redundant state changes, clears,
+  render-target switches, and the cost of scaled offscreen passes; keep the
+  capture local and record only the counts and conclusions.
 - [x] Establish the Brute Force `ARRAY_ELEMENT16/32` census: retained complete
   audit evidence counted 73,787,237 16-bit words and 115,904 32-bit words,
   expanding to 147,690,378 indices exactly matching the requested and

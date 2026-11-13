@@ -745,6 +745,8 @@ semaphore, report or flip synchronization.
   submitted fences complete before their inputs are consumed. FINDINGS
   explains why these are invalid.
 - Direct3D 12, which is deferred.
+- A Vulkan back end, which is deferred; see
+  [NEXTSTEPS decision 10](./NEXTSTEPS.md#decisions-settled-2026-10-30-updated-2026-11-13).
 - Mipmaps are an opt-in correctness experiment for the 4K target (NEXTSTEPS
   B10), not an established performance win; other LOD-transition
   enhancements stay deferred. Preserve the default scale-1 reference.

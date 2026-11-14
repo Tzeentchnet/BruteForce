@@ -171,35 +171,52 @@ promoted into a performance claim.
   The manifest records manual-source SHA-256
   `cc52b2cb10b69716f603d499ce0f783ab1c995190a2873f286ffc4bcf58534f2`
   and the same retail XBE fingerprint as above.
-- Current supported generation `20261111-084222-7bdb6e56` was generated from
-  the same v0.17.0 base on integrated toolkit tree
+- Campaign generation `20261111-084222-7bdb6e56` was generated from the same
+  v0.17.0 base on integrated toolkit tree
   `64ce266664a875084be63cb32148b3ae78c55185`, then rebuilt against the
   runtime-only fixed tree `3e3ae3600802d2bf4446d86fc546322d60849047`.
-  The recorded and current `tools`/`templates` fingerprints are identical, so
-  [build.py](../tools/build.py) accepted the existing generated code while
-  pinning the full runtime tree in build metadata. It translated all 22,295
-  identified functions with zero failures, six unresolved direct-call
-  targets and 11 untranslated instruction sites. After the project-side exact
-  texture-descriptor index, its exact same-binary linear reference and
-  default-off exact index-word runs were added, the supported workflow rebuilt
-  the same generated title against the current framework tree into a
-  37,578,240-byte executable with SHA-256
-  `9112b0f836f94c9ab87b23a4a83bfdde95acaf32b5dae4d62636893b627144bd`.
-  Its 36,474,880-byte PDB has SHA-256
-  `563b5da9b21e265fb5d1cf0e9922f2f2d1bf7476b8c8c93fb3db355f84df5614`.
-  This current executable has synthetic coverage but no retail run. The
-  preceding index-only 37,576,192-byte executable also had no retail run and
-  had SHA-256
+  It translated all 22,295 identified functions with zero failures, six
+  unresolved direct-call targets and 11 untranslated instruction sites. After
+  the exact texture-descriptor index, same-binary linear reference and
+  default-off exact index-word runs were added, its 37,578,240-byte Release
+  executable was rebuilt for the reviewed texture-index campaign with
+  SHA-256
+  `d02f6dec418a19399626808567fd578c0e142aa531a2048e09a1191cab280e79`.
+  An earlier synthetic-only executable at the same size had SHA-256
+  `9112b0f836f94c9ab87b23a4a83bfdde95acaf32b5dae4d62636893b627144bd`;
+  the preceding index-only 37,576,192-byte executable had SHA-256
   `4635a8522a44ba99e676cdbf1f3db7b64a8b0da0e4b9718cbacd683d5bb427c0`.
-  The
-  preceding post-deadlock 37,575,168-byte executable, which completed the two
-  Phase 4 smokes, had SHA-256
+  The post-deadlock 37,575,168-byte executable that completed the two Phase 4
+  smokes had SHA-256
   `132bece507c1773c41eeaa6549687d2c493a121c2c102452a10465d5a584f073`;
-  the pre-fix executable at that same size had SHA-256
+  its pre-fix predecessor had SHA-256
   `60c232ee1206e99b8587d7b85329710dc48786bc9835bede19fbfa68347c2705`.
-  The generation manifest records manual-source SHA-256
-  `82e0c2655a92d309b0a2d296f2417f435b04a2737dad7bea6f4048e9e44abae2`
-  and the same retail XBE fingerprint as above.
+- Current supported generation `20261113-214800-12924697` regenerates the same
+  retail XBE on toolkit tree
+  `3e3ae3600802d2bf4446d86fc546322d60849047` after completing the one-core
+  title-default and scaled-alias investigation. It retains the title-side
+  PFB caller map found missing by the texture-index campaign and translated 22,295
+  functions with six unresolved direct-call targets and 11 untranslated
+  instruction sites. The manifest records manual-source SHA-256
+  `1e4473a70699d1483be820595e4af2181ad837005b2fdc489db69399f5110555`.
+  Its 37,578,240-byte Release executable has SHA-256
+  `f07ab1b80f34331eb2484c4c75f198cb7fb7726174cdf3eb2fce83dd84eb7d69`;
+  its 36,474,880-byte PDB has SHA-256
+  `9ce6039972b27a5a9c1e173a5f91a82300d10def0a096e8c688d05702c0bb48d`.
+  This supported build rejects both depth and stencil aliases whenever
+  internal scaling is active. The preceding alias-capable build from the same
+  generation had executable SHA-256
+  `57e63f097924d4c051d4d6565c8999e720c7c0e53edcdc76df1ae6659884859a`
+  and PDB SHA-256
+  `fed3189bd6a7e831b9f8425b6bfdd48194c688898b498b74f0659403a5cf0134`;
+  it produced the retained 4.5x correctness captures described below. The
+  focused scheduling/default selection reports 64 passed; the current focused
+  alias/rejection selection reports 24 passed, and the broader WARP/hardware
+  depth/stencil/glare selection reports 42 passed. The patched framework tree
+  verifies. The current fail-closed executable has no retail run; the
+  alias-capable predecessor supplies the rendering evidence, while the four
+  bounded one-core boots used an earlier diagnostic predecessor before the
+  trace hook was removed.
 - [build.py](../tools/build.py) records and checks the XBE, fingerprint, seed,
   manual-source, and framework provenance. The pinned base, selected PR
   commits, local patches, and expected tree are in
@@ -237,7 +254,9 @@ unavailable in the fixture report.
 - WARP and the available hardware device exercise clean depth-owner reseeding,
   dirty guest-write rejection, partial overlaps, guards, row padding,
   allocation release/reuse, layout changes, clear rebaselining and injected
-  seed/baseline races. Both packed-alias switches reject scaled rendering.
+  seed/baseline races. At that revision, both packed-alias switches rejected
+  scaled rendering; the later exact scaled packed-stencil experiment and the
+  retail evidence that caused its removal are described below.
   These synthetic results do not prove all write races, guest reads, retail
   ownership or synchronization.
 - Expanded clipping fixtures exercise CPU/WARP/hardware rectangle state,
@@ -1778,6 +1797,36 @@ are rejected, while non-alias `0x41` textures keep their original path.
 Guest writes, partially overlapping aliases and CPU stencil emulation
 remain unsupported.
 
+An experimental extension reconstructed the same packed texture from
+physically scaled GPU depth. It required exact guest-logical dimensions,
+pitch and AA layout plus an exact derived physical extent. Scale-two glare
+and exact/mismatch fixtures passed on WARP and hardware.
+
+The fresh 4.5x retail check invalidated that narrower result. The alias-capable
+generation build is retained locally under
+`analysis\bench\scaled-stencil-correctness-20261113-final`. In two boots with
+packed aliases enabled, the player character was absent at the untouched
+tutorial spawn. An otherwise matched alias-off control at the same prompt and
+view showed the character. The alias-off sun-facing probe also produced no
+obvious bloom in the user's review, but it was not matched to a native
+reference and does not establish that the original angle-dependent issue is
+fixed. The animated scene prevented the exact-static hold detector from
+completing, so the evidence consists of bounded flip-gated captures rather
+than a benchmark interval. Forced process termination also left the redirected
+stdout/stderr files empty; no runtime-log conclusion is attached to these
+images. Descriptively, the closest spawn frames had mean absolute RGB
+difference 9.9604 and 148,411 pixels over 8/255, but the missing model and
+changing exposure make those brightness figures unsuitable for equivalence.
+
+The internal pass that removed the model is unresolved. A direct non-current
+depth sample already returns that resource's SRV without rebinding the current
+DSV, and a focused render-target preservation probe did not reproduce a
+binding loss, so no speculative DSV fix was kept. Correctness instead fails
+closed: the supported renderer and launcher again reject both depth-texture
+and packed-stencil aliases at active internal scales. Native-resolution packed
+aliases remain available behind their default-off switch and retain the xemu
+Basic Controls evidence.
+
 The existing depth-seed movement trace used generation
 `20261029-175500-dfadbdd9` and framework tree `3472bac8e33c1758c801fb1ca65a346a170ad8e5`.
 Its 320x240 bright pass reads the 640x480 scene and the `0x41` alias; a
@@ -2268,7 +2317,7 @@ The benchmark now retains asynchronous reports-written and pending-poll
 counts in its structured D3D11 interval diagnostics. Older diagnostic lines
 without those fields remain parseable and report them as unavailable.
 
-### Exact texture descriptor index (synthetic only)
+### Exact texture descriptor index and first reviewed campaign (2026-11-13)
 
 The reviewed default and visibility campaigns above measured 75.699,
 75.371, and 76.350 linear descriptor probes per ordinary texture lookup.
@@ -2304,9 +2353,221 @@ counter, rewrite, unsupported-format and failed-upload selection reported 18
 passed across WARP and the available hardware adapter. The complete D3D11
 Python matrix then reported 394 passed with both device modes enabled. The
 linear-reference output test is byte-identical to the indexed WARP rewrite
-fixture, and invalid switch values fail initialization. No
-retail run, matched A/B/A comparison, distinct-world measurement, or G2/G3
-result was collected; the old probe counts remain the only title evidence.
+fixture, and invalid switch values fail initialization.
+
+The first retail comparison is retained locally under
+`analysis\bench\texture-index-main-20261113-desktop4`. It alternated
+linear/indexed/linear/indexed/linear/indexed on generation
+`20261111-084222-7bdb6e56`, toolkit tree
+`3e3ae3600802d2bf4446d86fc546322d60849047`, executable SHA-256
+`d02f6dec418a19399626808567fd578c0e142aa531a2048e09a1191cab280e79`,
+12 raster threads, D3D11 and audio on. All unrelated performance switches
+were off. Each attempt completed 15 controller dispatches and 15 runtime
+acknowledgements, reached `state=finishing`, and exited through clean
+`ctrl_break` handling without a forced termination.
+
+Two earlier complete collections were rejected rather than reused:
+
+- `desktop2` scheduled manual input from buffered frame-CSV delivery, so two
+  pairs exceeded the 500 ms hard match ceiling. The harness now uses one
+  controller-monotonic clock for manual dispatch, movement bounds, profiling
+  and capture, while retaining the legacy frame-telemetry path.
+- `desktop3` reduced controller dispatch drift to at most 93 ms, but
+  `RECOMP_PAD_LIVE` could not consume the final 49- and 53-second reversals
+  until the title next polled the pad. Their runtime queue drift reached about
+  1.8-3.7 seconds. The fixed route now ends with the 45-second
+  `rright:3000` command; after that hold ends at 48 seconds, the final
+  measured tail is stationary-camera animated world.
+
+For `desktop4`, pair 1's maximum controller/runtime drift was 94/126 ms,
+pair 2's was 78/140 ms, and pair 3's was 79/126 ms. All are below the
+review manifest's 250 ms tolerance. Fifty labelled 16x10 contact sheets
+covered all 7,412 raw captures. The movement bounds select 7,379 of them;
+the other 33 are post-boundary asynchronous dump completions and are not in
+the comparison. Every selected run has one `world` baseline followed only by
+exact `world_changed` classifications in the HUD-free
+`[160,120,480,180]` ROI at zero pixel tolerance. No popup, cinematic, fade,
+black frame, missing geometry, invalid image or review gap was found. All
+pairs retain the same tutorial geometry, camera route, character and HUD.
+Run 04 ends in the recurring bright exposure phase while its baseline ends in
+the dark phase; the geometry and camera pose match, and both exposure phases
+occur in both variants. These are renderer guest-surface captures keyed to
+flip IDs, not OS-compositor or physical-display evidence.
+
+| Run | Variant | Reviewed captures | Seconds | World changes/s | 1% low/s | Sampled G3 | NV2A busy |
+| --- | --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| 1 | linear | 1,030 | 39.742 | 25.892 | 12.790 | 0.00% | 81.04% |
+| 2 | indexed | 1,248 | 39.811 | 31.323 | 16.870 | 0.00% | 82.18% |
+| 3 | linear | 1,300 | 39.739 | 32.688 | 18.926 | 0.01% | 81.28% |
+| 4 | indexed | 1,155 | 39.482 | 29.229 | 15.677 | 0.00% | 82.14% |
+| 5 | linear | 1,282 | 39.693 | 32.273 | 17.539 | 0.00% | 81.74% |
+| 6 | indexed | 1,364 | 39.930 | 34.135 | 20.707 | 0.01% | 81.72% |
+
+Linear means are 30.284 world changes/s, 16.418/s at the 1% low, 0.003%
+sampled G3 and 81.353% NV2A busy. Indexed means are 31.562/s, 17.751/s,
+0.003% and 82.013%. The mean cadence deltas are therefore +1.278 changes/s
+(+4.2%) and +1.333/s (+8.1%) at the 1% low, with no sampled G3 change and
++0.660 percentage points NV2A busy. The three paired cadence deltas are
++5.431, -3.459 and +1.862 changes/s. Because one pair regresses, the
+campaign does not establish a repeatable title-throughput improvement.
+
+Nine periodic intervals per variant are wholly contained in the reviewed
+ranges, covering 2,741 linear and 2,861 indexed flips. Linear lookup made
+2,058,624 requests and 169,825,470 descriptor probes, or 82.495
+probes/lookup; indexed lookup made 2,212,804 requests and 2,722,418 probes,
+or 1.230 probes/lookup. Measured lookup cost fell from 0.0486 to
+0.0336 ms/flip, a 0.0150 ms/flip (30.8%) reduction. Every key lookup and
+exact source/palette comparison hit, and neither variant recorded a snapshot
+copy, rewrite, eviction or failed-upload discard in those intervals. Exact
+comparison remained enabled and took 0.535 and 0.497 ms/flip respectively.
+The differing workload volumes and diagnostic overhead make these per-flip
+figures attributable workload evidence, not additive frame-time components.
+
+The strict report remains **inconclusive**. Every reviewed run contains three
+or four PFB intervals whose immediate sites are known but whose enclosing
+caller is zero; the per-run unattributed PFB call counts are 883, 1,074,
+1,092, 972, 1,037 and 1,116. The offline comparator now preserves valid
+cadence and profile measurements while forcing G3 inconclusive when interval
+caller attribution is incomplete, rather than discarding every pair. G2 is
+also inconclusive without reviewed native movement, G4 lacks matched
+CPU/D3D11 reference frames, and G5 lacks reviewed 2x hold evidence.
+
+Generated-code inspection identified the missing title stack layouts:
+PFB sites `0x00371D85` and `0x00371DAB` carry their enclosing caller at
+`esp+20`, while `0x003780E6` carries it at `esp+48`. The title hook now maps
+those explicit sites without a heuristic fallback, and the fence fixture
+checks them alongside the two existing layouts. Current generation
+`20261113-160606-ad4c0e30` contains the fix.
+
+The caller-corrected repeat is retained locally under
+`analysis\bench\texture-index-main-20261113-desktop9`. It uses that
+generation, the same toolkit tree, executable SHA-256
+`9248b15fbcd17329e0afa5fdb3acbd62454f34b4affe434bac03d1903aa0b72d`,
+12 raster threads, D3D11 and audio on. Runs 01 linear, 02 indexed and 03
+linear completed 15 controller dispatches and 15 runtime acknowledgements,
+reached `state=finishing`, and exited through clean, non-forced
+`ctrl_break`. Run 04 indexed locked during Loading before readiness. It
+stopped at 12 flips while vblank continued normally; immediately before the
+exact process was stopped, ordinal 99 accounted for 545,629,948 of
+551,340,537 logged kernel calls. The operator directed that the six-run
+sequence not be restarted again, so the directory is partial evidence, not
+an acceptance campaign.
+
+Review covered all 3,574 raw captures on 24 labelled 16x10 contact sheets.
+Strict movement bounds select 3,552 captures; 22 asynchronous post-boundary
+dumps were reviewed and excluded. All images are 640x480 renderer
+guest-surface captures. The same tutorial geometry, character, HUD and fixed
+camera route appear throughout, with the recurring bright/dark exposure
+phases and no black, solid, missing-geometry, invalid or unreviewed frame.
+There are 3,548 exact `world_changed` transitions. Indexed flip 10,990 has
+an unchanged HUD-free ROI while pixels outside it change and is labelled
+`hud_only`; there are no other static ROI transitions.
+
+| Run | Variant | Reviewed captures | Seconds | World changes/s | 1% low/s | Sampled G3 | NV2A busy | Caller intervals |
+| --- | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| 1 | linear | 1,155 | 39.861 | 28.951 | 19.615 | 0.00% | 84.32% | 21/21 |
+| 2 | indexed | 1,156 | 39.523 | 29.198 | 20.659 | 0.00% | 84.48% | 22/22 |
+| 3 | linear | 1,241 | 39.838 | 31.126 | 20.157 | 0.01% | 83.06% | 21/21 |
+
+The new stack mappings therefore close the observed attribution defect:
+all 64 PFB/PUT intervals contained by the three reviewed windows have a
+nonzero immediate site and enclosing caller, with zero unattributed calls.
+This is live evidence for the mappings, but it does not close G3 because the
+required three timing-valid A/B pairs do not exist.
+
+The only completed A/B pair has at most 78 ms controller-dispatch drift, but
+the final 45-second `rright:3000` command is acknowledged 1,656 ms apart on
+the normalized runtime pad clocks. That exceeds the 250 ms manifest
+tolerance and confirms that ending the route at 45 seconds did not eliminate
+the untimed `RECOMP_PAD_LIVE` scheduling gap in every run. The pair's
+descriptive +0.247 world changes/s and +1.044/s 1% low are not accepted A/B
+results. The strict comparator rejects the campaign because fewer than three
+alternating pairs are available; G2-G5 all remain inconclusive.
+
+Six complete linear diagnostic intervals and three indexed intervals are
+retained only as unbalanced mechanism evidence. The two linear runs made
+1,374,847 lookups and 110,641,548 probes, or 80.476 probes/lookup, at
+0.0519 ms/flip. The indexed run made 618,990 lookups and 766,876 probes, or
+1.239 probes/lookup, at 0.0318 ms/flip. All descriptor keys and exact source
+and palette comparisons hit; no snapshot copy, rewrite, eviction or discard
+occurred in those contained intervals. This independently reproduces the
+scan-removal mechanism, not a title-throughput improvement. The index remains
+the exact default, but no further repeat is scheduled and no performance
+promotion is claimed from this campaign.
+
+### Pre-movie loader polling and one-core guest scheduling
+
+The texture-index repeat and the first 4.5x packed-stencil attempt exposed a
+startup failure before the Xbox movie. Retained failures stopped after 12-14
+flips with zero draws while vblank, USB and other host activity continued.
+They occurred with texture indexing both on and off, audio both on and off,
+scale 1 and 4.5, and packed aliases off. This is therefore an older
+startup/scheduling problem, not a result of the scaled stencil change. The
+strongest earlier failure's final periodic summary reported 545,629,948
+calls to kernel ordinal 99 out of 551,340,537 total kernel calls.
+
+A temporary bounded entry hook in diagnostic generation
+`20261113-213117-4fb48c81` traced the title's XDK
+`KeDelayExecutionThread` wrapper only after one thread had called it one
+million times and then at powers of two. Importantly, the unpinned baseline
+was successful: it reached its first movie draw after 8.16 seconds despite
+tracing the same return address, `0x00265B87`, with duration zero and
+alertable mode zero. Its last pre-movie periodic summary contained
+14,211,264 ordinal-99 calls, and its busiest traced thread reached 8,388,608
+calls. A large delay-call count is therefore evidence of pathological
+polling, not by itself proof of a lock.
+
+Generated-title-code inspection resolves the observed path:
+
+1. `sub_00265AD0` asks `sub_002644B0` to queue a loader job.
+2. The worker loop in `sub_00264620` runs callback `sub_00265900`.
+3. The callback clears completion byte `[esi+5]`.
+4. The caller loops while that byte is nonzero and invokes
+   `KeDelayExecutionThread(0, 0)` at `0x00265B80`, returning at the traced
+   `0x00265B87`.
+
+The framework implements that zero-duration call with `SwitchToThread`.
+Windows documents that operation as yielding to a ready thread on the
+current processor. The original Xbox supplied one CPU, whereas recompiled
+guest threads are otherwise independent host threads. The supported
+interpretation is that the title's queue assumes single-CPU cooperative
+scheduling and an unpinned polling guest can pathologically outpace the
+guest worker. The exact mechanism of each historical indefinite failure is
+still an inference: no missed wake or corrupt queue entry was captured.
+
+Four bounded boots tested the existing generic one-core guest-affinity
+control. An explicit `RECOMP_GUEST_CPUS=one` run reached its first movie draw
+after 6.60 seconds. Ordinal 99 was below the six ranks printed by each
+periodic summary and no guest thread reached the trace's one-million-call
+threshold. Three more runs exercised the new title default at 4.5x with a
+fixed 15-second watchdog:
+
+| Run | First movie draw | Flip | One-million-call trace |
+| --- | ---: | ---: | --- |
+| 1 | 7.385 s | 18 | none |
+| 2 | 7.407 s | 19 | none |
+| 3 | 7.270 s | 17 | none |
+
+All three logs confirm the default one-core selection. Their exit code 3 is
+the expected fixed watchdog termination after 15 seconds, not a hang; frame
+CSV progression and the first nonzero draw establish the bounded success.
+These are startup smokes, not alternating performance measurements and not
+proof of long-session reliability.
+
+Two alternatives were rejected. `RECOMP_GUEST_LOCK=1` reached a movie draw
+only after 15.72 seconds in its bounded diagnostic. A temporary framework
+experiment that immediately handed off a zero-delay call when another guest
+waiter existed passed its focused synthetic fixture but still needed
+12.36 seconds and millions of retail poll calls. That patch was removed and
+the expected framework tree restored. No framework change remains:
+sp00nznet/xboxrecomp#192 already supplies `RECOMP_GUEST_CPUS=one`.
+
+Brute Force now selects that existing control by default in both direct
+executable startup and prepared `build.py` environments. An explicit setting,
+including `RECOMP_GUEST_CPUS=all`, is preserved for controlled comparisons.
+Only guest title threads are pinned; GPU, APU and other host service threads
+remain free. The temporary trace hook is not part of clean supported
+generation `20261113-214800-12924697`.
 
 ### Material index-word census and default-off run executor
 

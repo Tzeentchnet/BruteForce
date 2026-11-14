@@ -89,7 +89,9 @@ MOVEMENT_INPUT = (
     (19.0, "rright:2000"), (22.0, "rleft:2500"),
     (25.0, "rright:1500"), (27.0, "rleft:2500"), (30.0, "rright:3000"),
     (34.0, "rleft:3000"), (38.0, "rright:3000"), (42.0, "rleft:2000"),
-    (45.0, "rright:3000"), (49.0, "rleft:3000"), (53.0, "rright:3000"),
+    # Keep the final measured tail stationary. Late live-file steps are only
+    # queued when the guest polls the pad and can exceed the 500 ms match gate.
+    (45.0, "rright:3000"),
 )
 MOVEMENT_START = 20.0           # after the fixed tutorial-menu skip has settled
 # Help panels pause the tutorial until A is pressed; their timing depends on
@@ -135,7 +137,7 @@ RUNTIME_OPTION_KEYS = (
     "RECOMP_PROGRAM_NEAR_ZERO", "RECOMP_PFB_FLUSH_WAIT",
     "RECOMP_NV2A_IDLE_WAIT", "RECOMP_NV2A_SEGMENTS", "RECOMP_PB_WALK",
     "RECOMP_PB_EXEC", "RECOMP_PB_INDEX_RUNS", "RECOMP_PGRAPH_IRQ",
-    "RECOMP_VBLANK", "RECOMP_AUDIO", "BRUTEFORCE_PERF_COUNTERS",
+    "RECOMP_VBLANK", "RECOMP_GUEST_CPUS", "RECOMP_AUDIO", "BRUTEFORCE_PERF_COUNTERS",
     "BRUTEFORCE_PROFILE_CALLERS",
 )
 PERFORMANCE_SWITCHES = frozenset(("RECOMP_PFB_FLUSH_WAIT", "RECOMP_NV2A_IDLE_WAIT",
@@ -902,6 +904,7 @@ def run_once(out_dir, label, scene, env_overrides, threads, watchdog, profile, c
     movement_captures = []
     movement_capture_start = None
     world_capture_start = None
+    input_start_wall = None
     ready_drain_until = None
     result = {
         "label": label, "scene": scene, "env": env_overrides, "threads": threads,
@@ -940,6 +943,15 @@ def run_once(out_dir, label, scene, env_overrides, threads, watchdog, profile, c
                      "not necessarily final at console-control exit",
         } if audit_path else None,
         "automatic_panel_presses": not no_auto_panels,
+        "input_timing": {
+            "dispatch_clock": "controller_monotonic" if ready else "frame_log",
+            "scope": (
+                "seconds from the measured-hold transition; manual movement dispatch and "
+                "measurement boundaries share the controller monotonic clock"
+                if ready else
+                "seconds from the measured-hold transition in frame telemetry"
+            ),
+        } if scene == "movement" else None,
     }
 
     def send_script_inputs(elapsed, flip):
@@ -954,6 +966,42 @@ def run_once(out_dir, label, scene, env_overrides, threads, watchdog, profile, c
                 "dispatch_wall_seconds": round(time.monotonic() - started, 3), "flip": flip,
             })
             sent += 1
+
+    def advance_movement(elapsed, index, flip, loop_now, dispatch_inputs):
+        nonlocal movement_capture_start, state, world_capture_start
+        if dispatch_inputs:
+            send_script_inputs(elapsed, flip)
+        if elapsed >= MOVEMENT_START and "movement_start" not in marks:
+            marks["movement_start"] = index
+            profile_gate.open(loop_now)
+            census_gate.open(loop_now)
+            if capture_world:
+                world_capture_start = len(capture_control.files())
+                capture_control.open()
+        if capture_movement and len(movement_captures) < len(MOVEMENT_CAPTURE_OFFSETS):
+            if (movement_capture_start is None and
+                    elapsed >= MOVEMENT_START + MOVEMENT_CAPTURE_OFFSETS[len(movement_captures)]):
+                movement_capture_start = len(capture_control.files())
+                capture_control.open()
+                marks[f"movement_capture_{len(movement_captures)}_start"] = index
+            if movement_capture_start is not None and capture_control.poll():
+                movement_captures.append({
+                    "offset_seconds": MOVEMENT_CAPTURE_OFFSETS[len(movement_captures)],
+                    "files": [path.name for path in
+                              capture_control.files()[movement_capture_start:]],
+                })
+                marks[f"movement_capture_{len(movement_captures) - 1}_end"] = index
+                movement_capture_start = None
+        if (trace_frame and elapsed >= MOVEMENT_START + trace_after
+                and not trace_flag.exists()):
+            trace_flag.write_text("trace\n", encoding="ascii")
+        if elapsed >= MOVEMENT_START + MOVEMENT_SECONDS:
+            marks["movement_end"] = index
+            profile_gate.close(loop_now)
+            census_gate.close(loop_now)
+            if capture_world:
+                capture_control.close()
+            state = "finishing"
 
     try:
         while True:
@@ -1030,41 +1078,12 @@ def run_once(out_dir, label, scene, env_overrides, threads, watchdog, profile, c
                             state = "moving"
                             marks["input_start"] = i
                             marks["input_start_t"] = rows[i]["t"]
-                elif state == "moving":
+                            if ready:
+                                input_start_wall = now
+                                marks["input_start_wall_seconds"] = round(now, 3)
+                elif state == "moving" and not ready:
                     elapsed = row["t"] - marks["input_start_t"]
-                    if ready:
-                        send_script_inputs(elapsed, row["flip"])
-                    if elapsed >= MOVEMENT_START and "movement_start" not in marks:
-                        marks["movement_start"] = i
-                        profile_gate.open(now)
-                        census_gate.open(now)
-                        if capture_world:
-                            world_capture_start = len(capture_control.files())
-                            capture_control.open()
-                    if capture_movement and len(movement_captures) < len(MOVEMENT_CAPTURE_OFFSETS):
-                        if (movement_capture_start is None and
-                                elapsed >= MOVEMENT_START + MOVEMENT_CAPTURE_OFFSETS[len(movement_captures)]):
-                            movement_capture_start = len(capture_control.files())
-                            capture_control.open()
-                            marks[f"movement_capture_{len(movement_captures)}_start"] = i
-                        if movement_capture_start is not None and capture_control.poll():
-                            movement_captures.append({
-                                "offset_seconds": MOVEMENT_CAPTURE_OFFSETS[len(movement_captures)],
-                                "files": [path.name for path in
-                                          capture_control.files()[movement_capture_start:]],
-                            })
-                            marks[f"movement_capture_{len(movement_captures) - 1}_end"] = i
-                            movement_capture_start = None
-                    if (trace_frame and elapsed >= MOVEMENT_START + trace_after
-                            and not trace_flag.exists()):
-                        trace_flag.write_text("trace\n", encoding="ascii")
-                    if elapsed >= MOVEMENT_START + MOVEMENT_SECONDS:
-                        marks["movement_end"] = i
-                        profile_gate.close(now)
-                        census_gate.close(now)
-                        if capture_world:
-                            capture_control.close()
-                        state = "finishing"
+                    advance_movement(elapsed, i, row["flip"], now, False)
             if state == "failed":
                 break
             if state == "manual_ready" and ready.poll(now):
@@ -1076,10 +1095,13 @@ def run_once(out_dir, label, scene, env_overrides, threads, watchdog, profile, c
             elif state == "ready_drain" and now >= ready_drain_until:
                 state = "ready_frames"
             if state == "moving" and rows:
-                elapsed = rows[-1]["t"] - marks["input_start_t"]
-                if not ready:
+                if ready:
+                    elapsed = now - input_start_wall
+                    advance_movement(elapsed, len(rows) - 1, rows[-1]["flip"], now, True)
+                else:
+                    elapsed = rows[-1]["t"] - marks["input_start_t"]
                     send_script_inputs(elapsed, rows[-1]["flip"])
-                if (not no_auto_panels and len(rows) > PANEL_FRAMES
+                if (state == "moving" and not no_auto_panels and len(rows) > PANEL_FRAMES
                         and rows[-1]["t"] - last_panel_press >= PANEL_SECONDS
                         and not any(changed(rows, k)[0]
                                     for k in range(len(rows) - PANEL_FRAMES, len(rows)))):

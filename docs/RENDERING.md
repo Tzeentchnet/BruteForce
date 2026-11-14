@@ -54,8 +54,10 @@ One traced tutorial frame submitted scene batches to a back buffer, a
 512x512 depth-only pass, more scene batches, 320x240 and 160x120 downsample
 passes, then glow composite and HUD batches before the flip. A separate trace
 and synthetic replay investigated a bright pass that samples a packed
-depth/stencil alias; its effect on the reported gameplay bloom is not
-established. These are observations of particular runs, not an asserted
+depth/stencil alias. A matched Basic Controls comparison establishes stale
+packed stencil as the large brightness difference in that state; sun-facing
+gameplay and the opening fade remain unmatched. These are observations of
+particular runs, not an asserted
 render-graph specification for the original game. See the
 [feature census and frame trace](./FINDINGS.md#performance-plan-phase-0-and-the-first-gpu-path-results)
 and [packed-alias investigation](./FINDINGS.md#packed-depthstencil-aliases-and-shared-presentation).
@@ -474,9 +476,13 @@ the packed-stencil option direct title evidence: with every other diagnostic
 control fixed, enabling it reduced pixels differing from xemu by more than
 8/255 from 43.4320% to 3.7119% and mean channel error from 10.5953 to 1.2485.
 That establishes the matched bright-pass mechanism, not every depth alias or
-scene. Scaled modes reject both alias options explicitly because their
-guest-layout seed, snapshot and packed sampling semantics have not been
-defined for physical-resolution depth.
+scene. Scaled modes reject both alias options. An experimental exact scaled
+packed `0x41` path passed a scale-two glare replay and logical/physical-size
+fixtures, but a subsequent 4.5x retail check showed the player absent in two
+alias-on boots and visible in the otherwise matched alias-off spawn control.
+The renderer and launcher therefore fail closed instead of exposing that
+path. The internal pass that removed the model is unresolved; the retail
+result overrides the narrower synthetic success.
 
 ### Vertex processing and pixel combiners
 
@@ -678,7 +684,7 @@ setting-to-environment mapping.
 | Clean readback elision | Off | `RECOMP_GPU_SKIP_CLEAN_READBACK=1` is an environment-only experiment; dirty and diagnostic frames retain readback. |
 | Persistent pixel-shader cache | Off | `RECOMP_GPU_PSCACHE=1` enables the combiner cache. |
 | Window clip / near plane | Off / HUD-safe | HUD-safe retains non-additive UI and clips zero-depth additive draws. Legacy/inherit and full screen-zero remain comparison modes. Face culling is off unless separately enabled. |
-| Depth alias / stencil alias / shared presentation | Off / off / off at 480p | Scaled modes reject the aliases and enable shared presentation automatically. |
+| Depth alias / stencil alias / shared presentation | Off / off / off at 480p | Scaled modes reject both alias options and enable shared presentation automatically. |
 | Window / display scaling / VSync | Windowed / 2x linear / on | Display size is separate from a fixed internal-resolution preset; native mode follows its 4:3 picture. |
 
 The launcher starts the tutorial configuration. To compare the renderers
@@ -746,7 +752,10 @@ replace matched gameplay or original-hardware validation.
 - One native xemu Basic Controls scene is matched: the packed-stencil option
   reduces the large whole-frame brightness difference, while its unsupported
   ownership cases and title-wide behavior keep G4 open. Sun-facing, fade and
-  movement equivalence remain open. Split-screen equivalence is explicitly
+  movement equivalence remain open. The attempted scaled extension is
+  disabled because it removed the player model in the matched retail spawn
+  check despite passing the narrower synthetic fixture. Split-screen
+  equivalence is explicitly
   deferred and is not a current G4 gate. The CPU reference has its own known
   stencil gap.
 - True widescreen remains an unimplemented, default-off workstream. It needs

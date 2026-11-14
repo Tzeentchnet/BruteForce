@@ -71,8 +71,13 @@ def performance_manifest(tmp_path):
                 "RECOMP_GPU": "d3d11", "RECOMP_PFB_FLUSH_WAIT": "1" if enabled else None,
                 "RECOMP_NV2A_IDLE_WAIT": None, "RECOMP_NV2A_SEGMENTS": None,
             },
-            "profile": {"game_thread": {"caller_attribution_complete": True,
-                                         "gpu_wait_pct": 5}},
+            "profile": {
+                "game_thread": {
+                    "caller_attribution_complete": True,
+                    "gpu_wait_pct": 5,
+                },
+                "nv2a_thread": {"busy_pct": 70},
+            },
             "runtime_diagnostics": {"submit_caller_overflow": False,
                                     "submit_intervals": [
                                         {"kind": "pfb", "calls": 1, "site": "00371FBC",
@@ -157,6 +162,8 @@ def test_reviewed_pairs_and_all_gates(performance_manifest):
     assert all(gate["status"] == "pass" for gate in result["gates"].values())
     assert result["pairs"][0]["candidate"]["reviewed_world_cadence"]["frame_ms_p99"] == 100
     assert result["summary"]["candidate_world_low_1pct_fps_mean"] == 10
+    assert result["summary"]["candidate_g3_pct_mean"] == 5
+    assert result["summary"]["candidate_nv2a_busy_pct_mean"] == 70
     assert "flips are not world FPS" in result["scope"]
 
 
@@ -277,6 +284,10 @@ def test_incomplete_or_failed_evidence_never_passes(performance_manifest, defect
         assert comparison["gates"]["G3"]["status"] == "inconclusive"
     if defect == "bad-profile":
         assert comparison["gates"]["G3"]["status"] == "fail"
+    if defect == "unattributed-caller":
+        assert comparison["pairs"] is not None
+        assert comparison["gates"]["G3"]["status"] == "inconclusive"
+        assert comparison["summary"]["candidate_world_fps_mean"] == 10
     if defect == "g4-difference":
         assert comparison["gates"]["G4"]["status"] == "fail"
     if defect == "g5-rate":
@@ -331,6 +342,7 @@ def test_owned_controls_and_performance_collection_requirements(tmp_path):
     ], args)
     assert "RECOMP_GPU_TEX_INDEX" in bench.RUNTIME_OPTION_KEYS
     assert "RECOMP_PB_INDEX_RUNS" in bench.RUNTIME_OPTION_KEYS
+    assert "RECOMP_GUEST_CPUS" in bench.RUNTIME_OPTION_KEYS
 
 
 def test_event_wait_profile_attribution_and_incomplete_stack(tmp_path):

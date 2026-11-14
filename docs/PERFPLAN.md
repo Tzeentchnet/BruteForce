@@ -31,14 +31,37 @@ Before the runtime-only Phase 4 fix, integrated v0.17 Release generation
 `20261111-084222-7bdb6e56`'s codegen-identical executable completed one CPU
 and one D3D11 scripted movement bring-up without retries. The post-deadlock
 executable later completed the fixed-tree Phase 4 smokes described below.
-The current texture-index and default-off index-word-run rebuild has synthetic
-validation only and no retail run. Representative captures from the preceding executables show gameplay
+That generation's later texture-index executable completed a six-attempt
+linear/indexed campaign with timing-matched input and complete guest-surface
+review. It reduced exact descriptor probes from 82.495 to 1.230 per lookup
+and measured lookup cost from 0.0486 to 0.0336 ms/flip, but one of three
+cadence pairs regressed and historical PFB intervals lack complete caller
+attribution. The strict result is inconclusive, not a promotion result.
+Generation `20261113-160606-ad4c0e30` fixes the three observed title caller
+layouts. Its partial retail repeat reviewed three completed attempts and
+confirmed all 64 contained PFB/PUT intervals have callers, but run 04 locked
+before readiness and the only A/B pair fails runtime-input matching by
+1,656 ms at the final command. The operator closed the repeat as
+inconclusive. The separate default-off index-word-run candidate remains
+synthetic-only. Representative
+captures from the preceding executables show gameplay
 without the controls panel or a cinematic, but the 116 CPU and 1,929 D3D11
 movement flips do not have continuous reviewed world labels. The reported
 2.919 and 48.231 whole-picture changes/s are therefore not distinct-world
 rates or a performance comparison. All reviewed phase measurements below
-remain tied to their explicitly named older generation until a fresh
-alternating campaign is complete.
+remain tied to their explicitly named generation.
+
+New title runs default to `RECOMP_GUEST_CPUS=one`. This pins guest title
+threads, not GPU/APU host workers, to one allowed core and avoids the
+pre-movie loader's pathological zero-delay polling observed in the partial
+repeat. Older unpinned measurements remain valid only for their named
+generations and controls; do not combine them numerically with new pinned
+runs. Every future campaign must retain and report this control or name an
+explicit override.
+Clean supported generation `20261113-214800-12924697` contains that default
+and restores the fail-closed scaled depth/stencil-alias boundary after a 4.5x
+correctness check found a missing player model with packed aliases enabled.
+That check was not a performance run, so no phase or gate is promoted.
 
 A native 640x480 xemu Basic Controls frame is now matched by content to the
 preceding `20261111-002138-a9dbc18a` reference generation. A focused
@@ -93,7 +116,7 @@ cache-enabled hit/compile diagnostics remain separate.
 | 2 | Implemented (0017, on by default with the D3D11 back end). Stationary hold 3.20 → 30.41 rendered fps (3 runs each, alternating). An unreviewed retail diagnostic sampled 23,400 GPU-program batches without reported vertex differences through its last report. WARP and hardware fixtures cover additional packed formats, relative constants and culling against the CPU interpreter; matched-scene and complete format/hardware verification remain open. |
 | 3 | Partial. Async visibility reports (0018) and shared GPU presentation (0024) are opt-in. Three reviewed alternating runs per visibility mode measured 27.401 versus 30.606 world changes/s, but async still failed the 1%-low and G3 gates and remains opt-in. Submitted renderer work now has a two-event bound, and default-off elision skips copies only for demonstrably coherent, unscaled 32-bit guest surfaces. Tracked-surface flips still wait; dirty surfaces, diagnostics and scaled/16-bit frames still read back. General on-demand guest-reader interception is not implemented. CPU-written Bink frames synchronize before scaled submission. No new retail performance comparison was run. |
 | 4 | Steps 1–3 implemented behind independent default-off switches with synthetic coverage. One fixed-tree segment-only smoke and one all-three smoke reached reviewed movement after correcting the PGRAPH/PFB dependency cycle. The 24-run alternating isolation/combined campaign is deferred; no performance gate is claimed. The last measured G3 remains 65.467% with async visibility. PFB, GET, semaphore, report, interrupt and flip ordering remain mandatory. Step 4 is deferred pending G3. |
-| 5 | In progress. GPU compute decodes common textures; exact D24 and packed D24S8/stencil surface aliases and GPU window clipping are experimental opt-ins. A native xemu Basic Controls match now establishes that packed-stencil reconstruction, rather than a global gamma change, removes the large brightness error in that state: 43.4320% of pixels exceed 8/255 without it and 3.7119% with it. Unsupported ownership cases and other scenes keep the option experimental and G4 unmet. D3D11 honors partial clear rectangles, and patch 0022 removes redundant software depth clears when a backend owns drawing and clearing. Patch 0019 cached hot `getenv` calls. Checked texture/colour snapshots and tracked lifetimes replace repeated page queries on those paths, but their performance and title correctness have not been measured. |
+| 5 | In progress. GPU compute decodes common textures; exact D24 and packed D24S8/stencil surface aliases and GPU window clipping are experimental opt-ins. A native xemu Basic Controls match now establishes that packed-stencil reconstruction, rather than a global gamma change, removes the large brightness error in that state: 43.4320% of pixels exceed 8/255 without it and 3.7119% with it. Unsupported ownership cases and other scenes keep the option experimental and G4 unmet. D3D11 honors partial clear rectangles, and patch 0022 removes redundant software depth clears when a backend owns drawing and clearing. Patch 0019 cached hot `getenv` calls. Checked texture/colour snapshots and tracked lifetimes replace repeated page queries on those paths. The first reviewed texture-index campaign proves the index removes descriptor-scan work but has historical caller gaps and one regressing cadence pair. The caller-corrected partial repeat closes the observed attribution gap, but its only A/B pair fails input timing and run 04 locks before readiness. The operator closed the campaign as inconclusive; G2/G4/G5 remain open. |
 
 ### Audio performance status
 
@@ -159,9 +182,19 @@ cube levels and mip levels. Exact source and palette comparison is unchanged.
 `RECOMP_GPU_TEX_INDEX=0` disables index maintenance and selects the former
 exact linear lookup for measurement; unset or `1` selects the index. This
 same-executable reference keeps generated code, framework identity and exact
-byte validation fixed across a comparison. The recorded roughly 76 probes
-per lookup predates this index; no title A/B/A or performance result has been
-collected for it.
+byte validation fixed across a comparison. The first reviewed six-attempt
+comparison measured 82.495 linear versus 1.230 indexed probes/lookup and
+0.0486 versus 0.0336 ms/flip lookup time in nine contained intervals per
+variant. Mean reviewed cadence moved from 30.284 to 31.562 world changes/s
+and the 1% low from 16.418 to 17.751/s, but the three pair deltas were
++5.431, -3.459 and +1.862 changes/s. Sampled G3 was unchanged at 0.003%;
+NV2A busy increased from 81.353% to 82.013%. Historical zero-caller PFB
+records make the strict G3 gate inconclusive, and G2/G4/G5 evidence is absent.
+The three missing title caller layouts are fixed in the next generation.
+Its partial repeat confirms complete attribution in all 64 reviewed
+intervals and reproduces scan removal, but the only completed pair fails
+runtime-input matching and the fourth run locks before readiness. No further
+repeat is scheduled; the throughput result remains inconclusive.
 The current texture and colour-shadow paths instead use checked copies,
 rechecking mapping and allocation identities, with optional explicit
 suballocation bounds. Guard, reprotection, lifecycle, colour-alias and
@@ -650,6 +683,16 @@ phases when it is on the critical path:
   `RECOMP_GPU_TEX_INDEX=0/1` comparison to separate descriptor probes, exact
   source and palette comparison spans, snapshot copies, rewrites and evictions
   before selecting the next cache change.
+  The first reviewed comparison attributes a 30.8% reduction in measured
+  descriptor lookup time and preserves every exact comparison, but does not
+  establish repeatable world-cadence improvement. Its incomplete historical
+  PFB caller records keep G3 inconclusive. The caller-corrected partial repeat
+  confirms all 64 contained PFB/PUT intervals have callers and measures
+  80.476 linear versus 1.239 indexed probes/lookup, but its only A/B pair
+  fails runtime-input matching and the fourth attempt locks before readiness.
+  The operator closed the repeat as inconclusive. Retain the exact index and
+  do not infer a title speedup or select another cache policy from the
+  unbalanced diagnostics.
   The retained Brute Force census now establishes material
   `ARRAY_ELEMENT16/32` volume, and patch 0046 implements the default-off run
   API for both selected walkers. Scalar/run executor state, audit counts,
@@ -705,7 +748,8 @@ reference remains level zero; keep both options off for existing G4 baselines
 and list their intentional sampling differences in separate enabled-mode
 comparisons. The title's broader mip supply, xemu-matched frames, 4K VRAM cost and
 G5 remain open. Measure any performance change with at least A/B/A runs on
-the same generation, scene, scripted input, thread count and options, and
+the same generation, scene, scripted input, guest-CPU setting, thread count
+and options, and
 report distinct world frames separately from flips.
 
 ## True-widescreen correctness workstream

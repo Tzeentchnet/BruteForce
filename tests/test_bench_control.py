@@ -557,7 +557,12 @@ def test_manual_movement_dispatches_full_script_in_buffered_log_batches(
                         "hash": "2", "distinct": 1, "constants": "d",
                     })
             else:
-                return []
+                previous = self.rows[-1]
+                new = [{
+                    "flip": previous["flip"] + 1, "t": previous["t"] + 0.1,
+                    "draws": 800, "vertices": 1, "hash": "2", "distinct": 1,
+                    "constants": "d",
+                }]
             self.rows.extend(new)
             return new
 
@@ -587,15 +592,22 @@ def test_manual_movement_dispatches_full_script_in_buffered_log_batches(
     monkeypatch.setattr(bench_control, "ManualReadiness", Readiness)
     monkeypatch.setattr(bench_control, "shutdown_process", shutdown)
     monkeypatch.setattr(bench, "READY_DRAIN_SECONDS", 0)
-    monkeypatch.setattr(bench.time, "sleep", lambda _seconds: None)
+    clock = [0.0]
+    monkeypatch.setattr(bench.time, "monotonic", lambda: clock[0])
+    monkeypatch.setattr(bench.time, "sleep", lambda seconds: clock.__setitem__(0, clock[0] + seconds))
     result = bench.run_once(
         tmp_path / "run", "manual", "movement", {}, 1, 900, False, False,
         "Release", readiness="manual", ready_state="visible tutorial hold",
-        no_auto_panels=True, phase_timeout=1,
+        no_auto_panels=True, phase_timeout=120,
     )
     assert result["state"] == "finishing"
+    assert result["input_timing"]["dispatch_clock"] == "controller_monotonic"
     assert [event["input"] for event in result["input_events"]] == [
         command for _when, command in bench.MOVEMENT_INPUT]
+    assert all(
+        abs(event["dispatch_seconds"] - scheduled) <= 0.11
+        for event, (scheduled, _command) in zip(result["input_events"], bench.MOVEMENT_INPUT)
+    )
     assert len(result["input_runtime"]["queued"]) == len(bench.MOVEMENT_INPUT) - (not acknowledge_all)
     if acknowledge_all:
         assert not result.get("error")

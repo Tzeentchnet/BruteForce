@@ -181,6 +181,7 @@ def test_legacy_world_detection_waits_for_the_validated_menu_route():
     )
     assert (18.75, "y:300") in bench.MOVEMENT_INPUT
     assert bench.MOVEMENT_START > 18.75
+    assert bench.MOVEMENT_INPUT[-1] == (45.0, "rright:3000")
     assert all(not command.startswith("lup")
                for when, command in bench.MOVEMENT_INPUT if when >= 19.0)
 

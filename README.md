@@ -52,11 +52,21 @@ campaign, distinct-world FPS result or CPU-reference match. The planned
 remain default-off. See the
 [user guide](docs/USER_GUIDE.md#experimental-nv2a-wait-and-segment-options).
 
-Packed depth/stencil aliases and window clipping remain default-off experiments;
-their expanded ownership and clipping coverage is synthetic, not a gameplay
-or original-hardware guarantee. Movement benchmark collection exits 2 as
-inconclusive; a separate reviewed-world analysis must establish content and
-presentation. Black hashes alone cannot identify intentional fades.
+Packed depth/stencil aliases and window clipping remain default-off
+experiments. One matched native xemu Basic Controls comparison reduced D3D11
+pixels differing by more than 8/255 from 43.4320% to 3.7119% when the packed
+alias was enabled. A scale-two packed-alias fixture also passed, but a fresh
+4.5x retail check invalidated that scaled path: two alias-on boots omitted the
+player at the untouched tutorial spawn, while the otherwise matched alias-off
+control showed the player. The renderer and launcher therefore reject both
+depth and stencil aliases whenever internal scaling is active. The exact pass
+that removed the model remains unproved. A user-reviewed alias-off sun-facing
+probe showed no obvious bloom, but it was not a native-reference match and
+does not close the rendering gate. These focused results are not a complete
+gameplay or original-hardware guarantee. Movement
+benchmark collection exits 2 as inconclusive; a separate reviewed-world
+analysis must establish content and presentation. Black hashes alone cannot
+identify intentional fades.
 
 Texture and colour-shadow inputs now use checked snapshots and tracked
 allocation identities; colour-surface writes, compatible render-target aliases
@@ -73,19 +83,40 @@ widescreen and performance work are deferred, and no split-screen support is
 claimed.
 
 The pinned framework has been updated to xboxrecomp v0.17.0 plus selected
-post-release fixes. Integrated Release generation
+post-release fixes. Campaign generation
 `20261111-084222-7bdb6e56` uses the final runtime tree. Before the
-runtime-only Phase 4 fix, its codegen-identical executable completed one
-audio-off CPU and one D3D11 tutorial/movement bring-up without retries. The
+runtime-only Phase 4 fix, a codegen-identical executable completed one
+audio-off CPU and one D3D11 tutorial/movement bring-up without retries; the
 post-deadlock executable completed the two reviewed Phase 4 smokes described
-above. The current texture-index rebuild also contains an explicit diagnostic
-linear-reference mode so both sides of its planned comparison use one
-executable. The index remains the default. This rebuild has synthetic
-validation only and has not been run on retail content. Reviewed samples from
-the preceding executables show gameplay without the controls panel or a
-cinematic, but none of those single attempts is an A/B/A performance result.
-Matched-reference and reviewed performance gates remain open, and the
-published measurements still belong to the previous reviewed generation.
+above. Its later texture-index executable completed six alternating exact
+linear/indexed attempts with matched input and full guest-surface review.
+The exact index reduced descriptor probes from 82.495 to 1.230 per lookup and
+measured lookup time from 0.0486 to 0.0336 ms/flip, but one of three cadence
+pairs regressed and historical PFB interval callers are incomplete. This is
+an inconclusive diagnostic result, not an accepted title speedup.
+
+Current supported generation `20261113-214800-12924697` is the clean Release
+build containing the one-core startup default and the fail-closed scaled-alias
+boundary. It retains and synthetic-tests the three missing title caller
+layouts. Its
+`20261113-160606-ad4c0e30` predecessor's partial repeat completed three clean
+attempts before the fourth locked during Loading. All 3,574 captured guest
+surfaces were reviewed; the 64 movement-contained PFB/PUT intervals have
+complete caller attribution. The only A/B pair is not timing-valid because
+its final live command was acknowledged 1,656 ms apart. Unbalanced diagnostics
+still show 80.476 linear versus 1.239 indexed probes per lookup and 0.0519
+versus 0.0318 ms/flip lookup time, but they are not a throughput comparison.
+The operator closed the repeat sequence as inconclusive rather than
+scheduling another six runs. The index remains the default; G2,
+CPU-reference and scaled-headroom gates remain open.
+
+The Loading lock is now traced to a title loader queue that polls a guest
+worker through zero-delay `KeDelayExecutionThread`. New title launches select
+the framework's `RECOMP_GUEST_CPUS=one` mode by default, pinning guest threads
+but not GPU/APU host workers. One explicit and three default-path bounded
+boots all reached movie draws; this is startup-smoke evidence rather than a
+long-session reliability or performance result. An explicit
+`RECOMP_GUEST_CPUS=all` setting remains available for controlled comparison.
 
 Retained audit evidence also establishes material `ARRAY_ELEMENT16/32`
 dispatch volume. Patch 0046 adds `RECOMP_PB_INDEX_RUNS=1` as a separate,
@@ -93,7 +124,7 @@ default-off exact batching candidate across both selected pushbuffer walkers.
 Synthetic scalar/run equivalence, CALL, physical-wrap and audit-fallback
 coverage pass, but no Brute Force speedup or matched rendered-output result
 has been established. Its reviewed A/B/A campaign remains separate from the
-texture-index comparison.
+texture-index evidence and requires a separately scheduled operator session.
 
 Release compiler experiments are also isolated from the supported default
 build. `--compiler-profile ltcg` enables title-executable `/GL` plus LTCG;

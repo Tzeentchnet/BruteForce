@@ -507,7 +507,7 @@ def test_run_isolates_each_runtime_working_directory(tmp_path, monkeypatch):
     monkeypatch.setenv("RECOMP_VBLANK", "0")
     for name in (
         "RECOMP_USB", "RECOMP_PB_WALK", "RECOMP_PGRAPH_IRQ", "RECOMP_KEYBOARD",
-        "RECOMP_AC97_READY", "RECOMP_AUDIO", "RECOMP_GPU",
+        "RECOMP_AC97_READY", "RECOMP_AUDIO", "RECOMP_GPU", "RECOMP_GUEST_CPUS",
     ):
         monkeypatch.delenv(name, raising=False)
 
@@ -535,6 +535,7 @@ def test_run_isolates_each_runtime_working_directory(tmp_path, monkeypatch):
     assert build.run_game() == 0
     assert build.run_game(experimental_tutorial=True, isolated_saves=save_root) == 0
     monkeypatch.setenv("RECOMP_GPU", "cpu")
+    monkeypatch.setenv("RECOMP_GUEST_CPUS", "all")
     assert build.run_game(graphics=True) == 0
     assert len({cwd for _, cwd, _ in calls}) == len(calls)
     assert all(cwd.parent == build.ANALYSIS_DIR / "runs" / run_id / "boots" for _, cwd, _ in calls)
@@ -563,6 +564,8 @@ def test_run_isolates_each_runtime_working_directory(tmp_path, monkeypatch):
     assert calls[3][2]["RECOMP_KEYBOARD"] == "0"
     assert all(calls[i][2]["RECOMP_AUDIO"] == "1" for i in range(6))
     assert calls[6][2]["RECOMP_AUDIO"] == "0"
+    assert all(calls[i][2]["RECOMP_GUEST_CPUS"] == "one" for i in range(9))
+    assert calls[9][2]["RECOMP_GUEST_CPUS"] == "all"
     assert all("RECOMP_AC97_READY" not in calls[i][2] for i in range(5))
     assert calls[5][2]["RECOMP_AC97_READY"] == "existing"
     assert calls[7][2]["BRUTEFORCE_SAVE_ROOT"] == "previous partition root"

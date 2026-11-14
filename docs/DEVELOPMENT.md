@@ -9,6 +9,13 @@ require proprietary game data.
 python -m pytest -q tests
 ```
 
+The title's one-core guest-thread default, explicit override, and benchmark
+option recording have a focused selection:
+
+```powershell
+python -m pytest -q tests\test_build.py tests\test_bench_performance.py
+```
+
 The tests include a synthetic disc image and do not require game data. The
 synthetic extraction test uses the installed toolkit's XISO reader.
 
@@ -93,7 +100,9 @@ integrated retail timing, presented pixels or performance.
 The title fence fixture also checks the opt-in aggregate shader compile
 counter's success, failure and reset behavior; the WARP fixture checks an
 actual uncached pixel-shader compile, and the benchmark parser checks its
-interval records.
+interval records. Its PFB-attribution case verifies all five known generated
+call-site stack layouts; an offset regression must fail instead of producing
+an accepted zero-caller interval.
 
 To exercise the native host and all synthetic fixtures, including crash
 diagnostics, guest
@@ -289,9 +298,10 @@ python -m pytest -q --basetemp build\smoke\pytest-sync tests\test_fence.py `
 
 The pipeline fixture compares every guest frame with elision off/on, forces
 diagnostic and 16-bit readback, exercises queue saturation and failure,
-checks state-aware packed-depth invalidation and rejected overlapping or
-scaled aliases and synthetic guest writes at coherence boundaries, and injects
-producer and required draw-state failures before completion.
+checks state-aware packed-depth invalidation, rejected overlapping and scaled
+depth/stencil aliases, scaled guest-range overlap accounting, and synthetic
+guest writes at coherence boundaries, and injects producer and required
+draw-state failures before completion.
 Hardware presenter tests require a usable Windows D3D11 adapter. Run the
 framework `nv2a_pfb_flush` and `nv2a_ffp_backend` CTests above as well.
 

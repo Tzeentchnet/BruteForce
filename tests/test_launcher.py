@@ -142,8 +142,9 @@ def test_launcher_maps_every_setting_and_preserves_unrelated_environment():
     simple = launcher.game_environment({"audio": "0", "audio_dsp": "fold"}, {})
     assert simple["RECOMP_AUDIO"] == "0"
     assert simple["RECOMP_APU_DSP"] == "fold"
-    with pytest.raises(launcher.LauncherError, match="depth or stencil aliases"):
-        launcher.game_environment({"resolution": "2.25", "depth_texture": "1"}, {})
+    for alias in ("depth_texture", "stencil_alias"):
+        with pytest.raises(launcher.LauncherError, match="depth or stencil aliases"):
+            launcher.game_environment({"resolution": "2.25", alias: "1"}, {})
 
 
 @pytest.mark.parametrize("resolution", ["1", "1.5", "2.25", "3", "4.5"])

@@ -56,9 +56,14 @@ directory is `game\disc` relative to the current working directory; an
 absolute game directory can also be passed as its only argument. The `run`
 command starts each boot in a fresh directory under that generation's
 `analysis\runs\...\boots` so the toolkit's kernel log is not overwritten. It
-enables the toolkit's vblank and unresolved-stub diagnostics unless the
-corresponding `RECOMP_VBLANK` or `RECOMP_STUB_LOG` environment variable is
-already set. `run --graphics` explicitly enables the upstream pushbuffer
+pins guest title threads to one allowed host core by default, matching the
+console's single-CPU scheduling assumption and preventing the startup loader's
+zero-delay polling thread from outrunning its worker. GPU, APU and other host
+service threads remain unpinned. Set `RECOMP_GUEST_CPUS=all` before launch
+only for a controlled comparison; an explicit value overrides the default.
+The command also enables the toolkit's vblank and unresolved-stub diagnostics
+unless the corresponding `RECOMP_VBLANK` or `RECOMP_STUB_LOG` environment
+variable is already set. `run --graphics` explicitly enables the upstream pushbuffer
 executor, framebuffer window, and Direct3D 11 presentation; the default run
 is headless. For a bounded diagnostic, set `RECOMP_WATCHDOG_SECS` to a number
 of seconds before running. The watchdog exits after that fixed time even if
@@ -543,9 +548,12 @@ GPU frame.
 Selecting a scaled or native resolution enables shared GPU presentation.
 Explicitly setting `RECOMP_GPU_DIRECT_PRESENT=0` with an active scale is an
 error because a guest-sized CPU frame cannot carry the higher-resolution
-result. Experimental depth and packed-stencil aliases are also rejected in
-scaled modes; their guest-layout seed and sampling semantics have not been
-defined at physical resolution. The CPU renderer remains at guest resolution.
+result. Experimental depth-texture and packed-stencil aliases are rejected in
+scaled modes. A narrower scale-two packed-stencil fixture passed, but a 4.5x
+retail comparison later omitted the player model with the alias enabled and
+showed it in the otherwise matched alias-off control. The renderer and
+launcher now fail closed on that combination. The CPU renderer remains at
+guest resolution.
 The complete synthetic D3D11 matrix passes 394 cases with WARP and RTX 5070
 hardware enabled, including CPU-written frames with and without a GPU overlay
 at scale 1 and scale 2.
@@ -612,9 +620,13 @@ states preserve a packed conversion; potentially writing draws invalidate it
 even when no fragment ultimately writes. The same conservative guest-span
 checks apply; conflicting partial aliases remain unsupported. A synthetic
 replay of the traced bright-pass state shows
-how stale stencil bytes could exaggerate glow, but the effect on the reported
-gameplay bloom and original-hardware fidelity remain unestablished. It cannot
-be combined with an active render scale.
+how stale stencil bytes could exaggerate glow. A matched native xemu Basic
+Controls comparison reduced pixels differing by more than 8/255 from
+43.4320% to 3.7119% when the alias was enabled; this establishes that state,
+not sun-facing gameplay or complete original-hardware fidelity. This option
+cannot be combined with an active render scale. The retained scale-two
+synthetic experiment is not a supported mode: in a later 4.5x retail spawn
+comparison the player was absent with the alias on and visible with it off.
 
 Neither alias switch establishes a synchronized guest-write/read contract.
 Same-value writes, concurrent writes after a check, unregistered
@@ -703,10 +715,23 @@ The fixed movement script moves the character only before measurement, presses
 Y to skip the HUD tutorial-choice panel, then starts the measured window after
 that choice has settled. The measured 40-second segment alternates camera
 input without moving the character, because forward movement can enter a
-letterboxed tutorial cutscene at a frame-rate-dependent time. This keeps panel
-dismissal and scene content fixed rather than relying on adaptive A presses;
-captured runs must still be reviewed to confirm the panel and cutscene are
-absent.
+letterboxed tutorial cutscene at a frame-rate-dependent time. The final
+camera command begins 45 seconds after the input clock starts, 25 seconds
+into measurement; its three-second hold ends at 48 seconds, leaving an
+approximately 12-second stationary-camera animated-world tail. The former
+49- and 53-second reversals were removed because live-file commands are not
+consumed until the guest next polls the pad. This keeps panel dismissal and
+scene content fixed rather than relying on adaptive A presses; captured runs
+must still be reviewed to confirm the panel and cutscene are absent.
+
+With `--readiness manual`, input dispatch and movement/profile/capture
+boundaries use the same controller-monotonic clock. Frame CSV rows may arrive
+at the controller in buffered batches and are evidence, not the manual
+scheduler clock. Each result records
+`input_timing.dispatch_clock=controller_monotonic`. Runtime pad
+acknowledgements must still be compared: `RECOMP_PAD_LIVE` has no timestamp
+field, so a title poll gap can delay consumption even when controller dispatch
+was on time.
 Offline analysis uses a separately completed manifest:
 
 ```powershell
@@ -816,8 +841,10 @@ For matched audio-on/off runs, `--readiness manual` requires an operator to
 reach and confirm the same visible state for every attempt. `--capture-audio`
 uses unique WAV files and checks their finalization; the console-control
 shutdown and WAV-validation helpers also passed the final firmware-exit
-capture. The complete matched manual A/B/A workflow has not yet been
-validated with the game.
+capture. The six-attempt texture-index campaign validated the manual
+ready-token, alternating collection, controller-monotonic dispatch and
+runtime-acknowledgement workflow with the game. It did not vary or capture
+audio, so a matched audio-on/off A/B/A remains unvalidated.
 The benchmark removes inherited audio switches before applying each variant;
 audio is on when neither switch is supplied. Use `RECOMP_AUDIO=1` and
 `RECOMP_AUDIO=0` for explicit matched variants. Legacy
@@ -906,6 +933,29 @@ The harness alternates linear/indexed attempts, requires one executable and
 framework identity, and records the exact runtime options. Collection remains
 inconclusive until every captured interval, input sequence and presentation
 state is reviewed. Do not infer distinct-world cadence from flips alone.
+
+The first completed collection used campaign generation
+`20261111-084222-7bdb6e56` and is retained locally as
+`analysis\bench\texture-index-main-20261113-desktop4`. All six input
+timelines passed the 250 ms review tolerance and all 7,412 raw captures were
+reviewed; 7,379 movement-bounded captures enter the strict comparison.
+Indexed lookup reduced descriptor probes from 82.495 to 1.230 per lookup and
+measured lookup time from 0.0486 to 0.0336 ms/flip. Mean reviewed cadence
+rose by 1.278 changes/s, but one of three pairs regressed. The historical
+executable also omitted enclosing callers for three PFB sites, so G3 and the
+overall result remain inconclusive. Caller-corrected generation
+`20261113-160606-ad4c0e30` fixes and synthetic-tests those stack layouts. Its
+retained `desktop9` repeat completed three clean attempts before run 04
+locked during Loading. Review covered all 3,574 raw captures and all 64
+movement-contained PFB/PUT intervals have callers, confirming the mapping
+fix. The only completed A/B pair is rejected because its final command has
+1,656 ms runtime drift. The operator chose not to restart another six-run
+sequence. Treat both collections as inconclusive mechanism evidence, not an
+accepted speedup; no further repeat is currently scheduled.
+Clean supported generation `20261113-214800-12924697` retains those mappings
+and adds the one-core startup default. Its supported build restores explicit
+scaled-alias rejection after the 4.5x correctness check; that check is not a
+retail performance run.
 
 ## Index-word batching comparison
 
@@ -1033,6 +1083,9 @@ the flip hold and PGRAPH interrupt state remain unchanged until normal
 completion. `BRUTEFORCE_PERF_COUNTERS=1` records interval PFB and PUT calls
 and elapsed wall time by verified guest call site and return address; unknown
 callers are zero, and table overflow is reported.
+The current title hook explicitly maps all five PFB stack layouts observed in
+the supported generated code; its fence fixture checks each offset. A future
+unknown site still records zero rather than guessing.
 The same flag records interval pixel-shader compile/create time and failures
 even with the persistent shader cache disabled; cache-hit timings remain in
 the existing `GPU-PSCACHE` diagnostics when that cache is enabled.
@@ -1073,7 +1126,10 @@ can begin before its recorded window. The first report has unknown start
 (`0`). A reviewed movement window must contain a complete later report
 interval with both PFB and PUT caller records, or comparison is inconclusive.
 Unknown/zero callers in those intervals and any caller-table overflow also
-make it inconclusive.
+make it inconclusive. The offline report preserves otherwise valid reviewed
+pairs, cadence, 1% lows and profile/NV2A values when contained callers are
+zero, but marks caller attribution incomplete and forces G3 and the overall
+status to `inconclusive`; it does not turn partial diagnostics into a pass.
 
 `python tools\bench.py --compare-performance MATCHES.json` is an offline
 review gate. `MATCHES.json` contains `reviewer`, `state`,
@@ -1109,11 +1165,13 @@ Optional gate evidence in the same manifest is deliberately explicit:
   compares those stationary **flip** rates, not world FPS.
 
 G3 requires a complete symbolized game-thread profile for every candidate
-run and less than 10% GPU wait. Attributed queue-space/lock waits count;
-ordinary PUT-store work does not. Missing, unmatched, unreviewed or insufficient
-evidence makes the relevant gate and overall result inconclusive. Failed gates
-are reported separately; the offline command exits 0 only when all gates pass,
-otherwise 2. Human match and presentation statements remain assertions.
+run, complete PFB/PUT interval caller attribution across all reviewed runs,
+and less than 10% candidate GPU wait. Attributed queue-space/lock waits count;
+ordinary PUT-store work does not. Missing, unmatched, unreviewed or
+insufficient evidence makes the relevant gate and overall result
+inconclusive. Failed gates are reported separately; the offline command exits
+0 only when all gates pass, otherwise 2. Human match and presentation
+statements remain assertions.
 
 ## Experimental face culling
 

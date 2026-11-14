@@ -361,19 +361,34 @@ int main(int argc, char **argv)
                perf_counters.put[1].calls != 1;
     }
     if (strcmp(mode, "pfb-attribution") == 0) {
+        static const struct {
+            uint32_t site, stack_offset, caller;
+        } cases[] = {
+            {0x00371FBCu, 8, 0x12345678u},
+            {0x0037206Bu, 4, 0x23456789u},
+            {0x00371D85u, 20, 0x3456789Au},
+            {0x00371DABu, 20, 0x456789ABu},
+            {0x003780E6u, 48, 0x56789ABCu},
+        };
+        size_t index;
         if (_putenv_s("BRUTEFORCE_PERF_COUNTERS", "1") != 0 ||
             !bruteforce_perf_counters_init())
             return 2;
         pfb_wait_enabled = 1;
         put32(MINIPORT, 0xFD000000u);
-        put32(GUEST_RETURN, 0x00371FBCu);
-        put32(GUEST_RETURN + 8, 0x12345678u);
-        g_esp = GUEST_RETURN;
-        sub_00372180();
+        for (index = 0; index < sizeof(cases) / sizeof(cases[0]); index++) {
+            put32(GUEST_RETURN, cases[index].site);
+            put32(GUEST_RETURN + cases[index].stack_offset, cases[index].caller);
+            g_esp = GUEST_RETURN;
+            sub_00372180();
+        }
         bruteforce_perf_counters_take(&perf_counters);
-        return perf_counters.pfb[0].site != 0x00371FBCu ||
-               perf_counters.pfb[0].caller != 0x12345678u ||
-               perf_counters.pfb[0].calls != 1;
+        for (index = 0; index < sizeof(cases) / sizeof(cases[0]); index++)
+            if (perf_counters.pfb[index].site != cases[index].site ||
+                perf_counters.pfb[index].caller != cases[index].caller ||
+                perf_counters.pfb[index].calls != 1)
+                return 1;
+        return 0;
     }
     if (strcmp(mode, "pfb-disabled") == 0 ||
         strcmp(mode, "pfb-enabled") == 0) {

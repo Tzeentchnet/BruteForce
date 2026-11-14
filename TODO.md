@@ -7,15 +7,35 @@ the canonical project documentation.
 
 Current stop point: all three default-off Phase 4 mechanisms have synthetic
 coverage, and the corrected segment-only and all-three smokes reached reviewed
-movement. Their 24-run comparison is explicitly deferred. The exact
-texture-descriptor index is now synthetic-tested without weakening exact
-source or palette comparison. A default-on index and diagnostic linear
-reference are now available in the same executable. Retained audit evidence
-also establishes material index-word dispatch volume, and patch 0046 adds a
-separate default-off exact batching candidate with synthetic coverage. The
-next evidence gates are the two independent operator-reviewed matched A/B/A
-comparisons; do not combine them or promote the shader cache or any Phase 4
-switch without its separate correctness and measurement gates.
+movement. Their 24-run comparison is explicitly deferred. The first
+texture-descriptor-index campaign completed six timing-matched, fully reviewed
+attempts and proved that the exact index removes almost all linear descriptor
+probes, but its strict result is inconclusive: historical PFB interval records
+omit callers at three title call sites, one of three cadence pairs regressed,
+and G2/G4/G5 evidence is absent. Those call-site stack mappings are now fixed
+and synthetic-tested in generation `20261113-160606-ad4c0e30`. Its partial
+repeat completed three clean attempts before run 04 locked during Loading.
+That lock has since been traced to a title loader queue polling a completion
+byte through zero-delay `KeDelayExecutionThread`. Brute Force now selects the
+existing framework `RECOMP_GUEST_CPUS=one` control by default; one explicit
+and three default-path bounded boots advanced to movie draws, while
+long-session reliability remains unproved. Review covered all 3,574 raw
+captures, and all 64 movement-contained PFB/PUT intervals now have callers,
+but the only A/B pair fails input matching because its final live command
+differs by 1,656 ms at runtime. The 2026-11-13 operator decision is not to
+restart another six-run sequence: retain the mechanism evidence and close the
+title-throughput result as inconclusive. Retained audit evidence also
+establishes material index-word dispatch volume, and patch 0046 adds a separate
+default-off exact batching candidate with synthetic coverage. Do not combine
+that independent comparison with the texture index, and do not promote the
+shader cache or any Phase 4 switch without its separate correctness and
+measurement gates. A retained synthetic experiment permits exact scaled
+packed-stencil aliases and passes its narrow fixtures, but a fresh 4.5x retail
+comparison invalidated that path: the player was absent in two
+alias-on boots and present in the otherwise matched alias-off spawn control.
+The renderer and launcher now fail closed on both alias options at non-1
+internal scales. Continue brightness work at scale 1 or add a fuller
+render-sequence fixture before reconsidering scaled aliases.
 
 ## Milestone 0: trustworthy baseline
 
@@ -61,8 +81,15 @@ switch without its separate correctness and measurement gates.
   aliases, and failed uploads synthetically.
 - [x] Provide a same-executable exact linear reference behind
   `RECOMP_GPU_TEX_INDEX=0` for an attributable comparison.
-- [ ] **Blocked on an operator-confirmed six-attempt campaign:** run matched
-  A/B/A and record whether G2, G3, or NV2A busy time improves.
+- [x] **Closed as inconclusive on available retail evidence:** the first
+  linear/indexed alternation passed timing and capture review but had
+  historical zero-caller PFB intervals and one regressing cadence pair. The
+  caller-corrected repeat reviewed 3,574 raw captures across three completed
+  attempts and proved complete attribution in all 64 movement-contained
+  PFB/PUT intervals. Run 04 then locked before readiness, and the only
+  completed A/B pair exceeded the 250 ms input tolerance at its final command
+  (1,656 ms runtime drift). Do not claim a title speedup or use its descriptive
+  +0.247 world changes/s as an A/B result; G2/G4/G5 remain open.
 - [ ] **Candidate, after the texture-index campaign:** assess whether
   Windows write watching (`MEM_WRITE_WATCH`) or guarded pages can prove
   unchanged guest texture and palette sources exactly, including DMA,

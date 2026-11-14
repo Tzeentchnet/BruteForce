@@ -111,6 +111,21 @@ def _environment(run):
                         if key not in SWITCHES))
 
 
+def _profile_metrics(run):
+    profile = run.get("profile") or {}
+
+    def metric(thread, key):
+        value = (profile.get(thread) or {}).get(key)
+        if type(value) not in (int, float) or not math.isfinite(value) or not 0 <= value <= 100:
+            return None
+        return round(value, 3)
+
+    return {
+        "game_thread_gpu_wait_pct": metric("game_thread", "gpu_wait_pct"),
+        "nv2a_thread_busy_pct": metric("nv2a_thread", "busy_pct"),
+    }
+
+
 def _window(path, run, labels):
     result = bench_match._frame_window(path, run, labels)
     cadence = result.get("reviewed_world_cadence") or {}
@@ -121,6 +136,8 @@ def _window(path, run, labels):
         raise bench_match.MatchError(
             f"reviewed world cadence needs at least {MIN_INTERVALS} intervals and {MIN_SECONDS} seconds: {labels}")
     timed = []
+    unattributed = []
+    contained_kinds = set()
     for item in (run.get("runtime_diagnostics") or {}).get("submit_intervals", []):
         if not isinstance(item, dict):
             continue
@@ -129,18 +146,49 @@ def _window(path, run, labels):
                 result["first_timestamp_us"] <= start < end <= result["last_timestamp_us"]):
             if (item.get("kind") not in ("pfb", "put") or type(item.get("calls")) is not int or
                     item["calls"] < 1 or
-                    any(not re.fullmatch(r"[0-9A-Fa-f]{8}", str(item.get(key, ""))) or
-                        int(item[key], 16) == 0 for key in ("site", "caller"))):
-                raise bench_match.MatchError(f"unattributed PFB/PUT caller counters: {labels}")
-            timed.append(item)
-    if not {"pfb", "put"}.issubset({item.get("kind") for item in timed}):
+                    any(not re.fullmatch(r"[0-9A-Fa-f]{8}", str(item.get(key, "")))
+                        for key in ("site", "caller"))):
+                raise bench_match.MatchError(f"invalid PFB/PUT caller counters: {labels}")
+            contained_kinds.add(item["kind"])
+            if any(int(item[key], 16) == 0 for key in ("site", "caller")):
+                unattributed.append(item)
+            else:
+                timed.append(item)
+    if not {"pfb", "put"}.issubset(contained_kinds):
         raise bench_match.MatchError(f"reviewed interval lacks timed PFB/PUT caller counters: {labels}")
     result["submit_caller_intervals"] = timed
+    result["submit_caller_attribution"] = {
+        "complete": not unattributed,
+        "attributed_intervals": len(timed),
+        "unattributed_intervals": len(unattributed),
+        "attributed_calls": {
+            kind: sum(item["calls"] for item in timed if item["kind"] == kind)
+            for kind in ("pfb", "put")
+        },
+        "unattributed_calls": {
+            kind: sum(item["calls"] for item in unattributed if item["kind"] == kind)
+            for kind in ("pfb", "put")
+        },
+    }
+    result["profile"] = _profile_metrics(run)
     return result
 
 
 def _mean(values):
     return round(statistics.mean(values), 3)
+
+
+def _optional_mean(values):
+    values = list(values)
+    if any(value is None for value in values):
+        return None
+    return _mean(values)
+
+
+def _difference(candidate, baseline):
+    if candidate is None or baseline is None:
+        return None
+    return round(candidate - baseline, 3)
 
 
 def _gate(status, reason, **data):
@@ -179,7 +227,18 @@ def _native_gate(base, manifest, candidates, state):
         return _gate("inconclusive", str(exc))
 
 
-def _profile_gate(runs):
+def _profile_gate(runs, windows):
+    incomplete = sum(
+        (window.get("submit_caller_attribution") or {}).get("complete") is not True
+        for window in windows
+    )
+    if incomplete:
+        return _gate(
+            "inconclusive",
+            "complete caller-attributed PFB/PUT interval counters are required",
+            incomplete_runs=incomplete,
+            runs=len(windows),
+        )
     values = []
     for run in runs:
         game = (run.get("profile") or {}).get("game_thread") or {}
@@ -427,18 +486,26 @@ def _compare(path, movement_input):
         candidate_runs.append(b)
     if len(set(numbers)) != len(numbers) or numbers != list(range(numbers[0], numbers[0] + len(numbers))):
         raise bench_match.MatchError("runs must be unique and alternate A/B/A throughout")
+    baseline_windows = [entry["baseline"] for entry in entries]
     candidate_windows = [entry["candidate"] for entry in entries]
     gates = {
         "G2": _native_gate(path.parent, manifest, candidate_windows, state),
-        "G3": _profile_gate(candidate_runs),
+        "G3": _profile_gate(candidate_runs, baseline_windows + candidate_windows),
         "G4": _g4_gate(path.parent, manifest, candidate_identity, candidate_switches, common[0]),
         "G5": _g5_gate(path.parent, manifest, candidate_identity, candidate_switches, common[0]),
     }
     status = ("inconclusive" if any(g["status"] == "inconclusive" for g in gates.values()) else
               "fail" if any(g["status"] == "fail" for g in gates.values()) else "pass")
-    baseline_windows = [entry["baseline"] for entry in entries]
     base_fps = _mean(item["reviewed_world_changes_per_second"] for item in baseline_windows)
     candidate_fps = _mean(item["reviewed_world_changes_per_second"] for item in candidate_windows)
+    baseline_g3 = _optional_mean(item["profile"]["game_thread_gpu_wait_pct"]
+                                 for item in baseline_windows)
+    candidate_g3 = _optional_mean(item["profile"]["game_thread_gpu_wait_pct"]
+                                  for item in candidate_windows)
+    baseline_nv2a = _optional_mean(item["profile"]["nv2a_thread_busy_pct"]
+                                  for item in baseline_windows)
+    candidate_nv2a = _optional_mean(item["profile"]["nv2a_thread_busy_pct"]
+                                   for item in candidate_windows)
     return {"status": status, "reviewer": reviewer, "state": state,
             "generation": base_identity[0], "toolkit_tree": base_identity[1],
             "executable_sha256": candidate_identity[2], "threads": base_identity[2],
@@ -456,6 +523,14 @@ def _compare(path, movement_input):
                     item["reviewed_world_low_1pct_fps"] for item in baseline_windows),
                 "candidate_world_low_1pct_fps_mean": _mean(
                     item["reviewed_world_low_1pct_fps"] for item in candidate_windows),
+                "baseline_g3_pct_mean": baseline_g3,
+                "candidate_g3_pct_mean": candidate_g3,
+                "candidate_minus_baseline_g3_points": _difference(
+                    candidate_g3, baseline_g3),
+                "baseline_nv2a_busy_pct_mean": baseline_nv2a,
+                "candidate_nv2a_busy_pct_mean": candidate_nv2a,
+                "candidate_minus_baseline_nv2a_busy_points": _difference(
+                    candidate_nv2a, baseline_nv2a),
             },
             "pairs": entries, "gates": gates,
             "scope": "Reviewer-asserted distinct world changes; flips are not world FPS. "

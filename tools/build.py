@@ -583,6 +583,7 @@ def prepare_game_run(config="Release", graphics=False, experimental_tutorial=Fal
     ):
         raise BuildError("Build metadata does not match the requested game and configuration")
     env = dict(os.environ if base_env is None else base_env)
+    env.setdefault("RECOMP_GUEST_CPUS", "one")
     env.setdefault("RECOMP_VBLANK", "1")
     env.setdefault("RECOMP_STUB_LOG", "1")
     env.setdefault("RECOMP_AUDIO", "1")

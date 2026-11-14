@@ -17,39 +17,67 @@ and the title-side fence, pushbuffer, PGRAPH, interrupt and toolkit selection
 reports 67 passed. The validation includes the runtime PGRAPH/PFB deadlock
 fix and its segment-ordering fixture.
 
-Supported retail generation `20261111-084222-7bdb6e56` is a Release build on
-the current runtime tree `3e3ae3600802d2bf4446d86fc546322d60849047`; its
-recorded and current `tools` and `templates` fingerprints are identical, so
-no unchanged title code was regenerated. Its
-current 37,578,240-byte executable SHA-256 is
-`9112b0f836f94c9ab87b23a4a83bfdde95acaf32b5dae4d62636893b627144bd`;
-it translated all 22,295 identified functions with zero failures, six
-unresolved direct-call targets and 11 untranslated instruction sites. Before
-the runtime-only fix, the codegen-identical executable completed one
-audio-off, four-thread CPU run and one D3D11 run through the scripted tutorial
-world, stationary hold and movement window without retry, generated stub,
-untranslated-instruction hit, ICALL failure, renderer-device error or crash.
-Reviewed sample captures show gameplay, the character and HUD without the
-controls panel, a cinematic or a solid-black frame. The post-deadlock
-37,575,168-byte executable at
-`132bece507c1773c41eeaa6549687d2c493a121c2c102452a10465d5a584f073`
-then completed the two fixed-tree Phase 4 smokes described below. The current
-texture-index rebuild includes the default indexed path and an exact
-same-binary linear reference for measurement; it has synthetic validation
-only and no retail run. The same current executable includes default-off
-`RECOMP_PB_INDEX_RUNS=1`; its scalar/run executor state and both walker paths
-pass synthetic equivalence, but it has no matched rendered-output or
-performance result. The earlier `20261111-002138-a9dbc18a` generation
-remains the exact xemu-matched reference because the reference comparison
-predates the integrated pipeline.
+Supported retail generation `20261113-214800-12924697` is a Release build on
+runtime tree `3e3ae3600802d2bf4446d86fc546322d60849047`. It translated all
+22,295 identified functions with zero failures, six unresolved direct-call
+targets and 11 untranslated instruction sites. Its current 37,578,240-byte
+executable SHA-256 is
+`f07ab1b80f34331eb2484c4c75f198cb7fb7726174cdf3eb2fce83dd84eb7d69`;
+the 36,474,880-byte PDB SHA-256 is
+`9ce6039972b27a5a9c1e173a5f91a82300d10def0a096e8c688d05702c0bb48d`.
+This clean generation retains explicit title-side caller layouts for three
+PFB sites found incomplete by the texture-index campaign, adds the one-core
+guest-thread title default, and rejects both alias options at active internal
+scales. The scheduling/default selection reports 64 passed; the focused
+alias/rejection selection reports 24 passed; the broader WARP/hardware
+depth/stencil/glare selection reports 42 passed; and the framework tree
+verifies. The current fail-closed executable has no retail run. The preceding
+alias-capable build from the same generation, executable SHA-256
+`57e63f097924d4c051d4d6565c8999e720c7c0e53edcdc76df1ae6659884859a`,
+supplies the 4.5x missing-player evidence below. Its
+`20261113-160606-ad4c0e30` predecessor's partial
+retail repeat completed three clean attempts before the fourth locked during
+Loading. All 64 reviewed, movement-contained PFB/PUT intervals have enclosing
+callers, confirming the mapping on title execution. The only completed A/B
+pair is not timing-valid, so no throughput result is accepted.
 
-The reviewed performance campaigns still use old generation
-`20261103-145850-21e3091e` on tree
-`25a2a713738b7aabb1c21ef6720765ff93ccffea`. The integrated bring-up has one attempt per renderer and only representative
-reviewed frames, not a continuously labeled world interval. Its flip and
-whole-frame change figures are not a performance comparison. Do not compare
-the old campaign measurements with the current generation without a fresh
-A/B/A campaign.
+Campaign generation `20261111-084222-7bdb6e56` used the same runtime tree.
+Before the runtime-only Phase 4 fix, a codegen-identical executable completed
+one audio-off, four-thread CPU run and one D3D11 run through the scripted
+tutorial world, stationary hold and movement window without retry. The
+post-deadlock 37,575,168-byte executable at
+`132bece507c1773c41eeaa6549687d2c493a121c2c102452a10465d5a584f073`
+then completed the two fixed-tree Phase 4 smokes. Its later 37,578,240-byte
+texture-index executable at
+`d02f6dec418a19399626808567fd578c0e142aa531a2048e09a1191cab280e79`
+completed the first six-attempt exact linear/indexed campaign. That campaign
+is fully reviewed but remains strict-inconclusive because its historical PFB
+records lack enclosing callers and one of three cadence pairs regressed. The
+caller-corrected generation's retained `desktop9` repeat reviewed 3,574 raw
+captures from three completed attempts and confirmed complete caller
+attribution, but run 04 locked before readiness and pair 01/02's final
+runtime input differed by 1,656 ms. The operator closed the repeat rather
+than scheduling another six attempts, so the title-speedup question remains
+inconclusive. The
+same source line includes default-off `RECOMP_PB_INDEX_RUNS=1`; its
+scalar/run executor state and both walker paths pass synthetic equivalence,
+but it has no matched rendered-output or performance result. The earlier
+`20261111-002138-a9dbc18a` generation remains the exact xemu-matched
+reference because the reference comparison predates the integrated pipeline.
+
+The Loading lock is now traced to the title loader's zero-delay guest-worker
+poll. Brute Force selects the existing `RECOMP_GUEST_CPUS=one` framework
+control by default. Four bounded one-core boots reached movie draws,
+including three default-path repetitions at 4.5x in 7.27-7.41 seconds. This
+is bounded startup evidence, not long-session reliability or a performance
+result. Do not restart the closed texture-index campaign.
+
+The accepted default and visibility performance baselines still use old
+generation `20261103-145850-21e3091e` on tree
+`25a2a713738b7aabb1c21ef6720765ff93ccffea`. Do not compare those measurements
+numerically with either current-generation campaign. The texture-index
+campaign is a separate same-generation alternation with its own listed
+controls and limitations.
 
 sp00nznet/xboxrecomp#297, sp00nznet/xboxrecomp#298,
 sp00nznet/xboxrecomp#299 and sp00nznet/xboxrecomp#300 merged in v0.17.0;
@@ -174,6 +202,22 @@ Direct3D 12 work remain deferred. See
   opt-in. One synchronous boot stalled after flip 12 and succeeded on retry;
   all three asynchronous attempts completed. These are matched guest-surface
   scene reviews, not CPU-reference or physical-presentation equivalence.
+- The first exact linear/indexed texture-cache campaign completed six clean
+  attempts with 15 dispatched and runtime-acknowledged inputs each. Pair
+  dispatch/runtime timing stayed within 94/140 ms, below its 250 ms review
+  tolerance. Review covered all 7,412 raw captures on 50 contact sheets and
+  selected 7,379 movement-bounded frames; every exact HUD-free ROI transition
+  changed. Indexed lookup reduced 82.495 linear probes/lookup to 1.230 and
+  measured lookup time from 0.0486 to 0.0336 ms/flip while retaining full
+  source/palette comparison. Mean cadence increased from 30.284 to 31.562
+  world changes/s and the 1% low from 16.418 to 17.751/s, but pair deltas
+  were +5.431, -3.459 and +1.862/s. Sampled G3 was unchanged at 0.003% and
+  NV2A busy increased 0.660 points. All six historical runs contain
+  zero-caller PFB intervals, so the strict result and G3 gate remain
+  inconclusive; G2/G4/G5 are also open. Current generation
+  `20261113-160606-ad4c0e30` fixes the three observed stack layouts. Repeat
+  the campaign on that generation before claiming a speedup or starting the
+  separate index-word comparison.
 - Reviewed movement manifests now report world-change cadence percentiles and
   a 1% low only after complete real-image labels, consecutive flip alignment,
   HUD-region validation and presentation-source review. The profiler summary
@@ -440,9 +484,16 @@ GPU methods in the CPU-path census.
    other control fixed reduced xemu differences above 8/255 from 43.4320%
    with packed aliases off to 3.7119% with them on. This identifies stale
    packed stencil as the large matched-panel brightness cause, but unsupported
-   untracked/concurrent guest writes, partial overlaps, scaled aliases and
-   other scenes still block a default. Explain and minimize any further
-   gameplay run. Do not add a global gamma or brightness adjustment.
+   untracked/concurrent guest writes, partial overlaps, scaled depth-texture
+   aliases and other scenes still block a default. The attempted exact scaled
+   packed path passed a scale-two synthetic glare replay but failed the fresh
+   4.5x retail check: two alias-on boots omitted the player at the untouched
+   spawn, while the otherwise matched alias-off control showed the player.
+   Current builds reject both alias options at active internal scales. Keep
+   native-resolution brightness work separate; do not reopen the scaled path
+   without a fixture that covers the affected full render sequence. Explain
+   and minimize any further gameplay run. Do not add a global gamma or
+   brightness adjustment.
 4. **Display gamma ramp (hypothesis not supported by the matched panel).** Blood Wake found that
    the toolkit's NV2A registers are plain memory, so the title's write of a
    gamma ramp to the video DAC was lost and every frame was shown as if the
@@ -561,12 +612,14 @@ matched or A/B/A campaign, and the 3440x1440 display cannot validate native
    that uses texel offsets or
    kernel sizes in guest units must stay consistent with the surface it
    samples. Verify on the title with the A1 inventory before choosing.
-4. **Implemented boundary: reject scaled depth and stencil aliases.** The exact-size D24S8 alias, the guest-depth
-   seeding and the snapshots assume the guest's surface dimensions. Define
-   what each does for a scaled target (for example, seed by upsampling or
-   resolve by sampling) remains undefined. The backend now refuses either
-   alias option with an active scale instead of silently stacking them. The
-   packed alias is still an unvalidated experimental path (A3).
+4. **Implemented fail-closed boundary: reject scaled depth/stencil
+   aliases.** Scaled `LIN_D24S8` sampling and guest-depth seeding remain
+   undefined. An exact packed `0x41` experiment passed scale-two glare and
+   dimension fixtures, but the 4.5x retail spawn comparison omitted the
+   player with the alias on and showed it with the alias off. The renderer
+   and launcher therefore reject both switches at non-1 scales. Do not
+   restore the packed exception until a fuller render-sequence fixture
+   reproduces and prevents that regression.
 5. **Partly implemented: quantities measured in pixels.** Z-pass visibility counts scale with the
    pixel count, so normalise them or the title's thresholds will misfire
    and are now normalized per query segment using its starting
@@ -607,6 +660,13 @@ matched or A/B/A campaign, and the 3440x1440 display cannot validate native
    controlled matched gameplay and live-resize campaign, including evidence
    that depth/stencil is reinitialized. The integrated 4.5x movement attempt
    establishes only successful bring-up and representative visible gameplay.
+   A focused scale-two packed-stencil glare experiment and exact/mismatch
+   fixtures passed, but the completed fresh 4.5x correctness check overruled
+   them: the alias-on spawn omitted the player while the alias-off control
+   showed it. The current build rejects the combination. Continue ordinary
+   scaled gameplay and live-resize validation with aliases off; scaled alias
+   work is blocked on a reproducing full-sequence fixture, not another retail
+   retry.
 9. **Recast G5.** "G1 holds at 2× internal resolution" becomes a measurement
    at 1080p and 4K presets, A/B/A against scale 1, reporting distinct world
    frames and the GPU, driver and scale used. Record results in FINDINGS.
@@ -796,9 +856,16 @@ These are synthetic results, not a title comparison.
   scanning as many as 2,048 entries. A synthetic invariant fixture covers
   exact fields, collisions, rewrite/rekey, failed-upload discard relocation
   and full-cache LRU replacement. Exact source and palette snapshots remain
-  mandatory. The earlier roughly 76-probe/lookup title measurements predate
-  the index; run the Milestone 2 matched A/B/A campaign before claiming a
-  speedup or changing another cache policy.
+  mandatory. The first matched campaign attributes a reduction from 82.495 to
+  1.230 probes/lookup and from 0.0486 to 0.0336 ms/flip lookup time, but does
+  not establish repeatable cadence improvement: one pair regressed, its
+  historical PFB interval callers are incomplete, and G2/G4/G5 are absent.
+  The caller-corrected partial repeat confirms 64/64 attributed PFB/PUT
+  intervals and again shows scan removal (80.476 versus 1.239 probes/lookup),
+  but its only A/B pair fails runtime-input matching and the fourth attempt
+  locked before readiness. The operator closed the repeat as inconclusive.
+  Do not claim a speedup or use its unbalanced diagnostics to select another
+  cache policy.
 - Retained complete audit generation `20261111-002138-a9dbc18a` counted
   73,787,237 `ARRAY_ELEMENT16` words and 115,904 `ARRAY_ELEMENT32` words.
   Their 147,690,378 expanded indices exactly match `ARRAY_REQUESTED` and
@@ -1007,6 +1074,14 @@ Split-screen support is a deferred follow-up, not part of this gate.
     after the open D3D11 performance and correctness gates close, starting
     with a design note that maps the backend interface onto Vulkan rather
     than with code.
+11. **Texture-index campaign:** retain the first six-attempt collection and
+    the caller-corrected three-run partial collection as inconclusive
+    evidence. Together they prove descriptor-scan removal and confirm the
+    missing caller mappings on retail execution, not repeatable
+    world-cadence improvement. The operator declined another full restart;
+    no repeat is scheduled. Keep independent index-word or compiler
+    campaigns separate and do not weaken the input, native, CPU-reference or
+    scaling gates to reuse the partial result.
 
 Still open: access to a native 4K display. Optional 5.1 output is deferred.
 

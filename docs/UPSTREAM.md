@@ -47,6 +47,15 @@ The 2026-11-10 semantic comparison covered pull-request metadata through
 framework patch. It was a targeted review of overlapping and potentially
 applicable work, not a line-by-line review of unrelated changes.
 
+A narrower read-only 2026-11-13 recheck covered every upstream pull request
+and tracking index
+[sp00nznet/xboxrecomp#184](https://github.com/sp00nznet/xboxrecomp/pull/184)
+for timed or armed live-controller input. No current overlap was found.
+Merged
+[sp00nznet/xboxrecomp#144](https://github.com/sp00nznet/xboxrecomp/pull/144)
+is the existing live-input implementation and the relevant prior change; no
+upstream interaction was performed.
+
 v0.17.0 includes all eight commits previously selected on top of v0.16.0.
 It also includes this project's #297, #298, #299 and #300 submissions, so
 local patches 0001, 0005 and 0035 have been retired. Issue #301 is closed:
@@ -1160,16 +1169,22 @@ own GPU back end, an extended interface for it, and its own pacing fixes.
     or synchronized guest readback. When bound for depth writes, a separate
     snapshot avoids simultaneous DSV/SRV binding. An independent opt-in reconstructs the three packed
     depth bytes and stencil alpha through a GPU compute shader for exact
-    `0x41` overlaps, requiring both planes to be initialized. Ordinary
-    non-overlapping `0x41` textures are unchanged. With depth aliasing on but
-    packed-stencil aliasing off, `0x41` over tracked depth is rejected rather
-    than falling back to possibly stale guest bytes.
+    `0x41` overlaps, requiring both planes to be initialized. That packed path
+    remains limited to scale 1. A trial extension accepted scaled GPU-owned
+    depth/stencil surfaces with exact logical and derived physical dimensions,
+    but a 4.5x retail spawn check omitted the player in two alias-on boots and
+    showed it in the otherwise matched alias-off control. The scaled exception
+    was removed; both alias options are again rejected whenever internal
+    scaling is active. Ordinary non-overlapping `0x41` textures are unchanged.
+    With depth aliasing on but packed-stencil aliasing off, `0x41` over tracked
+    depth is rejected rather than falling back to possibly stale guest bytes.
     PROJECT2D and PROJECT3D shadow comparisons follow
     [xemu's shader translation](https://github.com/xemu-project/xemu/blob/dc10b4cea96e403d30c17ed53551fdaf023bc17f/hw/xbox/nv2a/pgraph/glsl/psh.c).
     Same-value and unchecked concurrent writes, guest reads, unknown
-    suballocations, partial aliases, scaled aliases, other formats and CPU
-    `0x2E` decoding remain unsupported. The CPU samples `0x41` guest bytes
-    with a separate float depth buffer and no stencil.
+    suballocations, partial aliases, scaled depth-texture aliases, scaled
+    guest-depth seeding, other formats and CPU `0x2E` decoding remain
+    unsupported. The CPU samples `0x41` guest bytes with a separate float
+    depth buffer and no stencil.
     *Tests:* WARP and hardware fixtures cover every comparison above, below
     and at the reference depth, a bound depth target that is written between
     draws, an unbound target, base draws, and rejected pitch, size, offset,
@@ -1183,8 +1198,12 @@ own GPU back end, an extended interface for it, and its own pacing fixes.
     hardware ownership fixtures cover clean/dirty guest changes, clear
     rebaselining, guarded and short ranges, padding, exact/partial color and
     depth overlaps, allocation release/reuse, layout changes, injected
-    snapshot races and transactional rollback. Both switches explicitly
-    reject scaled aliases.
+    snapshot races and transactional rollback.     The trial scale-two packed-alias fixtures covered the glare threshold and
+    exact logical/physical matching, but did not model the retail geometry
+    loss. Current fixtures instead check scaled guest-range accounting and
+    explicit rejection for depth-only, stencil-only, combined, downscaled and
+    window-derived modes. The current WARP/hardware depth, stencil and glare
+    selection reports 42 passed.
     *Overlap:* Blood Wake's optional ambient-occlusion path in
     `bw_d3d11.c` creates an `R24G8_TYPELESS` resource with D24S8 and R24
     views. It is not a guest-depth-alias implementation. The
@@ -1197,13 +1216,14 @@ own GPU back end, an extended interface for it, and its own pacing fixes.
     *Before filing:* the darker Basic Controls image is now validated against
     a native xemu reference. Coordinate a generic ownership contract in #306,
     refresh upstream overlap with approval before action, preserve GPU
-    contents across surface recreation, define partial and scaled aliases,
-    and validate
+    contents across surface recreation, define partial aliases and scaled
+    depth/guest-write ownership, and validate
     matched movement, sun-facing and fade scenes. Split-screen title
     validation is deferred and is not a filing gate for this generic
     ownership work. The focused same-generation pair is one run per variant
     and is correctness evidence, not a performance result.
-    *Status:* experimental project-only implementation.
+    *Status:* experimental project-only implementation at scale 1; scaled
+    aliases fail closed after the retail regression.
 
 26. **Pass window clips to capable GPU back ends.**
     *Problem:* GPU backends need the same explicit clip state as CPU draws;
@@ -1569,8 +1589,9 @@ own GPU back end, an extended interface for it, and its own pacing fixes.
     on hardware and 123 with 67 hardware cases skipped under WARP. Bounded
     scale-1 and 4.5x retail opening probes retained visible movie content.
     Additional synthetic WARP/hardware cases cover exact aliases, guest
-    changes, partial overlap rejection and sampling a bound target. No new
-    retail run exercised the current alias logic.
+    changes, partial overlap rejection and sampling a bound target. The later
+    4.5x packed-stencil check also traversed this colour path, but it was a
+    stencil-correctness comparison rather than a colour-ownership validation.
     *Overlap:* checked 2026-10-31. Open
     [#285](https://github.com/sp00nznet/xboxrecomp/pull/285) establishes
     backend readback before snapshots but does not define guest writes after a
@@ -2014,6 +2035,95 @@ own GPU back end, an extended interface for it, and its own pacing fixes.
     request approval for upstream interaction.
     *Status:* local framework patch and project diagnostics; synthetic-tested,
     not filed.
+
+48. **Preserve host timing for live controller commands.**
+    *Problem:* `RECOMP_PAD_LIVE` lines carry only a button and optional hold.
+    The runtime reads and schedules a line at the current pad clock only when
+    the title next polls the controller. A command appended on time by a host
+    controller can therefore be queued seconds late if the guest temporarily
+    stops polling, so live input cannot preserve a reviewed host timeline.
+    *Evidence:* the retained `desktop3` texture-index campaign on generation
+    `20261111-084222-7bdb6e56` kept controller dispatch drift below 93 ms, but
+    its final two commands acquired about 1.8-3.7 seconds of runtime queue
+    drift. Source inspection confirms `pad_script_apply` calls
+    `pad_live_poll`, which assigns the current runtime pad time after reading
+    an untimed line. The later `desktop4` title-side route ended commands
+    earlier and kept all runtime pair drift below 140 ms. This observes the
+    scheduling boundary; it does not prove that every title has long
+    controller-poll gaps. The caller-corrected `desktop9` repeat dispatched
+    the final 45-second command within 78 ms across its only completed pair,
+    but runtime acknowledgement differed by 1,656 ms. The earlier-ending
+    route therefore reduces but does not eliminate the generic timing loss.
+    *Change:* no framework patch exists. The title benchmark currently omits
+    its late reversals and leaves a stationary-camera measured tail. A generic
+    candidate would add an explicitly timed or armed live batch while keeping
+    existing untimed lines backward-compatible. Any behavior-changing mode
+    should use a default-off `RECOMP_*` interface rather than title names.
+    *Tests:* add a synthetic input fixture that appends timed commands while
+    guest polling is paused, resumes polling, and verifies original schedule,
+    order and acknowledgement. Cover existing untimed syntax, partial lines,
+    invalid/retrograde times, multiple commands, shutdown and pad-clock
+    reset. Such a fixture would not establish title scene matching or host
+    input latency.
+    *Overlap:* every pull request and
+    [sp00nznet/xboxrecomp#184](https://github.com/sp00nznet/xboxrecomp/pull/184)
+    were checked on 2026-11-13. No timed-live-input candidate was found.
+    Merged
+    [sp00nznet/xboxrecomp#144](https://github.com/sp00nznet/xboxrecomp/pull/144)
+    introduced the current live path and is the implementation to extend.
+    *Before filing:* define a portable timestamp/arming contract, preserve
+    old files and interactive use, build the synthetic fixture, validate a
+    second title, refresh overlap, and request approval before any upstream
+    issue, PR or comment.
+    *Status:* planned generic framework enhancement; no patch prepared or
+    filed. The current workaround is title-side only.
+
+49. **Preserve single-CPU scheduling assumptions for guest worker queues.**
+    *Problem:* guest title threads normally run as independent host threads.
+    Brute Force queues loader work to a guest worker and polls its completion
+    byte through zero-delay `KeDelayExecutionThread`. On the console that
+    yield and the worker share one CPU; on an unpinned multicore host the
+    poll can execute hundreds of millions of times and intermittently never
+    reaches the first movie.
+    *Evidence:* retained failures stopped at 12-14 zero-draw flips while
+    vblank and host/device threads continued. The strongest earlier failure
+    logged 545,629,948 ordinal-99 calls out of 551,340,537 total. A bounded
+    title hook identified return `0x00265B87`, duration zero and
+    non-alertable mode. Generated-code inspection resolves it to
+    `sub_00265AD0`: it queues `sub_00265900` to the worker loop
+    `sub_00264620`, then polls byte `+5` until the worker clears it. A
+    successful unpinned boot still reached 14,211,264 ordinal-99 calls in its
+    last pre-movie periodic summary. With `RECOMP_GUEST_CPUS=one`, ordinal 99
+    fell below the six reported ranks and the first movie draw arrived in
+    6.60 seconds. Three additional 15-second boots using the new title default
+    all reached movie draws in 7.27-7.41 seconds and produced no bounded trace
+    line at the one-million-call threshold.
+    *Change:* no framework patch is added. Brute Force now defaults
+    `RECOMP_GUEST_CPUS=one` in both direct startup and `build.py`, while an
+    explicit environment value such as `all` remains an override. The
+    framework already supplies the generic pin and leaves non-guest GPU, APU
+    and service threads unpinned. A temporary immediate-handoff scheduler
+    experiment passed its focused fixture but did not remove the retail poll,
+    so it was discarded rather than retained as a speculative framework fix.
+    *Tests:* project build tests cover the default and explicit override;
+    benchmark tests require the setting in recorded runtime controls. Four
+    bounded one-core retail boots reached movie draws, including the isolated
+    control and three default-path repetitions. These short runs establish
+    startup progress, not gameplay reliability or a performance result.
+    *Overlap:* refreshed on 2026-11-13. Merged
+    [sp00nznet/xboxrecomp#192](https://github.com/sp00nznet/xboxrecomp/pull/192)
+    already provides `RECOMP_GUEST_CPUS=one`, the optional guest scheduler and
+    their synthetic fixtures; the tracking index
+    [sp00nznet/xboxrecomp#184](https://github.com/sp00nznet/xboxrecomp/pull/184)
+    names those switches. Searches found no open `KeDelayExecutionThread`
+    issue or PR and no newer competing guest-scheduler change. No upstream
+    interaction was performed.
+    *Before filing:* no new submission is proposed. If another title shows the
+    same failure, add a framework integration fixture for its zero-delay
+    producer/worker pattern, compare pinning with the guest scheduler, and
+    coordinate with the merged scheduler owner before changing defaults.
+    *Status:* existing merged framework capability selected by a title-side
+    default; bounded retail startup validation passed.
 
 ### Open upstream work to select or coordinate with
 

@@ -754,6 +754,10 @@ void sub_00372180(void)
             caller = submit_caller(8);
         else if (site == 0x0037206Bu)
             caller = submit_caller(4);
+        else if (site == 0x00371D85u || site == 0x00371DABu)
+            caller = submit_caller(20);
+        else if (site == 0x003780E6u)
+            caller = submit_caller(48);
     }
 
     if (!InitOnceExecuteOnce(&once, initialize_pfb_wait, NULL, NULL))

@@ -100,9 +100,10 @@ dumps raw guest stack words, which may contain local game data.
 After building, double-click `Brute Force.bat` (or `Brute Force.cmd`), or run
 `python tools\launcher.py`. The launcher starts the same current tutorial
 configuration as `run --experimental-tutorial`; it does not make
-the game fully playable. It validates the build and game before each launch
-and keeps each boot's output in `launcher.log` alongside `xbox_kernel.log`.
-The launcher returns when the game closes and reports a nonzero exit.
+the game fully playable, and networking is not supported. It validates the
+build and game before each launch and keeps each boot's output in
+`launcher.log` alongside `xbox_kernel.log`. The launcher returns when the game
+closes and reports a nonzero exit.
 
 The Display tab selects windowed or borderless fullscreen, initial window
 size, point or linear presentation filtering, and presentation VSync.

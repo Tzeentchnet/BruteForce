@@ -16,156 +16,29 @@ copy.
 
 ## Status
 
-This is an experimental release.
+This is an experimental Windows release for the North American retail game:
 
-> [!NOTE]
-> This build currently does not support networking.
+- Direct3D 11 is the default renderer; the CPU reference remains available.
+- Tutorial gameplay is running, but full-game correctness is not established.
+- Networking is not supported.
+- Internal-resolution scaling retains a 4:3 picture; true widescreen is not
+  implemented.
+- Experimental rendering and performance options remain default-off unless
+  explicitly documented otherwise.
 
-Direct3D 11 is the default renderer for new launcher settings. The CPU
-reference renderer remains available from the launcher for comparison and
-troubleshooting. Native-resolution resize rollback has synthetic coverage;
-retail gameplay and depth/stencil reinitialization after resize remain
-unvalidated. Guest mipmap sampling and 8x anisotropic filtering are separate
-default-off D3D11 experiments with synthetic coverage; title and xemu
-comparisons remain open. See the [user guide](docs/USER_GUIDE.md#d3d11-renderer-and-benchmark-diagnostics).
-Submitted GPU work is bounded and device-loss paths fail explicitly.
-Default-off clean-surface readback elision has synthetic coverage only; dirty
-frames still read back and tracked-surface flips still wait. The static
-consumer inventory confirms that CPU presentation, PVIDEO composition,
-frame dumps, frame statistics and presenter capture currently depend on
-guest-visible colour pixels. A current-generation null-backend guard run
-resolved a non-NV2A access to generated title code, but the accumulated
-surface range also overlaps staged pushbuffer data and retains one excluded
-page. It therefore does not prove a live rendered-surface read or justify
-general on-demand readback. Retail correctness and performance of this
-experiment are unverified.
+Detailed evidence and open gates live in
+[current findings](docs/FINDINGS.md), [next steps](docs/NEXTSTEPS.md),
+[rendering architecture](docs/RENDERING.md), and the
+[performance plan](docs/PERFPLAN.md).
 
-Three independent default-off Phase 4 switches now have synthetic coverage:
-event-driven PFB acknowledgement, NV2A idle waiting and guarded per-PUT
-segment walking. The latter requires current generated store hooks and fails
-closed on untracked USER-register writes or resets. A reproduced
-segment/PGRAPH/PFB deadlock is fixed without advancing GET or completing the
-queued segment. One no-retry segment-only smoke and one no-retry all-three
-smoke reached reviewed tutorial gameplay; neither is an A/B/A performance
-campaign, distinct-world FPS result or CPU-reference match. The planned
-24-run flush/idle/segment/all-three campaign is deferred; all three switches
-remain default-off. See the
-[user guide](docs/USER_GUIDE.md#experimental-nv2a-wait-and-segment-options).
+## Quick start
 
-Packed depth/stencil aliases and window clipping remain default-off
-experiments. One matched native xemu Basic Controls comparison reduced D3D11
-pixels differing by more than 8/255 from 43.4320% to 3.7119% when the packed
-alias was enabled. A scale-two packed-alias fixture also passed, but a fresh
-4.5x retail check invalidated that scaled path: two alias-on boots omitted the
-player at the untouched tutorial spawn, while the otherwise matched alias-off
-control showed the player. The renderer and launcher therefore reject both
-depth and stencil aliases whenever internal scaling is active. The exact pass
-that removed the model remains unproved. A user-reviewed alias-off sun-facing
-probe showed no obvious bloom, but it was not a native-reference match and
-does not close the rendering gate. These focused results are not a complete
-gameplay or original-hardware guarantee. Movement
-benchmark collection exits 2 as inconclusive; a separate reviewed-world
-analysis must establish content and presentation. Black hashes alone cannot
-identify intentional fades.
-
-Texture and colour-shadow inputs now use checked snapshots and tracked
-allocation identities; colour-surface writes, compatible render-target aliases
-and bounded P8 palettes have synthetic coverage. Unknown suballocations and
-concurrent guest writes still need an ownership contract, and retail image
-parity and cost remain unvalidated. `RECOMP_DISPLAY_AWAKE=1` is an
-independent, default-off foreground-only Windows display-awake experiment; it
-is not a launcher default.
-
-True Hor+ widescreen is not implemented; internal-resolution choices retain
-the 4:3 picture. The camera trace is diagnostic only. Initial widescreen work
-is scoped to proven single-view scenes; split-screen reference, layout,
-widescreen and performance work are deferred, and no split-screen support is
-claimed.
-
-The pinned framework has been updated to xboxrecomp v0.17.0 plus selected
-post-release fixes. Campaign generation
-`20261111-084222-7bdb6e56` uses the final runtime tree. Before the
-runtime-only Phase 4 fix, a codegen-identical executable completed one
-audio-off CPU and one D3D11 tutorial/movement bring-up without retries; the
-post-deadlock executable completed the two reviewed Phase 4 smokes described
-above. Its later texture-index executable completed six alternating exact
-linear/indexed attempts with matched input and full guest-surface review.
-The exact index reduced descriptor probes from 82.495 to 1.230 per lookup and
-measured lookup time from 0.0486 to 0.0336 ms/flip, but one of three cadence
-pairs regressed and historical PFB interval callers are incomplete. This is
-an inconclusive diagnostic result, not an accepted title speedup.
-
-Current supported generation `20261113-214800-12924697` is the clean Release
-build containing the one-core startup default and the fail-closed scaled-alias
-boundary. It retains and synthetic-tests the three missing title caller
-layouts. Its
-`20261113-160606-ad4c0e30` predecessor's partial repeat completed three clean
-attempts before the fourth locked during Loading. All 3,574 captured guest
-surfaces were reviewed; the 64 movement-contained PFB/PUT intervals have
-complete caller attribution. The only A/B pair is not timing-valid because
-its final live command was acknowledged 1,656 ms apart. Unbalanced diagnostics
-still show 80.476 linear versus 1.239 indexed probes per lookup and 0.0519
-versus 0.0318 ms/flip lookup time, but they are not a throughput comparison.
-The operator closed the repeat sequence as inconclusive rather than
-scheduling another six runs. The index remains the default; G2,
-CPU-reference and scaled-headroom gates remain open.
-
-A follow-up Windows write-watch feasibility check was closed without an
-implementation. `MEM_WRITE_WATCH` cannot be applied to the file-mapped guest
-RAM and contiguous/tiled alias views used by xboxrecomp, and per-view page
-guards cannot prove that all aliases stayed clean. Exact texture and palette
-snapshot comparison therefore remains mandatory.
-
-The Loading lock is now traced to a title loader queue that polls a guest
-worker through zero-delay `KeDelayExecutionThread`. New title launches select
-the framework's `RECOMP_GUEST_CPUS=one` mode by default, pinning guest threads
-but not GPU/APU host workers. One explicit and three default-path bounded
-boots all reached movie draws; this is startup-smoke evidence rather than a
-long-session reliability or performance result. An explicit
-`RECOMP_GUEST_CPUS=all` setting remains available for controlled comparison.
-
-Retained audit evidence also establishes material `ARRAY_ELEMENT16/32`
-dispatch volume. Patch 0046 adds `RECOMP_PB_INDEX_RUNS=1` as a separate,
-default-off exact batching candidate across both selected pushbuffer walkers.
-Synthetic scalar/run equivalence, CALL, physical-wrap and audit-fallback
-coverage pass, but no Brute Force speedup or matched rendered-output result
-has been established. Its reviewed A/B/A campaign remains separate from the
-texture-index evidence and requires a separately scheduled operator session.
-
-Release compiler experiments are also isolated from the supported default
-build. `--compiler-profile ltcg` enables title-executable `/GL` plus LTCG;
-`--compiler-profile avx2` enables title-executable `/arch:AVX2`. They use
-separate build directories, cannot be combined, and have a guarded
-multi-binary benchmark mode. Both compile successfully, but neither has been
-run on retail content or shown to improve performance or preserve matched
-rendered output. The supported default remains the ordinary Release profile.
-
-The pre-fix executable also completed one additional D3D11 attempt at the 4K
-preset with mipmaps and anisotropy enabled. It confirms the 2880x2160 4:3
-render path can run on the available hardware, but the observed tutorial
-texture declared no lower levels and the 3440x1440 display cannot establish
-native 4K output.
-
-See [current findings](docs/FINDINGS.md) and
-[next steps](docs/NEXTSTEPS.md) for the detailed validation boundary.
-
-## Requirements
-
-- 64-bit Windows 10 or 11 with a Direct3D 11-capable GPU.
-- Python 3.10 or later with Tkinter.
-- Git and CMake 3.20 or later.
-- Visual Studio 2022 Build Tools 17.5 or later with the C++ workload and
-  Windows SDK.
-- Enough free disk space for the extracted disc, generated C, and native
-  build.
-- An XDVDFS/XISO image containing the supported North American retail
-  `default.xbe`.
-
-The supported executable fingerprint is recorded in
-[`fingerprints/retail.json`](fingerprints/retail.json). Other revisions are
-rejected until they are analyzed and explicitly supported.
-
-## Build and run
+You need 64-bit Windows 10 or 11, a Direct3D 11-capable GPU, Python 3.10 or
+later with Tkinter, Git, CMake 3.20 or later, Visual Studio 2022 Build Tools
+17.5 or later with the C++ workload and Windows SDK, and an XDVDFS/XISO image
+made from the supported retail disc. See the
+[user guide](docs/USER_GUIDE.md#requirements-and-build-workflow) for the full
+requirements and incremental workflow.
 
 Open PowerShell in the repository root:
 
@@ -180,48 +53,10 @@ the supplied disc, generates the recompiled sources, and builds a Release
 executable. Disc contents, generated sources, logs, saves, and build products
 remain local and are excluded from Git.
 
-After the first build, start the launcher with `Brute Force.cmd`,
-`Brute Force.bat`, or:
-
-```powershell
-python tools\launcher.py
-```
-
-Choose **Play** to launch. Settings are saved in
-`%LOCALAPPDATA%\BruteForce\settings.json`.
-
-### Keyboard controls
-
-| Input | Keys |
-| --- | --- |
-| Left stick | W, A, S, D |
-| Right stick | I, J, K, L |
-| D-pad | Arrow keys |
-| Start | Enter |
-| A / B / X / Y | Z / X / C / V |
-
-Input is read from the focused game window.
-
-## Updating or rebuilding
-
-To rebuild after source changes:
-
-```powershell
-python tools\build.py setup
-python tools\build.py generate
-python tools\build.py build --config Release --parallel 4
-```
-
-If the existing `.deps\xboxrecomp` checkout has an older or modified patch
-set, setup refuses to overwrite it. Preserve and move that checkout before
-running setup again.
-
-The build pipeline verifies the game fingerprint, generated-code provenance,
-selected framework revision, local patch set, and build metadata before it
-runs the executable.
-
-For individual setup, extraction, generation, runtime options, diagnostics,
-benchmarking, and save isolation, see the
+The supported executable fingerprint is recorded in
+[`fingerprints/retail.json`](fingerprints/retail.json); other revisions are
+rejected. Launcher settings, keyboard controls, rebuilding, diagnostics,
+benchmarking, and save isolation are documented in the
 [user guide](docs/USER_GUIDE.md).
 
 ## Documentation

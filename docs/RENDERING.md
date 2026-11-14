@@ -324,6 +324,13 @@ rewrites, leaving stale textures. Exposed mip chains always use exact
 snapshots even when approximate caching is requested; declared and uploaded
 level counts participate in their cache identity.
 
+Windows `MEM_WRITE_WATCH` cannot replace these exact checks in the current
+framework memory model. Main RAM, its mirrors, contiguous memory and the tiled
+aperture are file-mapped alias views; `GetWriteWatch` only accepts regions
+reserved by `VirtualAlloc` with write watching enabled. Page protection is
+also per virtual view and cannot prove that every alias stayed clean. No
+dirty-page shortcut or `RECOMP_*` switch is implemented.
+
 The 2,048-entry cache uses a 4,096-bucket exact descriptor index rather than a
 linear scan. Buckets chain collisions and still compare the complete
 descriptor key before reuse. Rewrites, failed-upload discards, compacting

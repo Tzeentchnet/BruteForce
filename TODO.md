@@ -35,7 +35,11 @@ comparison invalidated that path: the player was absent in two
 alias-on boots and present in the otherwise matched alias-off spawn control.
 The renderer and launcher now fail closed on both alias options at non-1
 internal scales. Continue brightness work at scale 1 or add a fuller
-render-sequence fixture before reconsidering scaled aliases.
+render-sequence fixture before reconsidering scaled aliases. The post-index
+Windows write-watch/guard candidate is also closed as incompatible with the
+framework's file-mapped alias layout. Every remaining unchecked item below is
+explicitly blocked, deferred, or conditional on a new operator-reviewed
+capture/profile; there is no additional unattended campaign to start.
 
 ## Milestone 0: trustworthy baseline
 
@@ -90,12 +94,16 @@ render-sequence fixture before reconsidering scaled aliases.
   completed A/B pair exceeded the 250 ms input tolerance at its final command
   (1,656 ms runtime drift). Do not claim a title speedup or use its descriptive
   +0.247 world changes/s as an A/B result; G2/G4/G5 remain open.
-- [ ] **Candidate, after the texture-index campaign:** assess whether
-  Windows write watching (`MEM_WRITE_WATCH`) or guarded pages can prove
-  unchanged guest texture and palette sources exactly, including DMA,
-  aliases, reprotection, and reset. Record the feasibility result before any
-  implementation; any mechanism stays default-off behind a `RECOMP_*` switch
-  and must not relax full comparison until a synthetic fixture proves it.
+- [x] **Closed as infeasible with the current guest-memory layout:** Windows
+  write watching (`MEM_WRITE_WATCH`) only covers specially reserved
+  `VirtualAlloc` regions. Xbox RAM and contiguous memory use pagefile-backed
+  mapped views so RAM mirrors and the contiguous/tiled apertures alias the
+  same bytes. A local API probe confirmed `GetWriteWatch` rejects both an
+  ordinary allocation and a pagefile-backed mapped view with error 87.
+  Per-view page guards cannot prove physical-page cleanliness across those
+  aliases and retain the existing reprotection/concurrency gaps. No
+  `RECOMP_*` experiment was added; exact source and palette comparison stays
+  mandatory pending a generic framework write-notification contract.
 
 ## Decision gate
 

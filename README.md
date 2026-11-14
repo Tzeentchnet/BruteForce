@@ -110,6 +110,12 @@ The operator closed the repeat sequence as inconclusive rather than
 scheduling another six runs. The index remains the default; G2,
 CPU-reference and scaled-headroom gates remain open.
 
+A follow-up Windows write-watch feasibility check was closed without an
+implementation. `MEM_WRITE_WATCH` cannot be applied to the file-mapped guest
+RAM and contiguous/tiled alias views used by xboxrecomp, and per-view page
+guards cannot prove that all aliases stayed clean. Exact texture and palette
+snapshot comparison therefore remains mandatory.
+
 The Loading lock is now traced to a title loader queue that polls a guest
 worker through zero-delay `KeDelayExecutionThread`. New title launches select
 the framework's `RECOMP_GUEST_CPUS=one` mode by default, pinning guest threads

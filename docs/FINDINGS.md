@@ -2495,6 +2495,50 @@ scan-removal mechanism, not a title-throughput improvement. The index remains
 the exact default, but no further repeat is scheduled and no performance
 promotion is claimed from this campaign.
 
+### Windows write-watch and guarded-page feasibility (2026-11-13)
+
+The post-index candidate asked whether Windows dirty-page tracking could skip
+exact texture and palette copies when guest memory had not changed. The
+[GetWriteWatch documentation](https://learn.microsoft.com/en-us/windows/win32/api/memoryapi/nf-memoryapi-getwritewatch)
+requires the queried region to have been allocated by `VirtualAlloc` with
+`MEM_WRITE_WATCH`; the
+[VirtualAlloc documentation](https://learn.microsoft.com/en-us/windows/win32/api/memoryapi/nf-memoryapi-virtualalloc)
+requires that flag to be present when the region is reserved.
+
+The current verified xboxrecomp tree cannot meet that precondition without
+changing its memory model. `xbox_MemoryLayoutInit` creates the main Xbox RAM
+with `CreateFileMappingA` and maps the base plus RAM mirrors as views of the
+same backing pages. It separately creates contiguous memory with
+`CreateFileMappingW` and maps the tiled aperture as a second view of that
+backing. These aliases are required behavior; replacing either backing store
+with an independent write-watched `VirtualAlloc` region would lose the shared
+bytes that the guest address aliases expect.
+
+A 64-bit AMD64 probe on Windows NT 10.0.26200.0 confirmed the API boundary.
+After one byte write, a 64 KiB
+`MEM_RESERVE | MEM_COMMIT | MEM_WRITE_WATCH` allocation returned success,
+one changed page and 4,096-byte granularity. The same query on an ordinary
+`VirtualAlloc` region and on a pagefile-backed mapped view returned
+`0xFFFFFFFF` with `ERROR_INVALID_PARAMETER` (87). No game data or retail
+execution was involved.
+
+Page protection does not supply an equivalent exact signal. Protection is
+attached to a virtual view, so every RAM mirror and both contiguous/tiled
+views would need coordinated protection and fault handling. The existing
+surface guard protects one programmed virtual range, unprotects a page after
+its first fault, and has already demonstrated millions of faults, stale or
+overlapping ranges, an excluded page and concurrent reprotection blind spots.
+A texture-specific write guard could conservatively mark a page dirty after
+its first write, but it still could not prove that an unprotected alias,
+DMA-facing view, mapping replacement or baseline/arming race stayed clean.
+
+The candidate is therefore closed before implementation. No `RECOMP_*`
+switch was added and no performance claim is made. Exact checked copies and
+source/palette comparisons remain the correctness path. Reconsideration
+requires a generic physical-backing write-notification and allocation-lifetime
+contract in the framework, with alias, reset, DMA and concurrent-write
+fixtures; another title run cannot resolve this design boundary.
+
 ### Pre-movie loader polling and one-core guest scheduling
 
 The texture-index repeat and the first 4.5x packed-stencil attempt exposed a

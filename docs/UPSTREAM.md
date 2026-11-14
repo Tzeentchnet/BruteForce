@@ -1959,7 +1959,14 @@ own GPU back end, an extended interface for it, and its own pacing fixes.
     *Evidence:* source inspection and synthetic guard, reprotection,
     allocator-reuse, reset, byte-rewrite and colour-alias cases demonstrate
     these boundaries. They are not a retail write trace or evidence that
-    concurrent snapshots are atomic.
+    concurrent snapshots are atomic. A 2026-11-13 Windows write-watch
+    feasibility probe found that a 64 KiB write-watched `VirtualAlloc`
+    reported one dirty 4 KiB page, while an ordinary allocation and a
+    pagefile-backed mapped view both failed `GetWriteWatch` with error 87.
+    The framework uses mapped views for main RAM plus its mirrors and for the
+    contiguous/tiled alias pair, so `MEM_WRITE_WATCH` cannot observe the
+    current backing stores. Per-view protection cannot provide a physical-page
+    dirty signal across those aliases.
     *Change:* [0041-texture-snapshots-and-bounds.patch](../patches/xboxrecomp/0041-texture-snapshots-and-bounds.patch)
     adds a checked non-P8 immutable-buffer CPU decoder, tracked heap and
     contiguous allocation identities with remaining extents, mapping
@@ -1992,16 +1999,20 @@ own GPU back end, an extended interface for it, and its own pacing fixes.
     title throughput.
     *Overlap:* the last recorded checks in this worklist cover #184 and
     #306's backend contract on 2026-11-11 and #261/#269/#286's related
-    physical-page identity on 2026-11-10. No fresh search or upstream contact
-    was made. These references do not establish that the current APIs are
-    non-overlapping today.
+    physical-page identity on 2026-11-10. A read-only 2026-11-13 scan of the
+    500-PR upstream listing found no title/body match for write watching,
+    dirty pages, guest writes, allocation lifetimes or texture snapshots. No
+    upstream contact was made. These references do not establish that the
+    current APIs are non-overlapping today.
     *Before filing:* recheck current upstream, agree on cross-backend
     ownership/write-notification and explicit suballocation lifetime, test
     reset and concurrent writes on other platforms and titles, and run a
     same-generation A/B/A cost and matched-image campaign. Request approval
     before coordination or filing.
     *Status:* local framework patches plus project-side use; synthetic-tested,
-    not prepared or filed.
+    not prepared or filed. The Windows write-watch shortcut is closed as
+    incompatible with the current aliasing memory layout; no patch or switch
+    was added.
 
 47. **Bound verification and stalled-work diagnostics.**
     *Problem:* GPU vertex verification can silently skip unavailable or

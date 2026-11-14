@@ -236,6 +236,12 @@ Direct3D 12 work remain deferred. See
   `VirtualQuery` dominated both validation totals. The counters add QPC and
   atomic overhead and run on different threads, so these figures are not
   additive frame-time components.
+- The post-index `MEM_WRITE_WATCH`/guarded-page candidate is closed without
+  implementation. Windows write watching rejects the file-mapped RAM and
+  contiguous/tiled alias views that the framework requires, while per-view
+  protection cannot prove physical-page cleanliness across those aliases.
+  Keep exact source and palette comparison; reconsider only with a generic
+  framework write-notification and lifetime contract, not another retail run.
 - The final-generation cold/warm pixel-shader-cache campaign measured
   12.914/25.543/30.623 ms p50/p99/max across 96 cold compile/create events
   and 0.143/0.517/0.535 ms across 96 warm lookup/create events. Movement

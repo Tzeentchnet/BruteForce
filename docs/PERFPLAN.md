@@ -205,6 +205,15 @@ Concurrent reprotection remains non-atomic. A layout replacement with
 uncertain GPU ownership cannot be sampled until a successful full clear or
 readback; its title frequency and the cost of the new checks remain unknown.
 No new retail binary or same-generation alternating comparison was run.
+Windows write watching was evaluated after the index campaign and rejected
+for the current memory model: `GetWriteWatch` only accepts regions reserved
+with `VirtualAlloc(..., MEM_WRITE_WATCH)`, while framework RAM and
+contiguous/tiled storage are file-mapped so multiple guest address views share
+the same bytes. A local Windows NT 10.0.26200.0 probe returned error 87 for a
+pagefile-backed mapped view, and page protection is per view rather than per
+physical backing page. Guarding cannot close the alias, reprotection, DMA and
+concurrent-baseline gaps. No switch was added; exact source and palette
+comparison remains required pending a framework write-notification contract.
 The user-reported 6 fps case, controlled snapshot cost, guest-write races and
 matched gameplay correctness remain unresolved. Renderer device loss fails explicitly;
 recovery and the separate presenter device remain open. See

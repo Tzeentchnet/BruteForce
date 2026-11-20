@@ -3220,6 +3220,43 @@ generic code from `e631eddd`. No code was copied from `62923407`, so
 revision still requires a corresponding notice update; title code, generated
 C, assets and captures remain local.
 
+## 2026-11-20 upstream integration review
+
+This section records source and metadata review, not Brute Force runtime
+validation. Upstream xboxrecomp v0.18.0 was released at
+`37b61d589168adee3680fabd51805ee81427bf07` with tree
+`d93bc9f25a901650ce0390493893da3454cca3f1`. Its release notes report 1,023
+tests passed, one skipped, and 6,368 conformance vectors with no mismatches;
+those are upstream results and were not rerun locally during this review.
+The supported project toolkit and executable remain on v0.17.0.
+
+| Area | Observed upstream change | Brute Force decision |
+| --- | --- | --- |
+| Build-from-disc safety and generation cost | v0.18 rejects XISO names that could escape the extraction directory (#322) and reports 34-39% faster discovery from decoded-instruction reuse (#336), at about 1 GB more peak memory in upstream measurements. | Adopt through the v0.18 base upgrade. Re-run the supported disc pipeline and record Brute Force generation time and peak memory; do not present upstream title measurements as local performance evidence. |
+| Discovery and lifted code | #275, #324-#329, #333, #338 and #339 change direct-jump resynchronization, signatures, RTTI bounds, SSE/x87 lifting, seed caching and jump-table measurement. #329 also turns remaining silent SSE/x87 fallbacks into explicit unimplemented reports. | Regeneration is mandatory. Compare identified functions, generated-source fingerprints, unresolved calls, untranslated sites and newly surfaced `RECOMP_UNIMPL` entries before accepting the new executable. No claim is made yet that any of the current 11 untranslated sites is fixed. |
+| Kernel and memory | #268, #286, #330, #331 and #337 change heap splitting/order, RAM physical naming, virtual alignment and reused contiguous-page protection. | Adopt as correctness fixes, but run the full memory/APU/USB fixtures and retail startup/gameplay smokes because allocation addresses and physical identities can change. #286 requires a real external-DSP rebase rather than carrying the old last-translation tags. |
+| CPU-reference NV2A | #332 marks a colour-cleared linear surface as drawn; #343 draws RHW-zero 2D quads and follows hardware infinite-fog behavior. | Adopt with the release and keep the CPU path as the reference. Re-run movie/menu/HUD frames and matched CPU/D3D11 captures; these fixes do not waive the existing GPU ownership or scaling gates. |
+| Audio | #334 makes voice-field writes atomic, #340 rotates idle-voice traps, and default-on #341 paces one 32-sample frame at a time. #342 adds default-off `RECOMP_APU_SSL_ADVANCE=1`. Draft #344 proposes six Windows buffers. | Adopt #334/#340/#341 with the base, leave #342 disabled, and do not cherry-pick #344. Brute Force already selects eight buffers and patch 0034's three-quarter low-water mark. Re-measure that combination before deciding whether patch 0033's highest-priority worker is still needed, then repeat the deferred listening gate. |
+| Deterministic x87 hooks | #335 adds default-inactive `RECOMP_PORTABLE_MATH`. | Carry the capability but do not enable it: this project has no netplay, rollback or cross-host bit-determinism requirement. |
+| Narrow DIV/IDIV | PR #315 is marked merged, but release commit `1ce3d64b4385a41179b76e92e361f23fd2cb1c61` reverts it because its own native Windows 16-bit `IDIV` test failed. | Keep it excluded. The release does not contain the change, matching the earlier 2,643-mismatch rejection. |
+
+A disposable application-only rebase found that 39 of 43 local patches apply
+unchanged to v0.18.0. Review edits were needed for 0030 (physical aliases),
+0033 (the reshaped APU worker), 0041 (heap and memory regression changes) and
+0042 (an adjacent CMake test registration). The remaining patches then
+applied, producing provisional index tree
+`c549a8ebd6ca5bca31072737153e811014cd1ec2`. This is compatibility evidence
+only. The review checkout intentionally did not resolve 0030's title-side
+external-DSP contract, and no build, fixture, generation or retail run was
+performed on that tree; it must not replace the expected toolkit tree.
+
+Blood Wake was also rechecked. Public `main` and release v0.3.3 are still
+`6292340705d9b863351a45ba160174a346a81688`, with no commit after
+2026-11-08. Closed issue #6 requested direct launch and mentioned two local
+cache directories, but it supplied no code change or verified cause. There is
+therefore no new Blood Wake feature to import beyond the already recorded
+v0.2.5-v0.3.3 prior art, and no third-party notice changed.
+
 ## Earlier v0.17 and reviewed performance baselines
 
 Reference generation `20261111-002138-a9dbc18a` was the first supported

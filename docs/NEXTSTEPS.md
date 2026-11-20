@@ -17,6 +17,19 @@ and the title-side fence, pushbuffer, PGRAPH, interrupt and toolkit selection
 reports 67 passed. The validation includes the runtime PGRAPH/PFB deadlock
 fix and its segment-ordering fixture.
 
+xboxrecomp v0.18.0 was released on 2026-11-20 at
+`37b61d589168adee3680fabd51805ee81427bf07`. It is the next framework base,
+not yet the supported pin. A disposable application-only probe found 39 of 43
+local patches apply unchanged. Patch 0030 must be redesigned around merged
+#286's RAM-mirror physical names; 0033 must be re-evaluated with merged #341's
+per-frame APU pacing; 0041 must preserve merged heap split/order/protection
+semantics; and 0042 needs a fixture-only CMake resolution. The provisional
+review tree `c549a8ebd6ca5bca31072737153e811014cd1ec2` was not built or tested
+and is not an expected toolkit tree. Do not update `toolkit.py` until those
+four overlaps are resolved in the patch files, focused fixtures pass,
+`toolkit.py --verify` passes from a clean checkout, and a regenerated title
+has discovery-delta, CPU-reference, D3D11, audio and startup validation.
+
 Supported retail generation `20261113-214800-12924697` is a Release build on
 runtime tree `3e3ae3600802d2bf4446d86fc546322d60849047`. It translated all
 22,295 identified functions with zero failures, six unresolved direct-call
@@ -84,10 +97,13 @@ sp00nznet/xboxrecomp#299 and sp00nznet/xboxrecomp#300 merged in v0.17.0;
 local patches 0001, 0005 and 0035 were removed. Issue
 [sp00nznet/xboxrecomp#301](https://github.com/sp00nznet/xboxrecomp/issues/301)
 closed after v0.17.0 corrected the raw `XC_VIDEO` encoding. Selected
-sp00nznet/xboxrecomp#320 supplies exact-value widescreen and 480p opt-ins.
-sp00nznet/xboxrecomp#314 and sp00nznet/xboxrecomp#319 are also selected and
-validated. sp00nznet/xboxrecomp#315 remains unselected because the 32-bit
-MSVC differential test found 2,643 signed 16-bit `IDIV` mismatches.
+sp00nznet/xboxrecomp#314, sp00nznet/xboxrecomp#319 and
+sp00nznet/xboxrecomp#320 are validated on the current v0.17 toolkit and now
+merged in v0.18.0; the base upgrade will remove their separate cherry-picks.
+sp00nznet/xboxrecomp#315 remains unselected. Although GitHub marks it merged,
+v0.18.0 reverted that merge before release because its native Windows 16-bit
+`IDIV` test failed, consistent with the earlier 2,643 signed 16-bit mismatch
+result.
 
 The fresh-generation and focused-bring-up completion gate is met. A native
 xemu Basic Controls frame is now content-matched to fresh v0.17 CPU and D3D11
@@ -103,11 +119,14 @@ patch 0019. Patch 0007 is held until its accounting covers or deliberately
 excludes every exported allocator. Do not file another PR, amend an existing
 PR or comment upstream without approval.
 
-A 2026-11-10 Blood Wake refresh compared the recorded adaptation baseline
+A 2026-11-20 Blood Wake recheck confirmed the earlier refresh from the
+recorded adaptation baseline
 v0.2.4 at `e631edddfe56d22344e9f696923aeb6d78a9e7ba` with public v0.3.3 at
 `6292340705d9b863351a45ba160174a346a81688`, ten commits later. The recorded
 checkout remains on `e631eddd`; the newer revision was reviewed only as prior
-art and still fingerprints xboxrecomp v0.16.0. No code was imported. The
+art and still fingerprints xboxrecomp v0.16.0. Public `main` and v0.3.3 have
+no newer commit; closed issue #6 added no implementation or verified cache
+cause. No code was imported. The
 independent foreground-only display-awake policy is now implemented and
 synthetic-tested behind a default-off switch. Shader-preparation diagnostics
 are bounded and opt-in; actual precompilation and native fixed-function work
@@ -790,12 +809,18 @@ artifacts that the fixtures do not cover, and G5 is recorded.
    [sp00nznet/xboxrecomp#298](https://github.com/sp00nznet/xboxrecomp/pull/298)
    and local patch 0035 was removed; do not bundle follow-up changes with the
    external-DSP series. Patches 0030-0034 still require the generic pieces and
-   policy changes to be split before upstream review.
+   policy changes to be split before upstream review. During the v0.18 rebase,
+   replace 0030's superseded physical-intent tags with #286's mirror aliases
+   and compare #341 pacing with and without patch 0033.
 6. Do not import Blood Wake v0.3.0's native DSP, WASAPI path, or bit-exact hot
    loops while audio is deferred. If work resumes, first assess its
    off-thread device-rebuild and MMCSS policy against the existing XAudio2
    reference, then consider native DSP only with interpreter lockstep and the
    existing GPL obligations.
+7. Do not cherry-pick draft sp00nznet/xboxrecomp#344. Brute Force explicitly
+   selects eight buffers, so its proposed six-buffer Windows default would not
+   alter this title's path. Repeat host-continuity and listening checks on
+   v0.18's merged #341 before changing queue or worker policy.
 
 *Done when:* after audio work resumes, a human listener signs off the fixed
 Simple scene list above, the Accurate defect is either fixed or remains
@@ -1093,17 +1118,24 @@ Still open: access to a native 4K display. Optional 5.1 output is deferred.
 
 ## Order
 
-1. Complete A1 and the single-view E1-E2 scope, then A2-A4 as the reference
+1. Rebase the framework stack onto xboxrecomp v0.18.0. Resolve 0030, 0033,
+   0041 and 0042 as described above; remove the now-merged #314/#319/#320
+   cherry-picks; run the focused framework fixtures and clean toolkit
+   verification; regenerate and compare discovery/function boundaries,
+   unresolved sites and `RECOMP_UNIMPL` reports; then run bounded CPU,
+   D3D11, audio and one-core startup smokes. Keep v0.17.0 as the supported
+   pin until every gate passes.
+2. Complete A1 and the single-view E1-E2 scope, then A2-A4 as the reference
    and gamma-ramp question allow. The widescreen trace is diagnostic and must
    not change output.
-2. Implement the single-view E3-E8 scope behind one default-off mode, with a
+3. Implement the single-view E3-E8 scope behind one default-off mode, with a
    4:3 regression gate before wide output. Keep HUD relocation and split
    screen deferred.
-3. Continue B1-B10 behind switches with default scale-1 behavior unchanged.
-4. Run C's human listening pass against the stable scene from A; repeat
+4. Continue B1-B10 behind switches with default scale-1 behavior unchanged.
+5. Run C's human listening pass against the stable scene from A; repeat
    automated audio probes only for a new symptom or materially different
    audio-heavy scene.
-5. Continue D's compatibility work without weakening audio or GPU ordering.
+6. Continue D's compatibility work without weakening audio or GPU ordering.
 
 Update FINDINGS, UPSTREAM, PERFPLAN, ARCHITECTURE and the README in the same
 change as each milestone, as AGENTS requires.

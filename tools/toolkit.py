@@ -13,7 +13,7 @@ ROOT = Path(__file__).resolve().parents[1]
 TOOLKIT_DIR = ROOT / ".deps" / "xboxrecomp"
 TOOLKIT_URL = "https://github.com/sp00nznet/xboxrecomp.git"
 TOOLKIT_BASE = "37b61d589168adee3680fabd51805ee81427bf07"
-TOOLKIT_TREE = "3fda068cfc85573c49b93230ea850298d4c948e1"
+TOOLKIT_TREE = "8938ce1b635e25832539a0bc6500b2fe2fa14565"
 LOCAL_PATCHES = (
     ROOT / "patches" / "xboxrecomp" / "0002-model-wbinvd.patch",
     ROOT / "patches" / "xboxrecomp" / "0003-synchronize-semaphore-target.patch",
@@ -57,6 +57,7 @@ LOCAL_PATCHES = (
     ROOT / "patches" / "xboxrecomp" / "0044-geometry-depth-audit.patch",
     ROOT / "patches" / "xboxrecomp" / "0045-bounded-nv2a-segments-and-waits.patch",
     ROOT / "patches" / "xboxrecomp" / "0046-index-word-runs.patch",
+    ROOT / "patches" / "xboxrecomp" / "0047-zero-delay-sleep.patch",
 )
 
 # v0.18.0 already includes the previously selected #314, #319, and #320.

@@ -343,6 +343,7 @@ def test_owned_controls_and_performance_collection_requirements(tmp_path):
     assert "RECOMP_GPU_TEX_INDEX" in bench.RUNTIME_OPTION_KEYS
     assert "RECOMP_PB_INDEX_RUNS" in bench.RUNTIME_OPTION_KEYS
     assert "RECOMP_GUEST_CPUS" in bench.RUNTIME_OPTION_KEYS
+    assert "RECOMP_ZERO_DELAY_SLEEP" in bench.RUNTIME_OPTION_KEYS
 
 
 def test_event_wait_profile_attribution_and_incomplete_stack(tmp_path):

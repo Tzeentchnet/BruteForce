@@ -1,0 +1,209 @@
+diff --git a/docs/runtime/environment-variables.md b/docs/runtime/environment-variables.md
+index 6c5c0c0..31f7b28 100644
+--- a/docs/runtime/environment-variables.md
++++ b/docs/runtime/environment-variables.md
+@@ -65,6 +65,7 @@ Opt-ins that change how the kernel layer behaves. Each fixes a class of titles;
+ | `RECOMP_GUEST_QUANTUM=ms` | 4 | With the lock: milliseconds before the lock is handed over (0 = at every call). | `kernel_guest_cpu.c` |
+ | `RECOMP_GUEST_CPU_TRACE[=ms]` | off | With the lock: periodic trace of who holds it. | `kernel_guest_cpu.c` |
+ | `RECOMP_GUEST_CPUS` | all | `all`, or a core number: pin the title's threads to one core. | `kernel_thread.c` |
++| `RECOMP_ZERO_DELAY_SLEEP=1` | off | Makes a zero-interval `KeDelayExecutionThread` sleep for 1 ms instead of using `SwitchToThread`, so a guest worker can progress while another guest thread polls its completion. Invalid values abort. | `kernel_thread.c` |
+ | `RECOMP_CS_MODE=single` | per-section | Backs every critical section with one host lock. | `kernel_rtl.c` |
+ | `RECOMP_CS_MODE=guest` | per-section | Runs critical sections on the guest's own structure (state at +0x10), falling back to the shadow for ones that don't read as critical sections. | `kernel_rtl.c` |
+ | `RECOMP_WORKERS` | off | Runs requests of the title's worker threads inline. A bisecting tool for concurrency bugs. | `kernel_bridge.c` |
+diff --git a/src/kernel/kernel_thread.c b/src/kernel/kernel_thread.c
+index e92e47c..f0c0b19 100644
+--- a/src/kernel/kernel_thread.c
++++ b/src/kernel/kernel_thread.c
+@@ -161,6 +161,35 @@ NTSTATUS __stdcall xbox_PsTerminateSystemThread(NTSTATUS ExitStatus)
+  * Maps to: SleepEx (for alertable waits) or Sleep
+  * ============================================================================ */
+ 
++static INIT_ONCE g_zero_delay_once = INIT_ONCE_STATIC_INIT;
++static int g_zero_delay_sleep;
++
++static BOOL CALLBACK zero_delay_init(PINIT_ONCE once, PVOID parameter, PVOID *context)
++{
++    const char *value = getenv("RECOMP_ZERO_DELAY_SLEEP");
++
++    (void)once;
++    (void)parameter;
++    (void)context;
++
++    if (!value || !*value || strcmp(value, "0") == 0)
++        return TRUE;
++    if (strcmp(value, "1") != 0) {
++        fprintf(stderr,
++            "[KERNEL] invalid RECOMP_ZERO_DELAY_SLEEP=%s (expected 0 or 1)\n",
++            value);
++        fflush(stderr);
++        abort();
++    }
++
++    g_zero_delay_sleep = 1;
++    fprintf(stderr,
++        "  [KERNEL] zero-delay waits sleep for 1 ms "
++        "(RECOMP_ZERO_DELAY_SLEEP=1)\n");
++    fflush(stderr);
++    return TRUE;
++}
++
+ NTSTATUS __stdcall xbox_KeDelayExecutionThread(
+     KPROCESSOR_MODE WaitMode,
+     BOOLEAN Alertable,
+@@ -174,7 +203,16 @@ NTSTATUS __stdcall xbox_KeDelayExecutionThread(
+         return STATUS_INVALID_PARAMETER;
+ 
+     if (Interval->QuadPart == 0) {
+-        /* Zero interval = yield the thread's time slice */
++        InitOnceExecuteOnce(&g_zero_delay_once, zero_delay_init, NULL, NULL);
++        if (g_zero_delay_sleep) {
++            if (Alertable && SleepEx(1, TRUE) == WAIT_IO_COMPLETION)
++                return STATUS_ALERTED;
++            if (!Alertable)
++                Sleep(1);
++            return STATUS_SUCCESS;
++        }
++
++        /* Zero interval = yield to a ready thread on this processor. */
+         SwitchToThread();
+         return STATUS_SUCCESS;
+     }
+diff --git a/tests/kernel_zero_delay/CMakeLists.txt b/tests/kernel_zero_delay/CMakeLists.txt
+new file mode 100644
+index 0000000..9e09b50
+--- /dev/null
++++ b/tests/kernel_zero_delay/CMakeLists.txt
+@@ -0,0 +1,12 @@
++cmake_minimum_required(VERSION 3.20)
++project(kernel_zero_delay_test C)
++set(CMAKE_C_STANDARD 11)
++add_subdirectory(../.. runtime)
++add_executable(kernel_zero_delay_test test_main.c)
++target_include_directories(kernel_zero_delay_test PRIVATE ../../src/kernel)
++target_link_libraries(kernel_zero_delay_test PRIVATE xboxrecomp)
++enable_testing()
++add_test(NAME kernel_zero_delay_test COMMAND kernel_zero_delay_test)
++set_tests_properties(kernel_zero_delay_test PROPERTIES
++    ENVIRONMENT "RECOMP_GUEST_CPUS=one;RECOMP_ZERO_DELAY_SLEEP=1"
++    TIMEOUT 5)
+diff --git a/tests/kernel_zero_delay/test_main.c b/tests/kernel_zero_delay/test_main.c
+new file mode 100644
+index 0000000..231b7cd
+--- /dev/null
++++ b/tests/kernel_zero_delay/test_main.c
+@@ -0,0 +1,115 @@
++/*
++ * A zero-delay KeDelayExecutionThread call is commonly used to poll work
++ * queued to another guest thread. SwitchToThread can immediately resume the
++ * poller when no other thread is ready at that instant; a short configured
++ * sleep gives a waking worker a bounded opportunity to make progress.
++ */
++#include "kernel.h"
++
++#include <stdio.h>
++
++typedef void (*recomp_func_t)(void);
++recomp_func_t recomp_lookup(uint32_t xbox_va);
++recomp_func_t recomp_lookup(uint32_t xbox_va) { (void)xbox_va; return NULL; }
++recomp_func_t recomp_lookup_manual(uint32_t xbox_va);
++recomp_func_t recomp_lookup_manual(uint32_t xbox_va) { (void)xbox_va; return NULL; }
++
++static volatile LONG s_started;
++static volatile LONG s_done;
++static HANDLE s_job_ready;
++
++static DWORD WINAPI worker_main(LPVOID unused)
++{
++    (void)unused;
++    xbox_GuestThreadPin("zero-delay worker");
++    SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_LOWEST);
++    InterlockedExchange(&s_started, 1);
++    WaitForSingleObject(s_job_ready, INFINITE);
++    InterlockedExchange(&s_done, 1);
++    return 0;
++}
++
++int main(void)
++{
++    LARGE_INTEGER zero;
++    LARGE_INTEGER frequency;
++    LARGE_INTEGER before;
++    LARGE_INTEGER after;
++    HANDLE worker;
++    int old_priority;
++    unsigned int calls = 0;
++    int failures = 0;
++    double backoff_ms;
++
++    setvbuf(stdout, NULL, _IONBF, 0);
++    zero.QuadPart = 0;
++    QueryPerformanceFrequency(&frequency);
++    QueryPerformanceCounter(&before);
++    for (calls = 0; calls < 8; calls++)
++        xbox_KeDelayExecutionThread(KernelMode, FALSE, &zero);
++    QueryPerformanceCounter(&after);
++    backoff_ms = (double)(after.QuadPart - before.QuadPart) * 1000.0 /
++                 (double)frequency.QuadPart;
++    if (backoff_ms >= 4.0) {
++        printf("  configured waits provide a bounded scheduler backoff    "
++               "PASS -- %.3f ms\n", backoff_ms);
++    } else {
++        printf("  configured waits provide a bounded scheduler backoff    "
++               "FAIL -- 8 waits took %.3f ms\n", backoff_ms);
++        failures++;
++    }
++
++    xbox_GuestThreadPin("zero-delay poller");
++    s_job_ready = CreateEvent(NULL, TRUE, FALSE, NULL);
++    if (!s_job_ready) {
++        puts("  create queued-work event                               FAIL");
++        return 1;
++    }
++    worker = CreateThread(NULL, 0, worker_main, NULL, 0, NULL);
++    if (!worker) {
++        puts("  create lower-priority guest worker                       FAIL");
++        CloseHandle(s_job_ready);
++        return 1;
++    }
++
++    while (!InterlockedCompareExchange(&s_started, 0, 0))
++        Sleep(1);
++    old_priority = GetThreadPriority(GetCurrentThread());
++    SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_HIGHEST);
++    SetEvent(s_job_ready);
++
++    calls = 0;
++    while (!InterlockedCompareExchange(&s_done, 0, 0) && calls < 1000) {
++        NTSTATUS status = xbox_KeDelayExecutionThread(
++            KernelMode, FALSE, &zero);
++        if (status != STATUS_SUCCESS) {
++            printf("  zero-delay wait returns success                         "
++                   "FAIL -- status 0x%08lX\n", (unsigned long)status);
++            failures++;
++            break;
++        }
++        calls++;
++    }
++    SetThreadPriority(GetCurrentThread(), old_priority);
++
++    if (InterlockedCompareExchange(&s_done, 0, 0)) {
++        printf("  lower-priority worker completes under zero-delay poll    "
++               "PASS -- %u wait(s)\n", calls);
++    } else {
++        printf("  lower-priority worker completes under zero-delay poll    "
++               "FAIL -- still starved after %u waits\n", calls);
++        failures++;
++    }
++
++    if (WaitForSingleObject(worker, 1000) != WAIT_OBJECT_0) {
++        puts("  worker exits after completing the queued job             FAIL");
++        failures++;
++    } else {
++        puts("  worker exits after completing the queued job             PASS");
++    }
++    CloseHandle(worker);
++    CloseHandle(s_job_ready);
++
++    printf("\n%d failure(s)\n", failures);
++    return failures ? 1 : 0;
++}

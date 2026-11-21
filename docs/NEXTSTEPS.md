@@ -4,10 +4,10 @@ The rendering architecture is in [RENDERING.md](RENDERING.md),
 the performance plan is in [PERFPLAN.md](PERFPLAN.md), measured
 results are in [FINDINGS.md](FINDINGS.md), and framework work is
 tracked in [UPSTREAM.md](UPSTREAM.md). The current framework pin is xboxrecomp
-v0.18.0 at `37b61d589168adee3680fabd51805ee81427bf07` with 42 local patches
+v0.18.0 at `37b61d589168adee3680fabd51805ee81427bf07` with 43 local patches
 and no separate selected upstream commits. Its reconstructed tree is
-`3fda068cfc85573c49b93230ea850298d4c948e1`. The clean patch replay and
-toolkit verification passed; focused v0.18 framework fixtures passed 31
+`8938ce1b635e25832539a0bc6500b2fe2fa14565`. The clean patch replay and
+toolkit verification passed; focused v0.18 framework fixtures passed 32
 CTests, the FCMOV/WBINVD fixtures passed nine tests, and the project DSP
 memory and lifecycle fixtures passed. Retail regeneration, exact
 discovery/translation comparison, and bounded one-core, audio-on CPU/D3D11
@@ -114,6 +114,18 @@ and completed one stationary interval at 14.100 flips/s. The run reproduced
 the pre-world full-range conflict and is a validation smoke, not performance
 evidence.
 
+The first no-capture renderer campaign on that executable is invalid. Its
+first D3D11 and Vulkan attempts completed, but attempt 3 reproduced the
+pre-movie two-flip, zero-draw loader poll and broke the alternating sequence.
+Do not analyze or combine its first pair with later runs. Patch 0047's
+37,827,072-byte replacement has SHA-256
+`f717c74980d81e506272f71f7c3135ebd68017d90753cb783d0e64060d9ffc7a`;
+three independent no-retry D3D11 boots reached movie draws and one continued
+through operator-confirmed Basic Controls. Restart the six-attempt campaign
+from D3D11 run 1 with this exact executable, four raster threads, one guest
+CPU, the zero-delay backoff, audio off, mips and asynchronous visibility on,
+manual readiness, no profiling, no capture and no adaptive panel presses.
+
 The preceding v0.17 toolkit used selected #314/#319/#320 commits and 43
 local patches, with tree `3e3ae3600802d2bf4446d86fc546322d60849047`.
 The framework tools on that earlier tree reported 995 passed, 2 skipped and 134
@@ -185,12 +197,24 @@ but it has no matched rendered-output or performance result. The earlier
 `20261111-002138-a9dbc18a` generation remains the exact xemu-matched
 reference because the reference comparison predates the integrated pipeline.
 
-The Loading lock is now traced to the title loader's zero-delay guest-worker
-poll. Brute Force selects the existing `RECOMP_GUEST_CPUS=one` framework
-control by default. Four bounded one-core boots reached movie draws,
-including three default-path repetitions at 4.5x in 7.27-7.41 seconds. This
-is bounded startup evidence, not long-session reliability or a performance
-result. Do not restart the closed texture-index campaign.
+The Loading lock is traced to the title loader's zero-delay guest-worker
+poll. The earlier `RECOMP_GUEST_CPUS=one` default passed four bounded boots
+but did not eliminate the race: the third attempt of the first no-capture
+D3D11/Vulkan campaign again stopped at two flips and zero draws while ordinal
+99 dominated roughly one billion kernel calls. That campaign is invalid and
+remains stopped.
+
+Local framework patch 0047 now adds default-off
+`RECOMP_ZERO_DELAY_SLEEP=1`; Brute Force selects it together with one-core
+guest affinity. The focused producer/worker fixture passes with the option
+and deliberately fails its backoff assertion without it. Rebuilt executable
+`f717c74980d81e506272f71f7c3135ebd68017d90753cb783d0e64060d9ffc7a`
+completed three no-retry D3D11 startup checks: first movie draws arrived at
+6.787, 7.329 and 7.232 seconds, and the operator-confirmed run reached Basic
+Controls and completed its stationary interval. This reopens a fresh
+six-attempt renderer diagnostic; it is not long-session reliability or
+performance evidence. Do not restart the closed texture-index campaign or
+reuse the interrupted renderer sequence.
 
 The accepted default and visibility performance baselines still use old
 generation `20261103-145850-21e3091e` on tree
@@ -1300,8 +1324,12 @@ for live backend switching is outside this workstream.
    Controls after clean guest-surface writes stopped being overwritten.
    Investigate the remaining `0x80000000` staged-memory conflict through the
    generic color-DMA/lifetime gap; do not change the conservative GPU-wins
-   policy. Run a no-capture same-build A/B/A diagnostic before deciding
-   whether direct raw-stream fetch is needed. Continue covering menus,
+   policy. The first no-capture same-build A/B/A attempt set was invalidated
+   by the pre-movie loader poll on run 3 and must not be reused. The
+   default-off framework zero-delay backoff now passes its focused fixture
+   and three no-retry D3D11 startup checks; restart a fresh six-attempt
+   diagnostic before deciding whether direct raw-stream fetch is needed.
+   Continue covering menus,
    movies, fades, PVIDEO and CPU fallback without weakening synchronization.
    The mip fixture is complete; repeat its retail comparison only with
    reviewed target-scene readiness because the first legacy attempt entered

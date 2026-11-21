@@ -67,10 +67,15 @@ absolute game directory can also be passed as its only argument. The `run`
 command starts each boot in a fresh directory under that generation's
 `analysis\runs\...\boots` so the toolkit's kernel log is not overwritten. It
 pins guest title threads to one allowed host core by default, matching the
-console's single-CPU scheduling assumption and preventing the startup loader's
-zero-delay polling thread from outrunning its worker. GPU, APU and other host
-service threads remain unpinned. Set `RECOMP_GUEST_CPUS=all` before launch
-only for a controlled comparison; an explicit value overrides the default.
+console's single-CPU scheduling assumption. It also selects
+`RECOMP_ZERO_DELAY_SLEEP=1`, a default-off framework option that turns a
+zero-interval `KeDelayExecutionThread` yield into a 1 ms sleep. This bounded
+backoff prevents the startup loader's polling thread from repeatedly
+outrunning its worker. GPU, APU and other host service threads remain
+unpinned. Set `RECOMP_GUEST_CPUS=all` or `RECOMP_ZERO_DELAY_SLEEP=0` before
+launch only for a controlled comparison; an explicit value overrides either
+title default. Other zero-delay values stop with a configuration diagnostic
+when the call is first used.
 The command also enables the toolkit's vblank and unresolved-stub diagnostics
 unless the corresponding `RECOMP_VBLANK` or `RECOMP_STUB_LOG` environment
 variable is already set. `run --graphics` explicitly enables the upstream pushbuffer

@@ -12,9 +12,9 @@ in [UPSTREAM.md](./UPSTREAM.md).
 ## 2026-11-20 v0.18 framework and retail acceptance
 
 The repository pins xboxrecomp release v0.18.0 at
-`37b61d589168adee3680fabd51805ee81427bf07` with 42 local patches and no
+`37b61d589168adee3680fabd51805ee81427bf07` with 43 local patches and no
 separately selected upstream commits. The expected patched tree is
-`3fda068cfc85573c49b93230ea850298d4c948e1`. Patch 0030 now passes mirror
+`8938ce1b635e25832539a0bc6500b2fe2fa14565`. Patch 0030 now passes mirror
 physical names unchanged to the APU resolver and uses cached
 last-translation inference for low image and stack names, which remain
 unaliased, and for all low names when aliases are unavailable. This fallback
@@ -24,12 +24,13 @@ measurements with merged #341 pacing. Patch 0041 preserves the release's
 heap-split, address-order and reused-page protection behavior; patch 0042
 retains both #332's clear/present case and local diagnostic registration.
 
-An independent clean release checkout applied all 42 patches to the expected
-tree, and `python tools\toolkit.py --verify` passed on the installed checkout.
-Eight focused framework groups passed 31 CTests: `apu_phys` 2, `apu_monitor`
-3, `xaudio2` 1, `memory_regressions` 6, `nv2a_ffp_backend` 6,
-`nv2a_pfb_flush` 7, `kernel_eeprom_settings` 5 and `kernel_physical_address`
-1. The release FCMOV and local WBINVD lifter fixtures passed nine tests;
+An independent clean release checkout applies all 43 patches to the expected
+tree, and `python tools\toolkit.py --verify` passes on the installed
+checkout. Nine focused framework groups pass 32 CTests: `apu_phys` 2, `apu_monitor` 3,
+`xaudio2` 1, `memory_regressions` 6, `nv2a_ffp_backend` 6,
+`nv2a_pfb_flush` 7, `kernel_eeprom_settings` 5, `kernel_physical_address` 1
+and `kernel_zero_delay` 1. The release FCMOV and local WBINVD lifter fixtures
+passed nine tests;
 toolkit setup passed four, and synthetic build/generation metadata checks
 passed five, including rejection of the old toolkit base. The project DSP
 memory fixture passed six 64/128 MB alias, fallback and window-pinned modes,
@@ -741,7 +742,11 @@ promoted into a performance claim.
   `60c232ee1206e99b8587d7b85329710dc48786bc9835bede19fbfa68347c2705`.
 - Current supported generation `20261120-163420-f9e3b4ed` regenerates the
   same retail XBE on v0.18 toolkit tree
-  `3fda068cfc85573c49b93230ea850298d4c948e1`. Its build, discovery,
+  `3fda068cfc85573c49b93230ea850298d4c948e1`. Runtime-only patch 0047 then
+  advances the supported build tree to
+  `8938ce1b635e25832539a0bc6500b2fe2fa14565` without changing recompiler or
+  template inputs; the generation's translated sources remain valid under
+  the project's runtime-only compatibility check. Its build, discovery,
   generated-source and bounded CPU/D3D11 acceptance evidence is recorded in
   the v0.18 milestone above.
 - Preceding v0.17 supported generation `20261113-214800-12924697` regenerates the same
@@ -3135,12 +3140,12 @@ scheduling and an unpinned polling guest can pathologically outpace the
 guest worker. The exact mechanism of each historical indefinite failure is
 still an inference: no missed wake or corrupt queue entry was captured.
 
-Four bounded boots tested the existing generic one-core guest-affinity
-control. An explicit `RECOMP_GUEST_CPUS=one` run reached its first movie draw
-after 6.60 seconds. Ordinal 99 was below the six ranks printed by each
-periodic summary and no guest thread reached the trace's one-million-call
-threshold. Three more runs exercised the new title default at 4.5x with a
-fixed 15-second watchdog:
+Four bounded boots initially tested the existing generic one-core
+guest-affinity control. An explicit `RECOMP_GUEST_CPUS=one` run reached its
+first movie draw after 6.60 seconds. Ordinal 99 was below the six ranks
+printed by each periodic summary and no guest thread reached the trace's
+one-million-call threshold. Three more runs exercised the title default at
+4.5x with a fixed 15-second watchdog:
 
 | Run | First movie draw | Flip | One-million-call trace |
 | --- | ---: | ---: | --- |
@@ -3148,26 +3153,69 @@ fixed 15-second watchdog:
 | 2 | 7.407 s | 19 | none |
 | 3 | 7.270 s | 17 | none |
 
-All three logs confirm the default one-core selection. Their exit code 3 is
-the expected fixed watchdog termination after 15 seconds, not a hang; frame
-CSV progression and the first nonzero draw establish the bounded success.
-These are startup smokes, not alternating performance measurements and not
-proof of long-session reliability.
+All three logs confirmed the default one-core selection. Their exit code 3
+was the expected fixed watchdog termination after 15 seconds, not a hang;
+frame CSV progression and the first nonzero draw established bounded success.
+Those runs did not establish reliability. On 2026-11-20, attempt 3 of the
+first no-capture D3D11/Vulkan campaign again stopped before the movie at two
+flips and zero draws. Vblank continued, title threads remained on one host
+core, and ordinal 99 dominated roughly one billion kernel calls. The first
+D3D11/Vulkan pair is therefore part of an interrupted diagnostic, not an
+accepted comparison.
 
-Two alternatives were rejected. `RECOMP_GUEST_LOCK=1` reached a movie draw
-only after 15.72 seconds in its bounded diagnostic. A temporary framework
-experiment that immediately handed off a zero-delay call when another guest
-waiter existed passed its focused synthetic fixture but still needed
-12.36 seconds and millions of retail poll calls. That patch was removed and
-the expected framework tree restored. No framework change remains:
-sp00nznet/xboxrecomp#192 already supplies `RECOMP_GUEST_CPUS=one`.
+Two earlier alternatives remain rejected. `RECOMP_GUEST_LOCK=1` reached a
+movie draw only after 15.72 seconds in its bounded diagnostic. A temporary
+framework experiment that immediately handed off a zero-delay call when
+another guest waiter existed passed its focused synthetic fixture but still
+needed 12.36 seconds and millions of retail poll calls. That experiment was
+removed. One-core affinity alone is now also rejected as a sufficient startup
+gate, though it remains selected to model the console's single guest CPU.
 
-Brute Force now selects that existing control by default in both direct
-executable startup and prepared `build.py` environments. An explicit setting,
-including `RECOMP_GUEST_CPUS=all`, is preserved for controlled comparisons.
+Local framework patch 0047 adds default-off
+`RECOMP_ZERO_DELAY_SLEEP=1`. A zero-interval
+`KeDelayExecutionThread` then uses a 1 ms `Sleep`/`SleepEx` backoff instead
+of `SwitchToThread`; unset, empty or `0` preserves the framework default, and
+other values abort with a configuration diagnostic. Brute Force selects the
+option in direct startup and prepared `build.py` environments while
+preserving explicit overrides. Benchmark manifests record it. The generic
+`kernel_zero_delay` fixture pins a higher-priority poller and lower-priority
+queued worker to one core, verifies eight configured waits provide a
+measurable backoff, and verifies the worker completes. The enabled CTest
+passes; running the same executable with the option disabled deliberately
+fails the backoff assertion while the worker may still complete.
+
+Rebuilt 37,827,072-byte executable
+`f717c74980d81e506272f71f7c3135ebd68017d90753cb783d0e64060d9ffc7a`
+then completed three no-retry D3D11 startup checks with one guest CPU, four
+raster threads, audio off, mips enabled and asynchronous visibility:
+
+| Check | First movie draw | Flip | Scope |
+| --- | ---: | ---: | --- |
+| Manual route | 6.787 s | 17 | operator-confirmed Basic Controls; stationary interval completed |
+| Bounded boot 2 | 7.329 s | 16 | 15-second watchdog |
+| Bounded boot 3 | 7.232 s | 17 | 15-second watchdog |
+
+The manual run recorded the expected backoff diagnostic, reached the
+operator-confirmed state after 191.328 wall seconds, completed 120 stationary
+flips at 25.362 flips/s, and exited through non-forced console control. That
+flip rate is a single startup-validation run, not performance evidence. The
+two bounded boots exited with the expected watchdog code 3. These checks
+support restarting the complete six-attempt renderer diagnostic, but they do
+not establish long-session reliability.
+
+Read-only overlap was refreshed on 2026-11-20 across all 500 available pull
+requests, listed issues and tracking index sp00nznet/xboxrecomp#184. Merged
+sp00nznet/xboxrecomp#192 provides one-core affinity and the broader opt-in
+guest scheduler but no zero-delay wait backoff. Closed
+sp00nznet/xboxrecomp#208 overlaps that scheduler; merged
+sp00nznet/xboxrecomp#226 changes alertable APC delivery rather than the
+non-alertable zero-duration path. No exact issue or pull request was found,
+and no upstream interaction was performed.
+
 Only guest title threads are pinned; GPU, APU and other host service threads
-remain free. The temporary trace hook is not part of clean supported
-generation `20261113-214800-12924697`.
+remain free. The temporary title trace hook is not part of the clean
+supported generation. The new framework behavior is opt-in and contains no
+Brute Force address or guest structure.
 
 ### Material index-word census and default-off run executor
 

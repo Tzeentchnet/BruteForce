@@ -89,6 +89,7 @@ and [packed-alias investigation](./FINDINGS.md#packed-depthstencil-aliases-and-s
 | Staged pushbuffer walking and PGRAPH handling | [patch 0008](../patches/xboxrecomp/0008-experimental-pgraph-and-staged-walker.patch), [recomp_manual.c](../src/recomp_manual.c) |
 | Bounded PFB acknowledgement, idle waiting and guarded PUT segments | [patch 0045](../patches/xboxrecomp/0045-bounded-nv2a-segments-and-waits.patch), [recomp_manual.c](../src/recomp_manual.c) |
 | Default-off exact index-word run dispatch | [patch 0046](../patches/xboxrecomp/0046-index-word-runs.patch), [bench.py](../tools/bench.py) |
+| Default-off zero-delay guest-poll backoff | [patch 0047](../patches/xboxrecomp/0047-zero-delay-sleep.patch), [main.c](../src/main.c), [build.py](../tools/build.py) |
 | Extended backend interface and vertex-program batches | [patch 0016](../patches/xboxrecomp/0016-extended-render-backend.patch), [patch 0017](../patches/xboxrecomp/0017-gpu-vertex-programs.patch) |
 | D3D11 device, surfaces, state, draws, queries and readback | [d3d11_backend.c](../src/gpu/d3d11_backend.c) |
 | Vulkan loader, device, surfaces, base/extended/VSH draws, combiners, queries and readback | [vulkan_backend.c](../src/gpu/vulkan_backend.c), [vulkan_base.hlsl](../src/gpu/vulkan_base.hlsl) |
@@ -560,6 +561,10 @@ generic seams; stages 6-9 remain open.
    decide whether direct raw-stream fetch is required, then prototype and test the
    presentation-source handoff, scaling, window clip and native host
    presentation.
+   The first no-capture D3D11/Vulkan sequence was invalidated by a recurring
+   pre-movie guest-worker poll on run 3. A default-off framework zero-delay
+   backoff now passes its focused fixture and three no-retry D3D11 startup
+   checks; restart all six attempts rather than reusing the interrupted pair.
    Compare matched frames with CPU and D3D11 and exercise NVIDIA, AMD and
    Intel where available. The current capture closes one stationary state,
    not broad parity.

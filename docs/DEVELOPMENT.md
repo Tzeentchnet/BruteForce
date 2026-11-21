@@ -106,7 +106,7 @@ from a different framework path:
 foreach ($fixture in @("apu_phys", "apu_monitor", "xaudio2",
                        "memory_regressions", "nv2a_ffp_backend",
                        "nv2a_pfb_flush", "kernel_eeprom_settings",
-                       "kernel_physical_address")) {
+                       "kernel_physical_address", "kernel_zero_delay")) {
   $build = "build\v018-canonical-$fixture"
   cmake -S ".deps\xboxrecomp\tests\$fixture" -B $build `
     -G "Visual Studio 17 2022" -A x64
@@ -126,6 +126,13 @@ python -m pytest -q -p no:cacheprovider `
   tests\test_build.py::test_run_rejects_an_executable_built_against_another_toolkit
 python tools\toolkit.py --verify
 ```
+
+`kernel_zero_delay` runs a same-core producer/worker case with a
+higher-priority poller and verifies that `RECOMP_ZERO_DELAY_SLEEP=1` adds a
+measurable scheduler backoff while the queued worker completes. Running its
+executable with `RECOMP_ZERO_DELAY_SLEEP=0` intentionally fails the backoff
+assertion; this proves the fixture distinguishes the new path from the
+existing `SwitchToThread` default.
 
 The project-owned external DSP fixture runs the real scatter-gather wrapper
 against synthetic 64/128 MB guest mappings, including mirror and fallback
@@ -156,6 +163,7 @@ rebuilt without game data:
 $fixtures = @(
   "display_awake",
   "kernel_eeprom_settings",
+  "kernel_zero_delay",
   "memory_regressions",
   "nv2a_ffp_backend",
   "nv2a_gpu_audit",

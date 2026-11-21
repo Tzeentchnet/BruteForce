@@ -45,8 +45,8 @@ As of a read-only 2026-11-20 review, upstream release v0.18.0 is at
 after v0.17.0 and reports 1,023 tests passed, one skipped, and 6,368
 conformance vectors with no mismatches. The review was read-only; no upstream
 changes or communications were made. The project now pins that release with
-42 local patches and no separate upstream cherry-picks, producing tree
-`3fda068cfc85573c49b93230ea850298d4c948e1`. Clean replay, focused fixtures,
+43 local patches and no separate upstream cherry-picks, producing tree
+`8938ce1b635e25832539a0bc6500b2fe2fa14565`. Clean replay, focused fixtures,
 exact retail regeneration review, and bounded one-core, audio-on CPU and
 D3D11 Basic Controls smokes pass. This accepts the local base upgrade; it is
 not a performance, listening, movement, Accurate-DSP or long-session result.
@@ -2202,7 +2202,9 @@ own GPU back end, an extended interface for it, and its own pacing fixes.
     byte through zero-delay `KeDelayExecutionThread`. On the console that
     yield and the worker share one CPU; on an unpinned multicore host the
     poll can execute hundreds of millions of times and intermittently never
-    reaches the first movie.
+    reaches the first movie. Pinning both threads to one host core reduces but
+    does not eliminate the failure because `SwitchToThread` can immediately
+    resume the poller when the worker is not ready at that instant.
     *Evidence:* retained failures stopped at 12-14 zero-draw flips while
     vblank and host/device threads continued. The strongest earlier failure
     logged 545,629,948 ordinal-99 calls out of 551,340,537 total. A bounded
@@ -2212,36 +2214,49 @@ own GPU back end, an extended interface for it, and its own pacing fixes.
     `sub_00264620`, then polls byte `+5` until the worker clears it. A
     successful unpinned boot still reached 14,211,264 ordinal-99 calls in its
     last pre-movie periodic summary. With `RECOMP_GUEST_CPUS=one`, ordinal 99
-    fell below the six reported ranks and the first movie draw arrived in
-    6.60 seconds. Three additional 15-second boots using the new title default
-    all reached movie draws in 7.27-7.41 seconds and produced no bounded trace
-    line at the one-million-call threshold.
-    *Change:* no framework patch is added. Brute Force now defaults
-    `RECOMP_GUEST_CPUS=one` in both direct startup and `build.py`, while an
-    explicit environment value such as `all` remains an override. The
-    framework already supplies the generic pin and leaves non-guest GPU, APU
-    and service threads unpinned. A temporary immediate-handoff scheduler
-    experiment passed its focused fixture but did not remove the retail poll,
-    so it was discarded rather than retained as a speculative framework fix.
-    *Tests:* project build tests cover the default and explicit override;
-    benchmark tests require the setting in recorded runtime controls. Four
-    bounded one-core retail boots reached movie draws, including the isolated
-    control and three default-path repetitions. These short runs establish
-    startup progress, not gameplay reliability or a performance result.
-    *Overlap:* refreshed on 2026-11-13. Merged
+    fell below the six reported ranks and four bounded boots reached movie
+    draws. That evidence was not sufficient: on 2026-11-20 the third attempt
+    of a no-capture renderer campaign again stopped at two flips and zero
+    draws while ordinal 99 dominated roughly one billion calls. The
+    interrupted renderer campaign is invalid.
+    *Change:* local patch 0047 adds default-off
+    `RECOMP_ZERO_DELAY_SLEEP=1`. Zero-interval `KeDelayExecutionThread` calls
+    use a 1 ms `Sleep`/`SleepEx` backoff; unset, empty or `0` retains
+    `SwitchToThread`, and invalid values abort. Brute Force selects the option
+    together with `RECOMP_GUEST_CPUS=one` in direct startup and `build.py`,
+    while explicit values remain overrides. The patch contains no title
+    address or guest layout. A prior immediate-handoff experiment did not
+    remove the retail poll and remains discarded.
+    *Tests:* new `tests/kernel_zero_delay` pins a higher-priority poller and
+    lower-priority queued worker to one core. It verifies a measurable
+    configured backoff and worker completion; disabling the option
+    deliberately fails the backoff assertion. Project tests cover both title
+    defaults, explicit overrides and benchmark recording. Rebuilt executable
+    `f717c74980d81e506272f71f7c3135ebd68017d90753cb783d0e64060d9ffc7a`
+    reached first movie draws at 6.787, 7.329 and 7.232 seconds in three
+    no-retry D3D11 checks; the first continued through operator-confirmed Basic
+    Controls. These short runs reopen the renderer diagnostic but do not prove
+    long-session reliability or performance.
+    *Overlap:* refreshed on 2026-11-20 across all 500 available pull requests,
+    listed issues and tracking index
+    [sp00nznet/xboxrecomp#184](https://github.com/sp00nznet/xboxrecomp/pull/184).
+    Merged
     [sp00nznet/xboxrecomp#192](https://github.com/sp00nznet/xboxrecomp/pull/192)
     already provides `RECOMP_GUEST_CPUS=one`, the optional guest scheduler and
-    their synthetic fixtures; the tracking index
-    [sp00nznet/xboxrecomp#184](https://github.com/sp00nznet/xboxrecomp/pull/184)
-    names those switches. Searches found no open `KeDelayExecutionThread`
-    issue or PR and no newer competing guest-scheduler change. No upstream
-    interaction was performed.
-    *Before filing:* no new submission is proposed. If another title shows the
-    same failure, add a framework integration fixture for its zero-delay
-    producer/worker pattern, compare pinning with the guest scheduler, and
-    coordinate with the merged scheduler owner before changing defaults.
-    *Status:* existing merged framework capability selected by a title-side
-    default; bounded retail startup validation passed.
+    their synthetic fixtures. Closed
+    [sp00nznet/xboxrecomp#208](https://github.com/sp00nznet/xboxrecomp/pull/208)
+    overlaps that scheduler. Merged
+    [sp00nznet/xboxrecomp#226](https://github.com/sp00nznet/xboxrecomp/pull/226)
+    changes alertable file-I/O APC delivery, not this non-alertable
+    zero-duration path. Searches found no exact competing issue or pull
+    request. No upstream interaction was performed.
+    *Before filing:* validate another title with the producer/worker pattern,
+    test POSIX timing tolerance, compare the option with the merged guest
+    scheduler, refresh overlap and coordinate with that scheduler's owner.
+    Request explicit user approval before any issue, pull request or comment.
+    *Status:* default-off local framework candidate selected by this title;
+    synthetic validation and three bounded retail startup checks pass. Not
+    filed.
 
 50. **Use a Vulkan exemplar to evolve the official backend and host
     presentation contracts.**

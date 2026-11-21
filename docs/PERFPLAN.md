@@ -65,6 +65,18 @@ scene, script, guest-CPU setting, thread count and options. That diagnostic
 can guide the direct-raw-fetch decision but cannot satisfy M5 before native
 presentation and the remaining parity gates.
 
+The first such sequence is invalid and stopped: D3D11 run 1 and Vulkan run 1
+completed, but D3D11 run 2 reproduced the pre-movie loader starvation at two
+flips and zero draws. Its first pair must not be combined with later runs.
+Local framework patch 0047 adds the default-off
+`RECOMP_ZERO_DELAY_SLEEP=1` backoff selected by this title. Its focused
+producer/worker fixture passes, and rebuilt executable
+`f717c74980d81e506272f71f7c3135ebd68017d90753cb783d0e64060d9ffc7a`
+reached movie draws in three no-retry D3D11 checks; one continued through
+operator-confirmed Basic Controls. Restart the complete six-attempt sequence
+on that executable with the backoff recorded among the fixed controls. These
+startup checks and the stopped sequence are not performance evidence.
+
 Before the runtime-only Phase 4 fix, integrated v0.17 Release generation
 `20261111-084222-7bdb6e56`'s codegen-identical executable completed one CPU
 and one D3D11 scripted movement bring-up without retries. The post-deadlock

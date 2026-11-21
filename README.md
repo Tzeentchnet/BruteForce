@@ -51,9 +51,11 @@ This is an experimental Windows release for the North American retail game:
 - Experimental rendering and performance options remain default-off unless
   explicitly documented otherwise.
 - The pinned framework is xboxrecomp v0.18.0. Its clean patch replay, focused
-  synthetic fixtures, retail regeneration, and bounded one-core, audio-on CPU
-  and D3D11 Basic Controls smokes pass. This is bring-up evidence, not
-  full-game correctness or a performance result.
+  synthetic fixtures, retail regeneration, and bounded CPU and D3D11 Basic
+  Controls smokes pass. Brute Force also enables a default-off framework
+  option that gives zero-delay guest polls a 1 ms scheduler backoff; its
+  producer/worker fixture and three no-retry D3D11 startup checks pass. This
+  is bring-up evidence, not full-game correctness or a performance result.
 
 Detailed evidence and open gates live in
 [current findings](docs/FINDINGS.md), [next steps](docs/NEXTSTEPS.md),

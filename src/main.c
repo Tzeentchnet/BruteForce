@@ -328,7 +328,9 @@ int main(int argc, char **argv)
         return 2;
     if (!configure_audio(&audio_requested))
         return 2;
-    if ((getenv("RECOMP_GUEST_CPUS") == NULL &&
+    if ((getenv("RECOMP_ZERO_DELAY_SLEEP") == NULL &&
+         _putenv_s("RECOMP_ZERO_DELAY_SLEEP", "1") != 0) ||
+        (getenv("RECOMP_GUEST_CPUS") == NULL &&
          _putenv_s("RECOMP_GUEST_CPUS", "one") != 0) ||
         (getenv("RECOMP_VBLANK") == NULL && _putenv_s("RECOMP_VBLANK", "1") != 0) ||
         (getenv("RECOMP_STUB_LOG") == NULL && _putenv_s("RECOMP_STUB_LOG", "1") != 0) ||

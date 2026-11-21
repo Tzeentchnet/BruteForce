@@ -494,9 +494,11 @@ With `BRUTEFORCE_PERF_COUNTERS=1`, the paired `[PERF-VULKAN]` line reports
 interval CPU time spent in draw setup, vertex copies, texture snapshots and
 lookups, exact comparisons, uploads, descriptor/command recording, readback,
 submission waits, visibility reports and fence polling. `bench.py` stores
-those fields in `runtime_diagnostics.vulkan_intervals`, allowing one
-Vulkan-only diagnostic run to replace repeated operator-driven comparison
-runs while locating a bottleneck.
+those fields in `runtime_diagnostics.vulkan_intervals` together with
+`end_flip` and `interval_flips` from the immediately preceding
+`[GPU-Vulkan]` report. An unmatched report does not shift subsequent
+intervals. This allows one Vulkan-only diagnostic run to replace repeated
+operator-driven comparison runs while locating a bottleneck.
 
 For that single-run diagnostic, keep capture and sampling off and enable only
 the built-in counters:

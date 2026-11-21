@@ -557,20 +557,28 @@ generic seams; stages 6-9 remain open.
    stay within six channel levels. The wider-scene profile proved CPU
    vertex-program interpretation was a renderer bottleneck; the gathered
    Vulkan interpreter removes it from the sampled NV2A hot list and materially
-   improves unreviewed flip cadence. Validate matched wider-scene output and
-   decide whether direct raw-stream fetch is required, then prototype and test the
-   presentation-source handoff, scaling, window clip and native host
-   presentation.
+   improves unreviewed flip cadence. Validate matched wider-scene output, then
+   prototype and test the presentation-source handoff, scaling, window clip
+   and native host presentation.
    The first no-capture D3D11/Vulkan sequence was invalidated by a recurring
    pre-movie guest-worker poll on run 3. A default-off framework zero-delay
    backoff now passes its focused fixture and three no-retry D3D11 startup
    checks. A fresh one-run-per-renderer diagnostic then completed on the same
    executable with input dispatch matched within 78 ms. Vulkan was 12.29%
    below D3D11 in stationary flips and 63.75% below during movement, but the
-   frames remain unreviewed and this is not A/B/A evidence. Parse the existing
-   Vulkan phase counters and use one Vulkan-only counter run before deciding
-   on direct raw-stream fetch; defer a multi-run acceptance campaign until
-   native presentation makes it actionable.
+   frames remain unreviewed and this is not A/B/A evidence. The final
+   Vulkan-only counter run is now aligned to ending flips. Three complete
+   movement intervals attribute 17.59% of wall time to exact texture snapshots
+   inside draw callbacks, 13.54% to mandatory readback and 11.97% to
+   asynchronous report polling, versus 0.56% to backend gathered-vertex
+   copies. Draw, texture, wait, report-completion and fence-poll counters have
+   nested boundaries and are not additive. First remove report polls that
+   cannot complete while preserving submission and guest-visible ordering;
+   then investigate an exact texture-snapshot copy/invalidation improvement.
+   Direct raw-stream fetch remains open because framework gathering is
+   unmeasured, but backend copy time does not make it the first target. Defer
+   a multi-run acceptance campaign until native presentation makes it
+   actionable.
    Compare matched frames with CPU and D3D11 and exercise NVIDIA, AMD and
    Intel where available. The current capture closes one stationary state,
    not broad parity.
@@ -1291,6 +1299,18 @@ replace matched gameplay or original-hardware validation.
   interpretation was the immediate Vulkan throughput blocker, but the route
   and frames remain unreviewed and the runs are not alternating A/B/A or
   distinct-world-frame evidence.
+- A later Vulkan-only counter run reported 32.558 movement flips/s, rebounding
+  from 17.469 in the reduced renderer pair and confirming that neither
+  single-run rate is stable performance evidence. Line-order alignment selects
+  the 300-flip intervals ending at 8,400, 8,700 and 9,000 as wholly inside
+  movement. Their inclusive CPU timings place exact texture snapshots at
+  17.59% of wall time, mandatory readback at 13.54%, asynchronous report
+  polling at 11.97%, and backend gathered-vertex copies at 0.56%. Report
+  completion and fence polling are nested within report paths; submission
+  waits can be nested in multiple callers. Detailed timing itself adds
+  overhead. The next renderer change is therefore a semantics-preserving
+  actionability guard for asynchronous report polling, not skipped completion
+  or an immediate raw-stream conversion.
 - One native xemu Basic Controls scene is matched: the packed-stencil option
   reduces the large whole-frame brightness difference, while its unsupported
   ownership cases and title-wide behavior keep G4 open. Sun-facing, fade and

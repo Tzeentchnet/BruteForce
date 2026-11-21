@@ -280,6 +280,10 @@ def test_parse_runtime_diagnostics():
         '[GPU-D3D11] 200 flips: 600 draws (0 extended), readback 1.50 ms/flip, '
         '3 visibility reads waiting 1.5 ms, legacy texture details, '
         '0 approximate texture-hash bytes\n'
+        '[GPU-Vulkan] 300 flips, 900 draws, 300 clears, 300 readbacks, '
+        'interval 300 flips in 1500.000 ms (200.000 flips/s)\n'
+        '[GPU-Vulkan] 600 flips, 1800 draws, 600 clears, 600 readbacks, '
+        'interval 300 flips in 1600.000 ms (187.500 flips/s)\n'
         '[PERF-VULKAN] interval_ms=1500.000 draws=300 draw_ms=900.250 '
         'setup_ms=10.000 vertex_bytes=8192 vertex_ms=20.500 '
         'texture_calls=600 texture_ms=30.000 snapshots=12 snapshot_bytes=4096 '
@@ -376,6 +380,8 @@ def test_parse_runtime_diagnostics():
         "report_complete_ms": 4.0,
         "fence_polls": 30,
         "fence_poll_ms": 2.0,
+        "end_flip": 600,
+        "interval_flips": 300,
     }]
     assert diagnostics["validation_intervals"]["guest_word"][0]["rejected"] == 1
     assert diagnostics["validation_intervals"]["readable_guest_range"][0]["regions"] == 22

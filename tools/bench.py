@@ -211,6 +211,12 @@ VULKAN_PERF_RE = re.compile(
     r"[a-z_]+=[\d.]+(?: [a-z_]+=[\d.]+)*)$",
     re.MULTILINE,
 )
+VULKAN_REPORT_RE = re.compile(
+    r"^\[GPU-Vulkan\] (?P<end_flip>\d+) flips,.*"
+    r" interval (?P<interval_flips>\d+) flips in [\d.]+ ms "
+    r"\([\d.]+ flips/s\)$",
+    re.MULTILINE,
+)
 PSCACHE_EVENT_RE = re.compile(
     r'^\[GPU-PSCACHE\] (?P<kind>compiled|hit) in (?P<elapsed_ms>[\d.]+) ms$',
     re.MULTILINE,
@@ -694,12 +700,31 @@ def parse_runtime_diagnostics(text):
                                      if values["report_pending_polls"] is not None else None),
             "approx_hash_bytes": int(values["approx_hash_bytes"]),
         })
-    for match in VULKAN_PERF_RE.finditer(text):
+    pending_vulkan_report = None
+    for line in text.splitlines():
+        report = VULKAN_REPORT_RE.fullmatch(line)
+        if report:
+            pending_vulkan_report = report
+            continue
+        match = VULKAN_PERF_RE.fullmatch(line)
+        if not match:
+            pending_vulkan_report = None
+            continue
         values = (item.split("=", 1) for item in match["values"].split())
-        diagnostics["vulkan_intervals"].append({
+        interval = {
             key: (float(value) if key.endswith("_ms") else int(value))
             for key, value in values
-        })
+        }
+        interval["end_flip"] = (
+            int(pending_vulkan_report["end_flip"])
+            if pending_vulkan_report else None
+        )
+        interval["interval_flips"] = (
+            int(pending_vulkan_report["interval_flips"])
+            if pending_vulkan_report else None
+        )
+        diagnostics["vulkan_intervals"].append(interval)
+        pending_vulkan_report = None
     for match in VALIDATION_PERF_RE.finditer(text):
         values = match.groupdict()
         diagnostics["validation_intervals"][values["name"]].append({

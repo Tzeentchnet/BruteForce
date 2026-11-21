@@ -80,8 +80,21 @@ matched within 78 ms. There was no continuous capture or profiling, and all
 movement frames remain unreviewed, so these are mechanism diagnostics rather
 than world FPS or A/B/A evidence. Do not spend six more manual runs on this
 pre-presentation comparison. A single Vulkan-only
-`BRUTEFORCE_PERF_COUNTERS=1` run is the next measurement; reserve multi-run
-A/B/A collection for M5 when native presentation makes it actionable.
+`BRUTEFORCE_PERF_COUNTERS=1` run is complete; reserve multi-run A/B/A
+collection for M5 when native presentation makes it actionable. Its three
+line-order-aligned intervals wholly inside movement cover 900 flips at 32.845
+diagnostic flips/s. Complete draw callbacks consumed 30.57% of interval wall
+time, exact texture snapshots 17.59% inside those callbacks, mandatory
+readback 13.54%, asynchronous report polling 11.97%, and backend
+gathered-vertex copies 0.56%. Report-completion, fence-poll and submission-wait
+times are nested and must not be added as independent frame costs. The run's
+overall movement rate rebounded to 32.558 flips/s, versus 17.469 in the
+reduced pair, so single-run rates are explicitly unstable. Counters also add
+per-call timing overhead. Use this result only to order implementation:
+remove unactionable visibility polls without weakening synchronization,
+then investigate an exact texture-snapshot invalidation/copy improvement.
+Do not prioritize direct raw-stream fetch from backend copy time alone;
+framework-side gathering remains in the unattributed interval remainder.
 
 Before the runtime-only Phase 4 fix, integrated v0.17 Release generation
 `20261111-084222-7bdb6e56`'s codegen-identical executable completed one CPU
@@ -882,6 +895,14 @@ programs, clean CPU/PVIDEO surface preservation and one completely reviewed
 D3D11/Vulkan movement pair. It does not have direct raw-stream vertex fetch,
 scale, native presentation, broad menu/movie/fade coverage or the complete
 ordering matrix. No M1-M5 gate is met.
+
+The pre-presentation counter attribution is complete and promotes no gate.
+Its next bounded task is to avoid asynchronous visibility polls when the
+oldest report has no submitted work that can complete. The existing 0.25 ms
+flush deadline, queue backpressure, ordered guest writes, synchronous query
+drains and submission waits remain mandatory. Synthetic ordering and bounded
+submission coverage must pass before any focused retail check. No additional
+manual route is scheduled merely to repeat the baseline.
 
 The retail captures are correctness bring-up evidence only. The final
 combiner attempts ended at their 300-second watchdogs before the stationary

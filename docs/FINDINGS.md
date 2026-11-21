@@ -3251,14 +3251,60 @@ therefore diagnostic flips and whole-frame changes, not distinct-world FPS or
 an A/B/A performance result. The interrupted pre-fix pair is not combined
 with these runs.
 
-The Vulkan backend already has opt-in interval counters for draw/setup,
-vertex copies, texture snapshots/lookups/exact checks/uploads,
-descriptor/command recording, readback, waits, visibility reports and fence
-polls. `bench.py` now parses `[PERF-VULKAN]` lines into
-`runtime_diagnostics.vulkan_intervals`. One future Vulkan-only run with
-`BRUTEFORCE_PERF_COUNTERS=1` can attribute the movement gap without repeating
-the D3D11 route. Multi-run A/B/A collection is deferred until M5, after native
-presentation makes acceptance evidence actionable.
+The Vulkan backend's opt-in interval counters now have one completed
+Vulkan-only run. It used the same executable and controls, with profiling and
+capture disabled and `BRUTEFORCE_PERF_COUNTERS=1`. It reported 20.377
+stationary flips/s (14.736 1% low) and 32.558 movement flips/s (19.123 1%
+low); whole-picture movement changes were 32.584/s. This rebound from the
+pair's 17.469 movement flips/s demonstrates substantial one-run variability,
+not an improvement attributable to the counters. The frames remain
+unreviewed and the run is not A/B/A or distinct-world evidence.
+
+`bench.py` now pairs each `[PERF-VULKAN]` line with its immediately preceding
+`[GPU-Vulkan]` interval report and records `end_flip` and `interval_flips`.
+This line-order rule matters because an unmatched report must not shift later
+counter intervals. Movement began at flip 7,956 and ended at 9,247. The three
+complete 300-flip counter intervals ending at 8,400, 8,700 and 9,000 therefore
+cover 900 wholly contained movement flips in 27,401.784 ms, or 32.845
+diagnostic flips/s. The intervals ending at 8,100 and a hypothetical 9,300
+cross the movement boundaries and are excluded; the run ended before a
+9,300 report.
+
+The measured CPU timings are nested:
+
+| Counter scope | Time over 900 flips | Percent of interval | Relationship |
+| --- | ---: | ---: | --- |
+| Complete draw callbacks | 8,376.036 ms | 30.57% | inclusive top-level backend work |
+| Texture preparation | 5,664.688 ms | 20.67% | inside draw callbacks |
+| Exact texture snapshots | 4,819.236 ms | 17.59% | inside texture preparation |
+| Exact snapshot comparisons | 669.062 ms | 2.44% | inside texture preparation |
+| Gathered vertex-buffer copies | 152.164 ms | 0.56% | inside draw callbacks |
+| Mandatory color readback | 3,708.859 ms | 13.54% | top-level; includes applicable waits |
+| Submission waits | 1,083.083 ms | 3.95% | nested wherever a caller waits |
+| Asynchronous report polling | 3,279.186 ms | 11.97% | top-level poll callback |
+| Report completion | 2,826.854 ms | 10.32% | inside report enqueue/poll paths |
+| Fence polling | 2,397.731 ms | 8.75% | inside report completion |
+| Report enqueue | 109.924 ms | 0.40% | includes its completion checks |
+
+Draw, readback, report enqueue and report-poll scopes account for 56.47% of
+the interval when counted only at those non-overlapping top-level boundaries;
+43.53% remains outside them. The nested rows must not be added to that total.
+Detailed counters also add per-call clock and atomic overhead, so the
+percentages identify mechanisms rather than predict an uninstrumented rate.
+
+The three intervals copied 4,284,600,972 gathered vertex bytes but spent only
+152.164 ms in the backend copies. In contrast, they made exact snapshots of
+37,813,766,859 texture bytes and issued 12,637,369 report-poll callbacks,
+including 8,059,232 fence-status polls. Framework-side vertex gathering is
+part of the unattributed remainder, so this does not prove direct raw-stream
+fetch has zero value. It does show that the measured backend copy is not the
+first target. The next change should eliminate unactionable asynchronous
+visibility polls while retaining the 0.25 ms submission flush deadline,
+ordered completion, bounded backpressure and all synchronous waits. Exact
+texture snapshot copying is the next measured candidate, but it may be
+reduced only with an exact write/invalidation mechanism; approximate hashes
+or stale snapshots are not acceptable. Multi-run A/B/A remains deferred
+until M5, after native presentation makes acceptance evidence actionable.
 
 ### Material index-word census and default-off run executor
 

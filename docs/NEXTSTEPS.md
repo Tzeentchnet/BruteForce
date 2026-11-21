@@ -1334,10 +1334,20 @@ for live backend switching is outside this workstream.
    renderer diagnostic completed with matched controls and input dispatch,
    but Vulkan movement flips were 63.75% below D3D11 while stationary flips
    were 12.29% below. Do not schedule six manual runs for this diagnostic.
-   Parse the existing `[PERF-VULKAN]` counters and use one Vulkan-only
-   counter run to attribute draw setup, vertex copies, texture work,
-   command recording, readback, waits and reports before deciding whether
-   direct raw-stream fetch is needed. Reserve a multi-run A/B/A campaign for
+   The one approved Vulkan-only counter run is complete and line-order
+   aligned without another game route. Its three wholly contained movement
+   intervals cover 900 flips at 32.845 diagnostic flips/s. Inclusive draw
+   callbacks consumed 30.57% of wall time, exact texture snapshots 17.59%
+   inside them, mandatory readback 13.54%, and asynchronous report polling
+   11.97%; backend gathered-vertex copies consumed only 0.56%. Detailed
+   counters add overhead and the run's 32.558 movement rate rebounded from
+   the pair's 17.469, so neither single run is a renderer decision.
+   First eliminate visibility polls that cannot yet complete, without
+   weakening the 0.25 ms flush deadline, ordered completion, backpressure or
+   synchronous waits. Then investigate exact texture snapshot-copy volume
+   while retaining exact byte and allocation identity checks. Defer direct
+   raw-stream fetch unless the unattributed framework gather cost is
+   independently shown to justify it. Reserve a multi-run A/B/A campaign for
    M5 after native presentation, and only when its acceptance evidence is
    actionable.
    Continue covering menus,
@@ -1440,9 +1450,12 @@ Still open: access to a native 4K display. Optional 5.1 output is deferred.
    gathered GPU-VSH path now clears the immediate gameplay-throughput blocker,
    the manual movie/menu route is visible, and the first matched movement pair
    has complete guest-surface review. Preserve the unresolved color-DMA
-   conflict policy, collect a no-capture D3D11/Vulkan A/B/A diagnostic, decide
-   whether direct raw-stream fetch is needed, then implement the host-owned
-   native presentation handoff. Submit no
+   conflict policy. The reduced no-capture pair and final Vulkan counter run
+   are complete; next remove unactionable asynchronous visibility polling,
+   then assess exact texture snapshot copying. Do not prioritize direct
+   raw-stream fetch from the measured 0.56% backend vertex-copy cost alone.
+   Implement the host-owned native presentation handoff after this bounded
+   attribution work. Submit no
    upstream work without approval. Implement D3D12 in F8, promote `auto` only
    after F9, and retain D3D11 and CPU as F10 requires.
 3. Complete A1 and the single-view E1-E2 scope, then A2-A4 as the reference

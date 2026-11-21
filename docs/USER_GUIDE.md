@@ -490,6 +490,27 @@ snapshots; P8 entries also compare exact palette bytes. Periodic
 pipelines, resident textures, cache hits, uploads, mip uploads, visibility
 queries and visibility reads. A texture-cache hit does not add a GPU wait;
 replacement/eviction waits before destroying potentially referenced images.
+With `BRUTEFORCE_PERF_COUNTERS=1`, the paired `[PERF-VULKAN]` line reports
+interval CPU time spent in draw setup, vertex copies, texture snapshots and
+lookups, exact comparisons, uploads, descriptor/command recording, readback,
+submission waits, visibility reports and fence polling. `bench.py` stores
+those fields in `runtime_diagnostics.vulkan_intervals`, allowing one
+Vulkan-only diagnostic run to replace repeated operator-driven comparison
+runs while locating a bottleneck.
+
+For that single-run diagnostic, keep capture and sampling off and enable only
+the built-in counters:
+
+```powershell
+python tools\bench.py --scene movement --runs 1 --retries 0 --threads 4 `
+  --no-profile --readiness manual --no-auto-panels `
+  --ready-state "Basic Controls popup fully visible at the initial tutorial spawn; no cinematic or briefing" `
+  --variant "vulkan:RECOMP_GPU=vulkan,RECOMP_GPU_MIPS=1,RECOMP_GPU_ZPASS=async,RECOMP_AUDIO=0,BRUTEFORCE_PERF_COUNTERS=1"
+```
+
+This requires one Basic Controls confirmation. It is phase attribution for
+the existing movement gap, not another renderer comparison or performance
+acceptance run.
 Synchronous precise visibility remains the default. Set
 `RECOMP_GPU_ZPASS=async` to select the exact ordered asynchronous report path;
 it never fabricates a count and retains bounded backpressure. D3D11 remains

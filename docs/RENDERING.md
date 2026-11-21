@@ -564,7 +564,13 @@ generic seams; stages 6-9 remain open.
    The first no-capture D3D11/Vulkan sequence was invalidated by a recurring
    pre-movie guest-worker poll on run 3. A default-off framework zero-delay
    backoff now passes its focused fixture and three no-retry D3D11 startup
-   checks; restart all six attempts rather than reusing the interrupted pair.
+   checks. A fresh one-run-per-renderer diagnostic then completed on the same
+   executable with input dispatch matched within 78 ms. Vulkan was 12.29%
+   below D3D11 in stationary flips and 63.75% below during movement, but the
+   frames remain unreviewed and this is not A/B/A evidence. Parse the existing
+   Vulkan phase counters and use one Vulkan-only counter run before deciding
+   on direct raw-stream fetch; defer a multi-run acceptance campaign until
+   native presentation makes it actionable.
    Compare matched frames with CPU and D3D11 and exercise NVIDIA, AMD and
    Intel where available. The current capture closes one stationary state,
    not broad parity.

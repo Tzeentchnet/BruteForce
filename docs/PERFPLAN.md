@@ -59,11 +59,11 @@ frames and confirms the same tutorial scene and fixed camera route. Their
 guest-surface capture results. They are excluded from performance comparison:
 continuous BMP writes changed timing, the capture counts differ, there is only
 one run per renderer, and neither source proves compositor presentation.
-The next throughput diagnostic must disable continuous capture and alternate
-at least three D3D11 and Vulkan runs on the same generation, executable,
-scene, script, guest-CPU setting, thread count and options. That diagnostic
-can guide the direct-raw-fetch decision but cannot satisfy M5 before native
-presentation and the remaining parity gates.
+The next throughput diagnostic disabled continuous capture but deliberately
+used only one D3D11 and one Vulkan run to minimize operator intervention.
+Both used the same generation, executable, scene, script, guest-CPU setting,
+thread count and options. This can guide the next attribution step but cannot
+satisfy M5 before native presentation and the remaining parity gates.
 
 The first such sequence is invalid and stopped: D3D11 run 1 and Vulkan run 1
 completed, but D3D11 run 2 reproduced the pre-movie loader starvation at two
@@ -73,9 +73,15 @@ Local framework patch 0047 adds the default-off
 producer/worker fixture passes, and rebuilt executable
 `f717c74980d81e506272f71f7c3135ebd68017d90753cb783d0e64060d9ffc7a`
 reached movie draws in three no-retry D3D11 checks; one continued through
-operator-confirmed Basic Controls. Restart the complete six-attempt sequence
-on that executable with the backoff recorded among the fixed controls. These
-startup checks and the stopped sequence are not performance evidence.
+operator-confirmed Basic Controls. The replacement same-build pair completed
+without retries: D3D11 reported 26.409 stationary and 48.193 movement
+flips/s; Vulkan reported 23.164 and 17.469. All 15 runtime input dispatches
+matched within 78 ms. There was no continuous capture or profiling, and all
+movement frames remain unreviewed, so these are mechanism diagnostics rather
+than world FPS or A/B/A evidence. Do not spend six more manual runs on this
+pre-presentation comparison. A single Vulkan-only
+`BRUTEFORCE_PERF_COUNTERS=1` run is the next measurement; reserve multi-run
+A/B/A collection for M5 when native presentation makes it actionable.
 
 Before the runtime-only Phase 4 fix, integrated v0.17 Release generation
 `20261111-084222-7bdb6e56`'s codegen-identical executable completed one CPU

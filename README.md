@@ -36,11 +36,13 @@ This is an experimental Windows release for the North American retail game:
   visible Basic Controls. Complete guest-surface review of one matched
   movement pair shows the same tutorial scene and scripted camera route with
   zero unknown frames; continuous capture prevents treating its rates as a
-  performance comparison. One unreviewed legacy-route diagnostic
-  reported 26.391 stationary and 38.862 movement flips/s, up from the earlier
-  roughly 9-11 gameplay flips/s, but this is not distinct-world-frame or A/B/A
-  evidence. Native Vulkan presentation, direct raw-stream fetch, broader scene
-  parity, and accepted performance evidence remain open.
+  performance comparison. A later no-capture same-build diagnostic required
+  only one manual run per renderer: D3D11 reported 26.409 stationary and
+  48.193 movement flips/s, while Vulkan reported 23.164 and 17.469. Inputs
+  matched within 78 ms, but the frames remain unreviewed and one pair is not
+  A/B/A or distinct-world-frame evidence. Native Vulkan presentation,
+  movement-gap attribution, direct raw-stream fetch, broader scene parity,
+  and accepted performance evidence remain open.
 - A Vulkan-first default with D3D12 startup fallback remains the gated design
   direction. D3D12 and production `auto` selection are not implemented, and
   D3D11 remains selectable through both parity gates.

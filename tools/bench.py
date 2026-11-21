@@ -206,6 +206,11 @@ D3D11_INTERVAL_RE = re.compile(
     r'(?P<approx_hash_bytes>\d+) approximate texture-hash bytes$',
     re.MULTILINE,
 )
+VULKAN_PERF_RE = re.compile(
+    r"^\[PERF-VULKAN\] (?P<values>"
+    r"[a-z_]+=[\d.]+(?: [a-z_]+=[\d.]+)*)$",
+    re.MULTILINE,
+)
 PSCACHE_EVENT_RE = re.compile(
     r'^\[GPU-PSCACHE\] (?P<kind>compiled|hit) in (?P<elapsed_ms>[\d.]+) ms$',
     re.MULTILINE,
@@ -601,6 +606,7 @@ def parse_runtime_diagnostics(text):
     diagnostics = {
         "device": None,
         "d3d11_intervals": [],
+        "vulkan_intervals": [],
         "validation_intervals": {"guest_word": [], "readable_guest_range": []},
         "texture_intervals": [],
         "shader_cache": {
@@ -687,6 +693,12 @@ def parse_runtime_diagnostics(text):
             "report_pending_polls": (int(values["report_pending_polls"])
                                      if values["report_pending_polls"] is not None else None),
             "approx_hash_bytes": int(values["approx_hash_bytes"]),
+        })
+    for match in VULKAN_PERF_RE.finditer(text):
+        values = (item.split("=", 1) for item in match["values"].split())
+        diagnostics["vulkan_intervals"].append({
+            key: (float(value) if key.endswith("_ms") else int(value))
+            for key, value in values
         })
     for match in VALIDATION_PERF_RE.finditer(text):
         values = match.groupdict()

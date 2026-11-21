@@ -280,6 +280,16 @@ def test_parse_runtime_diagnostics():
         '[GPU-D3D11] 200 flips: 600 draws (0 extended), readback 1.50 ms/flip, '
         '3 visibility reads waiting 1.5 ms, legacy texture details, '
         '0 approximate texture-hash bytes\n'
+        '[PERF-VULKAN] interval_ms=1500.000 draws=300 draw_ms=900.250 '
+        'setup_ms=10.000 vertex_bytes=8192 vertex_ms=20.500 '
+        'texture_calls=600 texture_ms=30.000 snapshots=12 snapshot_bytes=4096 '
+        'snapshot_ms=1.250 lookups=600 lookup_ms=2.500 exact_checks=500 '
+        'exact_bytes=2048 exact_ms=3.750 uploads=4 upload_ms=5.000 '
+        'descriptors=300 descriptor_ms=6.250 command_ms=7.500 '
+        'readbacks=300 readback_bytes=368640000 readback_ms=400.000 '
+        'waits=300 wait_ms=350.000 reports=120 report_ms=8.000 '
+        'report_polls=20 report_poll_ms=1.000 report_completes=100 '
+        'report_complete_ms=4.000 fence_polls=30 fence_poll_ms=2.000\n'
         '[GPU-PSCACHE] compiled in 12.500 ms\n'
         '[GPU-PSCACHE] compiled in 7.250 ms\n'
         '[GPU-PSCACHE] hit in 0.375 ms\n'
@@ -331,6 +341,42 @@ def test_parse_runtime_diagnostics():
             "approx_hash_bytes": 0,
         },
     ]
+    assert diagnostics["vulkan_intervals"] == [{
+        "interval_ms": 1500.0,
+        "draws": 300,
+        "draw_ms": 900.25,
+        "setup_ms": 10.0,
+        "vertex_bytes": 8192,
+        "vertex_ms": 20.5,
+        "texture_calls": 600,
+        "texture_ms": 30.0,
+        "snapshots": 12,
+        "snapshot_bytes": 4096,
+        "snapshot_ms": 1.25,
+        "lookups": 600,
+        "lookup_ms": 2.5,
+        "exact_checks": 500,
+        "exact_bytes": 2048,
+        "exact_ms": 3.75,
+        "uploads": 4,
+        "upload_ms": 5.0,
+        "descriptors": 300,
+        "descriptor_ms": 6.25,
+        "command_ms": 7.5,
+        "readbacks": 300,
+        "readback_bytes": 368640000,
+        "readback_ms": 400.0,
+        "waits": 300,
+        "wait_ms": 350.0,
+        "reports": 120,
+        "report_ms": 8.0,
+        "report_polls": 20,
+        "report_poll_ms": 1.0,
+        "report_completes": 100,
+        "report_complete_ms": 4.0,
+        "fence_polls": 30,
+        "fence_poll_ms": 2.0,
+    }]
     assert diagnostics["validation_intervals"]["guest_word"][0]["rejected"] == 1
     assert diagnostics["validation_intervals"]["readable_guest_range"][0]["regions"] == 22
     assert diagnostics["texture_intervals"][0]["probes"] == 450

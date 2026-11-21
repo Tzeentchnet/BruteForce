@@ -16,6 +16,12 @@ option recording have a focused selection:
 python -m pytest -q tests\test_build.py tests\test_bench_performance.py
 ```
 
+Vulkan interval-counter parsing can be checked without game data:
+
+```powershell
+python -m pytest -q tests\test_bench.py::test_parse_runtime_diagnostics
+```
+
 The tests include a synthetic disc image and do not require game data. The
 synthetic extraction test uses the installed toolkit's XISO reader.
 

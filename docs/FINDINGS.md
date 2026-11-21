@@ -3200,8 +3200,8 @@ operator-confirmed state after 191.328 wall seconds, completed 120 stationary
 flips at 25.362 flips/s, and exited through non-forced console control. That
 flip rate is a single startup-validation run, not performance evidence. The
 two bounded boots exited with the expected watchdog code 3. These checks
-support restarting the complete six-attempt renderer diagnostic, but they do
-not establish long-session reliability.
+support renderer diagnostics, but they do not establish long-session
+reliability.
 
 Read-only overlap was refreshed on 2026-11-20 across all 500 available pull
 requests, listed issues and tracking index sp00nznet/xboxrecomp#184. Merged
@@ -3216,6 +3216,49 @@ Only guest title threads are pinned; GPU, APU and other host service threads
 remain free. The temporary title trace hook is not part of the clean
 supported generation. The new framework behavior is opt-in and contains no
 Brute Force address or guest structure.
+
+### Reduced no-capture D3D11/Vulkan diagnostic
+
+To minimize operator-driven in-game routes, the replacement renderer
+diagnostic used one manually confirmed D3D11 run and one Vulkan run rather
+than six acceptance attempts. Both used generation
+`20261120-163420-f9e3b4ed`, toolkit tree
+`8938ce1b635e25832539a0bc6500b2fe2fa14565`, executable
+`f717c74980d81e506272f71f7c3135ebd68017d90753cb783d0e64060d9ffc7a`,
+four raster threads, one guest CPU, `RECOMP_ZERO_DELAY_SLEEP=1`, audio off,
+mips enabled, ordered asynchronous visibility, manual Basic Controls
+readiness, no profiling, no captures and no adaptive panel presses. Both
+runs completed without retry or forced termination. All 15 scripted input
+dispatches differed by at most 78 ms and by 34.333 ms on average.
+
+| Renderer | Stationary flips/s | Stationary 1% low | Movement flips/s | Movement whole-frame changes/s | Movement 1% low |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| D3D11 | 26.409 | 18.628 | 48.193 | 48.218 | 29.424 |
+| Vulkan | 23.164 | 17.303 | 17.469 | 17.494 | 9.232 |
+
+The initial stationary workloads remained closely matched: D3D11 reported
+1,610.4 draws and 132,761.8 vertices per flip, versus Vulkan's 1,606.4 and
+132,681.7. Vulkan was 12.29% below D3D11 in stationary flip rate and 63.75%
+below during movement. Its periodic diagnostics covered all vertex-program
+batches with the gathered GPU path and reported zero CPU declines. They also
+continued to report the known one-per-flip dirty ownership conflict after it
+began; this pair does not establish that conflict as the movement bottleneck.
+
+No movement images were captured or reviewed, the whole-frame classifications
+remain unknown, there is only one run per renderer, and the output source is
+still guest-surface readback rather than native presentation. The rates are
+therefore diagnostic flips and whole-frame changes, not distinct-world FPS or
+an A/B/A performance result. The interrupted pre-fix pair is not combined
+with these runs.
+
+The Vulkan backend already has opt-in interval counters for draw/setup,
+vertex copies, texture snapshots/lookups/exact checks/uploads,
+descriptor/command recording, readback, waits, visibility reports and fence
+polls. `bench.py` now parses `[PERF-VULKAN]` lines into
+`runtime_diagnostics.vulkan_intervals`. One future Vulkan-only run with
+`BRUTEFORCE_PERF_COUNTERS=1` can attribute the movement gap without repeating
+the D3D11 route. Multi-run A/B/A collection is deferred until M5, after native
+presentation makes acceptance evidence actionable.
 
 ### Material index-word census and default-off run executor
 

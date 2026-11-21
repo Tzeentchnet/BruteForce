@@ -102,10 +102,10 @@ advances through the full allocation immediately before the tutorial world,
 while the active output resolves to `0x802B0000`. This matches the known
 staged-pushbuffer overlap and the executor's ignored
 `NV097_SET_CONTEXT_DMA_COLOR` base, but the exact writer was not intercepted.
-Keep GPU-wins conflicts and mandatory readback. The next renderer-performance
-step is a same-generation no-capture D3D11/Vulkan A/B/A diagnostic with at
-least three runs per renderer; it must not reuse the continuous-capture rates
-or be promoted to the post-presentation M5 result.
+Keep GPU-wins conflicts and mandatory readback. A same-generation no-capture
+D3D11/Vulkan diagnostic is now complete with one manually confirmed run per
+renderer, minimizing operator intervention. It must not reuse the
+continuous-capture rates or be promoted to the post-presentation M5 result.
 
 The final synchronized 37,826,048-byte executable has SHA-256
 `1dd3bc9499d14a260a1650f086e6cf40ae71da70708b5cffd36eb67c73a2b939`.
@@ -121,10 +121,13 @@ Do not analyze or combine its first pair with later runs. Patch 0047's
 37,827,072-byte replacement has SHA-256
 `f717c74980d81e506272f71f7c3135ebd68017d90753cb783d0e64060d9ffc7a`;
 three independent no-retry D3D11 boots reached movie draws and one continued
-through operator-confirmed Basic Controls. Restart the six-attempt campaign
-from D3D11 run 1 with this exact executable, four raster threads, one guest
-CPU, the zero-delay backoff, audio off, mips and asynchronous visibility on,
-manual readiness, no profiling, no capture and no adaptive panel presses.
+through operator-confirmed Basic Controls. The replacement two-run diagnostic
+used this exact executable, four raster threads, one guest CPU, the zero-delay
+backoff, audio off, mips and asynchronous visibility on, manual readiness, no
+profiling, no capture and no adaptive panel presses. Both attempts completed.
+D3D11 reported 26.409 stationary and 48.193 movement flips/s; Vulkan reported
+23.164 and 17.469. Input dispatch differed by at most 78 ms. These are
+unreviewed single-run flip diagnostics, not world FPS or A/B/A evidence.
 
 The preceding v0.17 toolkit used selected #314/#319/#320 commits and 43
 local patches, with tree `3e3ae3600802d2bf4446d86fc546322d60849047`.
@@ -211,10 +214,10 @@ and deliberately fails its backoff assertion without it. Rebuilt executable
 `f717c74980d81e506272f71f7c3135ebd68017d90753cb783d0e64060d9ffc7a`
 completed three no-retry D3D11 startup checks: first movie draws arrived at
 6.787, 7.329 and 7.232 seconds, and the operator-confirmed run reached Basic
-Controls and completed its stationary interval. This reopens a fresh
-six-attempt renderer diagnostic; it is not long-session reliability or
-performance evidence. Do not restart the closed texture-index campaign or
-reuse the interrupted renderer sequence.
+Controls and completed its stationary interval. This enabled the reduced
+two-run renderer diagnostic recorded above; it is not long-session
+reliability or performance evidence. Do not restart the closed texture-index
+campaign or reuse the interrupted renderer sequence.
 
 The accepted default and visibility performance baselines still use old
 generation `20261103-145850-21e3091e` on tree
@@ -1327,8 +1330,16 @@ for live backend switching is outside this workstream.
    policy. The first no-capture same-build A/B/A attempt set was invalidated
    by the pre-movie loader poll on run 3 and must not be reused. The
    default-off framework zero-delay backoff now passes its focused fixture
-   and three no-retry D3D11 startup checks; restart a fresh six-attempt
-   diagnostic before deciding whether direct raw-stream fetch is needed.
+   and three no-retry D3D11 startup checks. The replacement one-run-per-
+   renderer diagnostic completed with matched controls and input dispatch,
+   but Vulkan movement flips were 63.75% below D3D11 while stationary flips
+   were 12.29% below. Do not schedule six manual runs for this diagnostic.
+   Parse the existing `[PERF-VULKAN]` counters and use one Vulkan-only
+   counter run to attribute draw setup, vertex copies, texture work,
+   command recording, readback, waits and reports before deciding whether
+   direct raw-stream fetch is needed. Reserve a multi-run A/B/A campaign for
+   M5 after native presentation, and only when its acceptance evidence is
+   actionable.
    Continue covering menus,
    movies, fades, PVIDEO and CPU fallback without weakening synchronization.
    The mip fixture is complete; repeat its retail comparison only with

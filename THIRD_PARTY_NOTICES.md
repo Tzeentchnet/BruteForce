@@ -9,6 +9,24 @@ APU components under LGPL-2.1-or-later; see the framework's `NOTICE`,
 individual source headers, and `LICENSES` directory for the full notices and
 license terms.
 
+The source build also downloads two pinned public build dependencies into
+`.deps`; neither checkout nor the compiler binaries are committed:
+
+- [Vulkan-Headers](https://github.com/KhronosGroup/Vulkan-Headers) at
+  `vulkan-sdk-1.4.363.0` / commit
+  `6802bb4733b63ed5efd3adb308a6c885ef180ea1`. Its `LICENSE.md` identifies the
+  project as Apache-2.0 OR MIT and links the applicable licence texts.
+- [DirectX Shader Compiler](https://github.com/microsoft/DirectXShaderCompiler)
+  release `v1.9.2609`, used at build time to produce the embedded SPIR-V
+  shaders. The verified release archive includes `LICENCE-MIT.txt`,
+  `LICENSE-LLVM.txt`, and `LICENSE-MS.txt`; those files remain alongside the
+  extracted compiler in `.deps\dxc`.
+
+The dependency installer verifies the Vulkan-Headers commit and tree, the DXC
+archive SHA-256, and the required extracted compiler files before use. End
+users do not need a Vulkan SDK, and the runtime loads the system Vulkan
+loader supplied by the graphics driver.
+
 This repository also vendors the MCPX DSP56300 interpreter from
 [xemu v0.8.139](https://github.com/xemu-project/xemu/tree/v0.8.139/hw/xbox/mcpx/apu/dsp)
 under `src/xemu_dsp`. Its interpreter sources are GPL-2.0-or-later, except

@@ -17,6 +17,7 @@ import uuid
 from toolkit import (
     ROOT, TOOLKIT_BASE, TOOLKIT_TREE, ToolkitError, codegen_tree, setup_toolkit, verify_toolkit,
 )
+from dependencies import DependencyError, setup_dependencies, verify_dependencies
 
 
 GAME_DIR = ROOT / "game" / "disc"
@@ -509,6 +510,7 @@ def compiler_profile_settings(profile):
 
 def build(config="Release", parallel=4, extra_targets=(), compiler_profile="default"):
     toolkit = verify_toolkit()
+    vulkan_headers, dxc = verify_dependencies()
     run_dir, gen_dir = latest_generation()
     if parallel < 1:
         raise BuildError("Build parallelism must be at least one")
@@ -520,6 +522,8 @@ def build(config="Release", parallel=4, extra_targets=(), compiler_profile="defa
         "cmake", "-S", ROOT, "-B", build_dir,
         "-G", "Visual Studio 17 2022", "-A", "x64",
         f"-DXBOXRECOMP_DIR={toolkit}", f"-DBRUTEFORCE_GEN_DIR={gen_dir}",
+        f"-DBRUTEFORCE_VULKAN_HEADERS_DIR={vulkan_headers}",
+        f"-DBRUTEFORCE_DXC={dxc}",
         f"-DBRUTEFORCE_COMPILE_JOBS={parallel}",
         f"-DBRUTEFORCE_ENABLE_LTCG={'ON' if ltcg else 'OFF'}",
         f"-DBRUTEFORCE_ENABLE_AVX2={'ON' if avx2 else 'OFF'}",
@@ -679,6 +683,7 @@ def main(argv=None):
     try:
         if args.command == "setup":
             setup_toolkit()
+            setup_dependencies()
         elif args.command == "extract":
             extract_disc(args.disc)
         elif args.command == "generate":
@@ -692,10 +697,14 @@ def main(argv=None):
             )
         else:
             setup_toolkit()
+            setup_dependencies()
             extract_disc(args.disc)
             generate()
             build(args.config, args.parallel, args.extra_target, args.compiler_profile)
-    except (BuildError, ToolkitError, OSError, subprocess.CalledProcessError, json.JSONDecodeError) as exc:
+    except (
+        BuildError, DependencyError, ToolkitError, OSError,
+        subprocess.CalledProcessError, json.JSONDecodeError,
+    ) as exc:
         print(f"Error: {exc}", file=sys.stderr)
         return 1
     return 0

@@ -30,6 +30,8 @@ resources; it does not replace the game engine with a native PC renderer.
     |-- D3D11 backend --> GPU colour --flip sync/readback--> guest memory --> window
     |                    GPU depth/stencil                           |    presenter
     |                       |-- optional shared colour snapshot -----+
+    |-- Vulkan backend -> GPU colour --mandatory readback------------+
+    |                    GPU depth/stencil
     `-- null probe: no rasterization; visibility reported as visible
 
   Guest CPU <---- semaphore, interrupt, visibility report and flip coordination
@@ -42,6 +44,20 @@ replacement for guest readback.
 The CPU renderer is a useful comparison path, not proof of original-hardware
 correctness. The null backend is a measurement probe and does not render a
 correct image.
+
+The accepted 2026-11-20 direction is to make Vulkan the fresh graphical
+default, with Direct3D 12 as an automatic startup fallback. An explicit
+Vulkan 1.3 backend now implements the base contract, CPU-transformed extended
+batches, four texture stages, register combiners, cube maps and precise
+visibility through mandatory guest readback and the existing CPU presenter.
+Eligible untransformed vertex-program batches also run in a static SPIR-V
+interpreter from gathered float inputs, with a compute readback verifier.
+The default-off mip switch also exposes supplied 2D/cube chains. Its captured
+Basic Controls frame is near the matched D3D11 output, but it is not the
+default or a native-presentation path, and broader parity/stability gates
+remain open. D3D12 and production `auto` selection remain unimplemented, and
+D3D11 remains the launcher and graphical `build.py` default until the
+migration gates below pass.
 
 ## What has been observed in the title
 
@@ -72,8 +88,10 @@ and [packed-alias investigation](./FINDINGS.md#packed-depthstencil-aliases-and-s
 | Default-off exact index-word run dispatch | [patch 0046](../patches/xboxrecomp/0046-index-word-runs.patch), [bench.py](../tools/bench.py) |
 | Extended backend interface and vertex-program batches | [patch 0016](../patches/xboxrecomp/0016-extended-render-backend.patch), [patch 0017](../patches/xboxrecomp/0017-gpu-vertex-programs.patch) |
 | D3D11 device, surfaces, state, draws, queries and readback | [d3d11_backend.c](../src/gpu/d3d11_backend.c) |
+| Vulkan loader, device, surfaces, base/extended/VSH draws, combiners, queries and readback | [vulkan_backend.c](../src/gpu/vulkan_backend.c), [vulkan_base.hlsl](../src/gpu/vulkan_base.hlsl) |
+| Transactional renderer startup and checked surface layout | [renderer_startup.c](../src/gpu/renderer_startup.c), [surface_layout.c](../src/gpu/surface_layout.c) |
 | Render-scale authority and GPU seed/readback/final resolves | [render_scale.c](../src/gpu/render_scale.c), [render_scale.h](../src/gpu/render_scale.h) |
-| Texture layout, decode and sampling | [texture_decode.c](../src/gpu/texture_decode.c), [texture_sampler.c](../src/gpu/texture_sampler.c), [d3d11_backend.c](../src/gpu/d3d11_backend.c) |
+| Texture layout, decode and sampling | [texture_layout.c](../src/gpu/texture_layout.c), [texture_filter.c](../src/gpu/texture_filter.c), [texture_decode.c](../src/gpu/texture_decode.c), [texture_sampler.c](../src/gpu/texture_sampler.c), [d3d11_backend.c](../src/gpu/d3d11_backend.c), [vulkan_backend.c](../src/gpu/vulkan_backend.c) |
 | Generated vertex and combiner shaders | [vsh_hlsl.c](../src/gpu/vsh_hlsl.c), [rc_hlsl.c](../src/gpu/rc_hlsl.c), [shader_cache.c](../src/gpu/shader_cache.c) |
 | Null renderer and surface-read probe | [null_backend.c](../src/gpu/null_backend.c) |
 | Frame handoff and optional shared presentation | [upstream snapshot synchronization](https://github.com/sp00nznet/xboxrecomp/pull/300), [patch 0024](../patches/xboxrecomp/0024-gpu-shared-presentation.patch), [patch 0028](../patches/xboxrecomp/0028-scaled-gpu-presentation.patch) |
@@ -112,6 +130,16 @@ to the rendering backend and its single-threaded D3D11 immediate context
 are serialized on the NV2A thread. A separate worker compiles vertex-shader
 bytecode; it does not own the rendering context.
 
+The Vulkan bring-up backend registers the official base interface and the
+existing local transformed-draw, untransformed vertex-program, readback and
+visibility callbacks. Eligible vertex programs execute in Vulkan from
+framework-gathered float inputs. `vsh_raw_ok` remains unset, so raw guest
+streams still pass through `fetch_attr`; programs that write constants keep
+the exact CPU interpreter fallback.
+Its Vulkan queue, command slots, surfaces, textures, pipelines, queries and
+fences are backend-owned; the executor and presenter receive no Vulkan
+objects.
+
 The guest graphics hooks in [recomp_manual.c](../src/recomp_manual.c)
 validate and register the title's semaphore target and, when enabled, its
 graphics interrupt event. PGRAPH software-method traps and the staged walker
@@ -126,6 +154,408 @@ they do not establish a general completion guarantee at every guest fence,
 trap or surface read. Correct GPU completion ordering and loss races around
 guest-visible releases remain open. Do not equate command submission,
 `Present`, a fence release and finished GPU work.
+
+## Vulkan-first backend architecture and bring-up status
+
+This section records the design accepted on 2026-11-20 and the implemented
+base, visibility, CPU-transformed full-pixel-pipeline and gathered GPU-VSH
+milestones. Pinned
+dependencies, transactional startup, exact texture caching, compatible
+color-target aliases, register combiners, cube maps, precise visibility and
+an explicit Vulkan draw/flip/readback path now exist, but user-facing
+defaults are unchanged. The existing D3D11 path remains the validated retail
+implementation while Vulkan is developed and compared against the CPU
+reference.
+
+### Selection and failure policy
+
+The current selector adds explicit `RECOMP_GPU=vulkan` while retaining
+`d3d11`, `cpu`, and `null`. The future selector also adds `auto` and `d3d12`.
+
+| Selection | Required behavior |
+| --- | --- |
+| `auto` | Initialize Vulkan completely before guest execution. If Vulkan is unavailable or its startup initialization fails, report the exact reason and initialize D3D12. If D3D12 also fails, stop; do not silently select CPU, D3D11, or `null`. |
+| `vulkan` | Implemented for base, CPU-transformed extended and eligible gathered-input GPU-VSH draws. Initialize Vulkan completely or fail closed with a structured stage and reason. An explicit backend request never falls through to another renderer. |
+| `d3d12` | Initialize D3D12 or fail closed. |
+| `d3d11` | Keep the current renderer available throughout migration and parity validation. It is not part of the future automatic chain. |
+| `cpu` / `null` | Preserve the correctness reference and measurement probe as explicit choices. |
+
+Once all default gates pass, fresh launcher settings and graphical
+`build.py` runs will select `auto`. Existing saved `d3d11`, `cpu`, or other
+explicit choices must survive the settings-version migration. Bare
+low-level launches with graphics disabled may continue to leave
+`RECOMP_GPU` unset and use the CPU path.
+
+Fallback is limited to startup, before a backend is registered and before
+the guest entry point runs. Loader absence, insufficient API or feature
+support, no suitable physical device, device/queue creation failure, shader
+compiler initialization failure, or host presentation-module initialization
+failure are backend startup failures. Invalid common configuration is not an
+availability failure and must be reported without trying to disguise it by
+selecting another API.
+
+No backend switch occurs after guest GPU work begins. Device loss, command
+submission failure, allocation failure after startup, failed readback, or
+failed presentation remains fatal and reported. Runtime failover would need
+to reconstruct GPU-authoritative colour and depth resources, texture and
+pipeline caches, visibility queries, pending reports, presentation epochs,
+and exact semaphore/flip ordering. That is a separate recovery design, not
+part of the D3D12 backup policy.
+
+Each new backend therefore needs a two-stage lifecycle:
+
+1. Parse and validate common options without committing renderer state.
+2. Create the loader/compiler, adapter, device, queues, synchronization
+   primitives and a probe pipeline, then establish compatibility with the
+   host presentation service. Only a fully initialized candidate may
+   register the official base contract and any accepted optional extensions.
+
+Initialization must return a structured stage and reason for diagnostics.
+The current boolean D3D11 installer can remain during migration, but the new
+selector must not infer availability from a partially registered backend.
+
+The Vulkan implementation follows that lifecycle now: it dynamically loads
+`vulkan-1.dll`, validates options, creates the instance, selected physical
+device, logical device, graphics queue, eight command slots and fences,
+descriptor/pipeline layouts, shader modules, white texture and probe pipeline,
+and only then registers callbacks. Failure injection verifies that loader and
+probe-pipeline failures leave no partial registration. The generic selector
+fixture also covers explicit no-fallback, Vulkan-to-D3D12 startup fallback,
+invalid-configuration stop, and both-candidates-fail behavior with fake
+candidates. Production `auto` is intentionally not exposed before D3D12 and
+the presentation gates exist.
+
+### Ownership and code boundaries
+
+The upstream authority is `Nv2aBackend`, evolved incrementally. In
+[sp00nznet/xboxrecomp#306](https://github.com/sp00nznet/xboxrecomp/issues/306)
+the maintainer chose a mixed boundary: keep that contract, add capabilities,
+failure reporting and renderer-neutral state one synthetic-test PR at a
+time, keep full renderers downstream for now, and keep presentation as a
+host service. The executor must not take a GPU round trip per draw, and every
+callback's thread and borrowed-data lifetime must be documented.
+[sp00nznet/xboxrecomp#319](https://github.com/sp00nznet/xboxrecomp/pull/319),
+included in v0.18.0, is the first accepted step: a reusable fake backend that
+checks callback order, exactly-once delivery, deep copies of borrowed data,
+thread ownership, registration, replacement and removal.
+
+Brute Force's broader `Nv2aBackendExt` remains useful implementation evidence,
+but it is not the target upstream ABI and must not be proposed wholesale.
+The Vulkan exemplar consumes official `Nv2aBackend` plus the existing local
+CPU-transformed draw, readback and visibility callbacks. Each capability—
+versioning, durable failure, texture stages, combiner state, vertex programs,
+visibility or another semantic—still needs an independent game-data-free
+fixture and upstream-shaped change before proposal. Local patch 0016 can
+continue serving the current D3D11 and Vulkan paths while those pieces
+converge; the portable Vulkan core contains no Brute Force addresses and does
+not depend on upstream accepting that bundled seam.
+
+The intended layering is:
+
+```text
+  NV2A executor and official Nv2aBackend contract
+      | optional, versioned renderer-neutral extensions
+                  |
+                  v
+  Brute Force renderer-neutral policy and immutable batch helpers
+      | texture/surface layout, snapshots, cache keys, scale math
+      | shader source/IR, frame identity, ownership transitions
+      +-------------------+-------------------+
+      |                   |                   |
+      v                   v                   v
+  Vulkan backend      D3D12 backend      D3D11 transition backend
+      |                   |                   |
+      +------ completed image, sync, frame ID and readback ------+
+                                                                  |
+                                                                  v
+              host presentation service and CPU fallback
+                 | Vulkan/D3D12/D3D11 presentation modules
+                 `-- owns window, surface/swapchain and Present
+```
+
+Extraction is incremental, not a big-bang rewrite of
+`d3d11_backend.c`. First move only pure, API-independent behavior with
+existing D3D11 fixtures proving unchanged results. Suitable shared pieces
+include validated texture and surface layouts, immutable guest snapshots,
+cache keys, logical/physical scale calculations, frame identities, and
+shader-generation inputs. Devices, resources, views/descriptors, pipeline
+objects, command recording, queries and render fences stay in each backend.
+Platform windows, presentation surfaces, swap chains and final presentation
+stay in the host service.
+
+The renderer-neutral layer is project code until a second implementation and
+synthetic fixtures prove that a piece is genuinely generic. Guest addresses,
+Brute Force structures, and title-observed policy never move into the
+framework. Generic contract extensions, helpers, fixtures and backend-authoring
+documentation are the first upstream candidates recorded in
+[UPSTREAM.md](./UPSTREAM.md). The Vulkan renderer remains a downstream
+exemplar until those seams are accepted and maintainers explicitly approve a
+full optional backend PR; it is nevertheless organized and tested to make
+that PR the end goal rather than a title-specific fork.
+
+The proven extractions now comprise:
+
+- the checked surface-layout helper, whose fixture covers pitched 32-bit and
+  16-bit layouts plus rejected formats and dimensions;
+- immutable texture storage/span calculations for linear, swizzled, block
+  compressed, paletted, mipmapped and cube declarations, with rejected
+  overflow and unsupported cases; and
+- checked guest snapshots that verify the memory-layout generation, tracked
+  heap or contiguous allocation identity, optional known bounds, mapping
+  identity and readable pages before and after `ReadProcessMemory`; and
+- texture minification, magnification, mip-filter, LOD-clamp and signed-bias
+  decoding shared by the D3D11 and Vulkan sampler adapters; and
+- the default stage-zero-times-diffuse combiner-state constructor shared by
+  D3D11 and Vulkan.
+
+D3D11 retains its performance-counter wrapper around the shared snapshot
+helper, and its regression fixtures remain unchanged. No device, resource or
+synchronization ownership moved into the neutral layer.
+
+### Vulkan texture identity and render-target aliases
+
+Vulkan's image cache is backend-specific but uses the shared immutable
+layout and snapshot contracts. It has 2,048 entries, a 4,096-bucket exact
+descriptor index and a 128 MiB retained
+source-snapshot budget. A hit requires an exact descriptor, allocation/mapping
+identity, 2D/cube identity and source-byte match; P8 textures also require an
+exact palette snapshot match. Decoding consumes the immutable snapshots
+rather than live guest memory. Six cube faces retain the NV2A 128-byte face
+stride and become one cube-compatible image. Hits add no GPU wait.
+Replacement and eviction retire images against the command-slot submission
+fence that last used them rather than waiting for the whole device. They do
+not weaken submission or flip ordering to gain throughput.
+
+Color render targets can feed compatible stage samples without first
+publishing the whole surface to guest memory:
+
+- a full alias of a non-bound surface samples its tracked Vulkan image
+  directly;
+- a full alias of the currently bound color target takes an ordered copy
+  before drawing, avoiding a read/write feedback loop; and
+- a row-aligned compatible subregion takes an ordered transient copy sized to
+  the programmed texture, preserving texture-local wrap and clamp behavior.
+
+The implemented alias formats are the observed 32-bit `0x12`, `0x06` and
+`0x2E` cases and 16-bit `0x11`. A surface sampled and then rebound for
+rendering is transitioned back to color-attachment ownership. Incompatible
+formats, pitches, bounds or overlaps still fail explicitly rather than
+sampling stale guest memory. A non-aliased `LIN_D24S8` stage samples white,
+matching the CPU reference's unsupported-format rule; that is not a
+GPU-owned depth-alias implementation. These paths have synthetic full-alias,
+self-alias, subregion, cube-face and packed-depth-fallback coverage. Mipmaps
+remain level-zero-only for aliases; ordinary swizzled, P8 and BC textures can
+expose supplied levels under `RECOMP_GPU_MIPS=1`.
+
+### Extended combiners, GPU vertex programs, and visibility
+
+The existing `Nv2aBackendExt.draw` seam supplies `Nv2aXVertex` data after the
+framework CPU path has run the title's vertex program, clipping and ordinary
+CPU-side culling. Its static extended vertex shader converts the screen-space
+position to Vulkan clip space and carries diffuse/specular colors, fog and
+four coordinate sets.
+
+Eligible `draw_vsh` batches instead upload the NV2A instructions, 192
+constants, gathered float inputs and a remapped 32-bit triangle index list.
+A statically compiled SPIR-V interpreter implements the same source mux,
+swizzle, negation, temporary/output register, MAC/ILU, relative-constant,
+mask, `+0` W, AA, near-clip, depth, color, fog and texture-coordinate rules as
+the D3D11 generator. A geometry stage drops the whole triangle when any
+transformed position or clip distance is non-finite. The path intentionally
+does not claim raw stream support; leaving `vsh_raw_ok` unset preserves the
+framework's gathered-input and CPU-fallback rules.
+
+When `RECOMP_GPU_VSH_VERIFY=<n>` is active, the backend retains only the last
+selected batch, re-runs the same interpreter in a compute shader, waits for
+that diagnostic dispatch and maps `Nv2aXVsOut` back to executor coordinates.
+Normal draws allocate no verification output and add no verification wait.
+
+One static extended pixel shader interprets up to eight general register
+combiner stages and the final combiner from an aligned uniform buffer. It
+implements projected/normalized 2D sampling, native cube sampling,
+passthrough, clip-plane modes, per-stage constants, mux/dot/output mappings,
+final-combiner inputs and alpha test. Four image/sampler pairs, four cube
+fallback views and the uniform buffer use a fixed descriptor ABI. Null
+combiner state uses the shared texture-zero-times-diffuse constructor.
+Synthetic tests cover a two-texture multiply, that default constructor,
+positive-X cube selection and alpha-preserving packed-depth fallback.
+
+Vulkan associates one precise occlusion query with each of its eight bounded
+command slots. Query reset/begin/end remains in the draw's command order;
+results are consumed only after the slot fence completes, accumulated with
+saturation, and divided by `aa_sx * aa_sy` to report logical guest pixels.
+`CLEAR_REPORT_VALUE` drains older queries before resetting the total. This is
+the synchronous correctness policy, not a throughput optimization. The retail
+visibility run restored 1,607.6 draws and 132,454.7 vertices per frame, closely
+matching D3D11's 1,608.4 and 132,641.7, but its one completed stationary
+interval was only 1.261 flips/s and is not A/B/A performance evidence.
+
+### Shader and dependency policy
+
+Vulkan and D3D12 should share the existing HLSL generators rather than grow
+two independently maintained NV2A shader languages. A pinned DirectX Shader
+Compiler version will compile the same generated source to SPIR-V for Vulkan
+and DXIL for D3D12. D3D11 keeps its existing `D3DCompile` path until a
+separate, measured migration is justified.
+
+Shader-cache identity must include at least the backend, DXC version, target
+environment/profile, compile flags, descriptor/root-signature ABI, generated
+source, and relevant renderer options. D3D11 bytecode is never reusable by
+Vulkan or D3D12. Cache incompatibility must miss or reject explicitly rather
+than loading bytecode under the wrong API contract.
+
+The build pins Vulkan-Headers `vulkan-sdk-1.4.363.0` at commit
+`6802bb4733b63ed5efd3adb308a6c885ef180ea1` and DXC `v1.9.2609`. The DXC
+archive SHA-256 is
+`ad31b1fc8443175d204f77a611fdb3ef2ec42759bdc2f1167368de24a4a7e7f1`;
+the installer also verifies the header tree, required compiler files and
+archive extraction paths. Build-time DXC compiles nine base, partial-clear, extended and VSH
+HLSL entry points to Vulkan 1.3 SPIR-V. Both `build.py` and direct CMake
+configuration compare the required extracted DXC files with the verified
+archive before executing the compiler. End users need no Vulkan SDK.
+
+The backend requires a Vulkan 1.3 loader and device, dynamic rendering,
+`shaderDemoteToHelperInvocation`, geometry shaders, shader clip distances,
+precise occlusion queries, a graphics queue, BGRA8 color
+attachment/sampling/transfer support, and compatible depth formats. Runtime adapter
+preference is discrete, integrated, virtual, then CPU;
+`RECOMP_VULKAN_DEVICE=<decimal-index>` selects one explicitly. The production
+future `auto` path will treat a missing loader or insufficient device as the
+reported reason to try D3D12. D3D12 continues to come from the supported
+Windows SDK.
+
+### Presentation and synchronization
+
+The initial CPU-upload route is implemented for explicit Vulkan bring-up:
+mandatory flip readback publishes guest pixels to the existing window. It is
+not sufficient for default promotion because it discards any
+higher-resolution GPU result and cannot replace current scaled native
+presentation.
+
+The hard boundary from sp00nznet/xboxrecomp#306 is that presentation remains
+a host service. `Nv2aBackend` produces and reads back surfaces; it does not
+create or pump the top-level window, own the presentation surface or swap
+chain, or call the platform's final present operation. The framework host
+continues to own input, the CPU snapshot, PVIDEO composition, fullscreen
+state, VSync policy, frame identity and the presentation thread. Pinned
+framebuffers, PVIDEO, captures and diagnostics must still be able to request
+the CPU route without creating a competing swap chain.
+
+The Vulkan exemplar will prototype a separate presentation-source handoff,
+not put window callbacks into `Nv2aBackend`. The host service creates the
+window and platform Vulkan surface; the backend selects compatible rendering
+devices and queues, produces a completed image, supplies explicit
+synchronization and frame identity, and retains mandatory guest readback.
+The host Vulkan presentation module owns swap-chain creation, resize,
+acquisition, final copy or composite, VSync and presentation. D3D12 follows
+the same ownership split with a host D3D12 presentation module.
+
+The exact API-specific context and image/synchronization descriptor is not
+yet an accepted upstream interface. Open
+[sp00nznet/xboxrecomp#312](https://github.com/sp00nznet/xboxrecomp/issues/312)
+asks about adjacent downstream host hooks and has no maintainer answer for
+presentation. Prototype this handoff downstream with fake producer/consumer
+fixtures, keep it outside the executor contract, and upstream only the
+smallest renderer-neutral seam that maintainers approve.
+
+Making Vulkan depend on importing into the current D3D11 keyed-mutex
+presenter would turn cross-API interop into a default hardware requirement
+and is not the target architecture. The current D3D11 shared path remains
+intact while the host-owned Vulkan path is developed behind an off-by-default
+switch.
+
+The API primitives may differ, but their externally visible ordering may
+not:
+
+- command buffers/lists may batch work only within the current submitted-work
+  bound and must apply backpressure at the same logical checkpoints;
+- flip readback must publish guest pixels before snapshots, dumps, hashes,
+  and CPU consumers;
+- visibility reports must retire in command order and normalize scaled
+  samples to guest-pixel counts;
+- render-to-texture transitions must not force whole-frame guest readback;
+- semaphore releases, PFB acknowledgement, software-method traps, report
+  completion, flip holds, and queued PUT segments keep their existing
+  ordering;
+- resize and native-output changes use one committed presentation/scale epoch
+  so projection, physical resources, and the displayed picture cannot
+  disagree;
+- device removal or loss reports the failed API operation and stops rather
+  than claiming queued work completed or switching backend.
+
+### Rollout and completion gates
+
+The migration proceeds in independently reviewable stages:
+
+The project has adopted the v0.18/#319 contract baseline, added selector
+lifecycle coverage, extracted checked surface/texture layouts and guest
+snapshots, pinned the dependencies, and completed stage 4's base,
+CPU-transformed pixel-pipeline and gathered-input GPU-VSH subset. Stage 5 is in progress: the
+CPU-presented retail path now reaches a near-matched Basic Controls state with
+exact 2D/cube/mip texture reuse, register combiners, compatible color aliases
+and precise visibility. Stages 2-3 continue as full parity reveals proven
+generic seams; stages 6-9 remain open.
+
+1. **Adopt the accepted contract baseline.** Reuse the merged
+   sp00nznet/xboxrecomp#319 fixture; do not duplicate it. Add project tests
+   only for lifecycle, selector and presentation-source behavior outside its
+   existing callback-order scope.
+2. **Grow the contract one concern at a time.** Prepare version/capability,
+   durable failure and required renderer-state extensions as separate
+   synthetic changes shaped for official `Nv2aBackend`. Rebase local adapters
+   when a piece is accepted rather than reviving the #184 seam wholesale.
+3. **Extract neutral helpers.** Move pure renderer behavior with unchanged
+   D3D11 tests. Only helpers proven by the Vulkan exemplar become upstream
+   candidates.
+4. **Explicit downstream Vulkan bring-up (transformed pixel pipeline and gathered GPU-VSH complete).**
+   The loader/device/queue, validation diagnostics, base, CPU-transformed
+   draws, four 2D/cube texture stages, default-off supplied mip chains,
+   gathered-input NV2A vertex programs with verification readback, register
+   combiners, precise visibility, depth/stencil, bounded submission, readback
+   and CPU presentation route are available behind
+   `RECOMP_GPU=vulkan`. The backend remains non-default and contains no title
+   addresses or generated game data.
+5. **Host-owned Vulkan presentation and parity (in progress).** Exact
+   snapshot-checked 2D/cube/mip caching, compatible full/self/subregion color
+   aliases, and a near-matched NVIDIA Basic Controls capture are implemented.
+   Review places all 134 over-8/255 pixels in exposed animated world content;
+   three opaque panel regions have none, while their remaining differences
+   stay within six channel levels. The wider-scene profile proved CPU
+   vertex-program interpretation was a renderer bottleneck; the gathered
+   Vulkan interpreter removes it from the sampled NV2A hot list and materially
+   improves unreviewed flip cadence. Validate matched wider-scene output and
+   decide whether direct raw-stream fetch is required, then prototype and test the
+   presentation-source handoff, scaling, window clip and native host
+   presentation.
+   Compare matched frames with CPU and D3D11 and exercise NVIDIA, AMD and
+   Intel where available. The current capture closes one stationary state,
+   not broad parity.
+6. **Upstream extraction and Vulkan PR readiness.** Submit only approved
+   generic contract, helper, fixture and documentation pieces, each with its
+   own synthetic evidence. Once the contract and host presentation boundary
+   are accepted and the downstream renderer passes parity, request explicit
+   approval to open an optional, default-off Vulkan backend PR. No upstream
+   interaction is implied by this plan.
+7. **D3D12 parity.** Implement the same accepted contract with D3D12, using
+   WARP for deterministic no-hardware fixtures where applicable. It remains
+   explicit until it meets the same output and ordering gates.
+8. **Automatic selection.** Test injected Vulkan startup failures,
+   successful D3D12 fallback, both-backends-fail behavior, explicit
+   no-fallback selections, settings migration, and unambiguous active-backend
+   diagnostics. Only then make `auto` the fresh graphical default.
+9. **D3D11 reassessment.** Keep D3D11 selectable through Vulkan and D3D12
+   parity and field validation. Retirement is a later explicit decision, not
+   an automatic consequence of switching the fresh default.
+
+Every backend must pass the shared synthetic state, texture, clear, shader,
+visibility, readback, scale, presentation, failure-injection, and ordering
+fixtures. Default promotion additionally requires matched-frame coverage for
+the opening, tutorial stationary and movement scenes, menus, movies, HUD,
+fades, render-to-texture and PVIDEO/CPU fallback. Performance comparisons
+come only after correctness and use the same-generation A/B/A protocol,
+reporting distinct world frames separately from flips. A different graphics
+API is not assumed to improve the PFB flush wait or any other guest-side
+bottleneck.
 
 ## D3D11 rendering systems
 
@@ -399,11 +829,12 @@ newly set guard or leave a partial write.
 
 #### Experimental mipmaps and anisotropy
 
-`RECOMP_GPU_MIPS=1` enables the separately validated mip path; `0` or unset
-retains the previous level-zero sampler. It constructs checked 2D or six-face
-layouts for swizzled, P8 and BC data, with each mip at its guest offset.
-D3D11 can expose no more levels than the natural chain through 1x1; declared
-extra 1x1 storage still determines the 128-byte-aligned cube-face stride.
+`RECOMP_GPU_MIPS=1` enables the separately validated D3D11/Vulkan mip path;
+`0` or unset retains the previous level-zero sampler. It constructs checked
+2D or six-face layouts for swizzled, P8 and BC data, with each mip at its
+guest offset. Both backends expose no more levels than the natural chain
+through 1x1; declared extra 1x1 storage still determines the
+128-byte-aligned cube-face stride.
 This spacing is a compatibility assumption, not proven for malformed
 declarations on NV2A hardware. The checked span includes the complete last
 exposed face and level, including face gaps. Dimensions, arithmetic and a
@@ -421,10 +852,13 @@ stay within the old level-zero source span; unsafe declarations are rejected.
 Linear and packed-YUV textures and render-target aliases expose only level
 zero. Depth/stencil aliases support only single-level declarations and
 reject multi-level ones; none has generated mipmaps. On opt-in, packed
-YUV bounds include a complete pair even for odd widths. GPU-compute, direct
-BC and per-level CPU-decoded uploads create all exposed D3D subresources and
-the matching 2D/cube SRV. Failure or approximation paths report bounded
-`[GPU-MIPS]` or `[GPU-D3D11]` diagnostics.
+YUV bounds include a complete pair even for odd widths. D3D11 GPU-compute,
+direct BC and per-level CPU-decoded uploads create all exposed D3D
+subresources and the matching 2D/cube SRV. Vulkan decodes each exposed
+face/level from the same immutable snapshot, uploads one tightly packed copy
+region per subresource and creates one multi-level 2D or cube image. Failure
+or approximation paths report bounded `[GPU-MIPS]`, `[GPU-D3D11]` or
+`[GPU-Vulkan]` diagnostics.
 
 The sampler maps minification, magnification and mip filtering separately.
 Non-mip minification remains at level zero; unknown filters use point and
@@ -432,17 +866,19 @@ convolution filters approximate linear, with diagnostics. For mip filters,
 the implementation interprets CONTROL0's 12-bit min/max fields as unsigned
 4.8 values, bounds them to exposed levels and collapses inverted ranges to
 the maximum. The filter's signed 13-bit bias is divided by 256 and clipped
-to D3D11's representable positive limit. This 4.8 interpretation follows
-NV30 driver evidence, but differs from xemu v0.8.139's raw-integer clamp
-handling and is not yet validated against NV2A hardware. See
+to the selected API/device limit. This 4.8 interpretation follows NV30 driver
+evidence, but differs from xemu v0.8.139's raw-integer clamp handling and is
+not yet validated against NV2A hardware. See
 [FINDINGS](./FINDINGS.md#experimental-mipmap-sampling-synthetic-evidence-2026-11-11).
 
-`RECOMP_GPU_ANISO=1` is a separate, default-off 8x enhancement, active only
-when mips are enabled and both spatial filters are linear with a usable mip
-range. D3D11 anisotropy can also change the underlying mip filtering. Full
-effective sampler descriptors, including LOD clamps and bias, key the sampler
-cache. The CPU reference still samples level zero, so enabled mips and
-anisotropy are intentional image differences, not proof of G4 equivalence.
+`RECOMP_GPU_ANISO=1` is a separate, default-off D3D11-only 8x enhancement,
+active only when mips are enabled and both spatial filters are linear with a
+usable mip range. D3D11 anisotropy can also change the underlying mip
+filtering. Full effective D3D11 sampler descriptors, including LOD clamps and
+bias, key its sampler cache; Vulkan currently creates bounded transient
+samplers per draw. The CPU reference still samples level zero, so enabled
+mips and anisotropy are intentional image differences, not proof of G4
+equivalence.
 
 Deterministically unsupported non-P8 CPU decodes, when no GPU decode was
 attempted, receive bounded negative cache entries. Retryable upload failures
@@ -501,7 +937,7 @@ result overrides the narrower synthetic success.
 ### Vertex processing and pixel combiners
 
 The executor can transform vertices on the CPU or send eligible
-vertex-program batches to D3D11. [vsh_hlsl.c](../src/gpu/vsh_hlsl.c)
+vertex-program batches to D3D11 or Vulkan. [vsh_hlsl.c](../src/gpu/vsh_hlsl.c)
 translates NV2A programs to HLSL using the framework interpreter as its
 semantic reference. Compatible attribute streams can be submitted as guest
 bytes; otherwise the executor gathers float inputs. Programs that write
@@ -509,6 +945,14 @@ constants remain on the CPU. New GPU programs compile on a worker; batches
 fall back to CPU transformation until their shader is ready. Optional
 `RECOMP_GPU_VSH_VERIFY=<n>` reads back every nth GPU-program batch for
 comparison with the interpreter and is a slow diagnostic.
+
+Vulkan uses a different compilation strategy under the same `draw_vsh`
+contract: one pinned, static interpreter shader consumes uploaded instructions
+and gathered float inputs. It does not advertise raw-stream support, compile
+per-program shaders, or add a worker dependency. Its compute verifier returns
+the same `Nv2aXVsOut` layout to the framework comparison. NVIDIA and AMD
+fixtures cover a known MOV program, exact position/color output, non-finite
+primitive rejection, and readback.
 
 Fixed-function batches are still transformed by the executor on the CPU
 before D3D11 receives them. The executor also rejects primitive types below
@@ -578,16 +1022,19 @@ unmodeled. The window-clip switch remains off by default.
 
 ### Visibility reports
 
-The title uses visibility counts to decide what to draw. D3D11 maps these to
-occlusion queries; the default synchronous report waits for completed
-queries at `GET_REPORT`. `RECOMP_GPU_ZPASS=async` instead queues reports,
-uses GPU events and polls on the NV2A thread, writing results to guest memory
-in command order when ready. Its bounded queue can still wait when full.
-Async reporting changes timing and is experimental despite synthetic WARP
-and hardware coverage. The null probe reports geometry visible so it does not
-accidentally measure a scene culled by missing results. Scaled D3D11 queries
-are normalized back to guest-pixel counts in both synchronous and
-asynchronous paths.
+The title uses visibility counts to decide what to draw. D3D11 and Vulkan map
+these to occlusion queries; the default synchronous report waits for completed
+queries at `GET_REPORT`. `RECOMP_GPU_ZPASS=async` instead queues exact,
+ordered reports and polls on the NV2A thread, writing results to guest memory
+only when the owning submission is complete. Vulkan uses a 1,024-report ring,
+may share a submission across report boundaries, and flushes an unsubmitted
+report batch after 0.25 ms. Its completion status is published only after a
+memory barrier. Bounded queues can still wait when full; no result is skipped
+or fabricated. Async reporting changes timing and is experimental despite
+synthetic cross-vendor coverage. The null probe reports geometry visible so
+it does not accidentally measure a scene culled by missing results. Scaled
+D3D11 queries are normalized back to guest-pixel counts in both synchronous
+and asynchronous paths.
 
 ## Flip, readback and presentation
 
@@ -690,10 +1137,10 @@ setting-to-environment mapping.
 
 | Setting | Fresh launcher default | Notes |
 | --- | --- | --- |
-| Renderer | D3D11 hardware | The launcher and graphical `build.py` runs select D3D11 unless `RECOMP_GPU` explicitly selects `cpu` or `null`. CPU remains the correctness reference; `null` is a probe, not a renderer. `RECOMP_D3D11_WARP=1` selects the D3D11 software device. |
+| Renderer | D3D11 hardware | The launcher and graphical `build.py` runs select D3D11 unless `RECOMP_GPU` explicitly selects `vulkan`, `cpu` or `null`. Vulkan is a non-default bring-up path with CPU-transformed extended draws; CPU remains the correctness reference, and `null` is a probe. `RECOMP_D3D11_WARP=1` selects the D3D11 software device. |
 | Internal resolution | 480p guest (`RECOMP_GPU_SCALE=1`) | Native, 2160p, 1440p, 1080p and 720p are available for D3D11. The CPU renderer remains at guest resolution. |
 | Vertex programs / texture decoding | GPU / GPU where supported | CPU fallbacks remain; `RECOMP_GPU_VSH=0` and `RECOMP_GPU_TEX_DECODE=0` are comparison switches. |
-| Guest mipmaps / anisotropy | Off / off | `RECOMP_GPU_MIPS=1` exposes supported supplied chains; `RECOMP_GPU_ANISO=1` separately enhances eligible mipped samplers. |
+| Guest mipmaps / anisotropy | Off / off | `RECOMP_GPU_MIPS=1` exposes supported supplied chains on D3D11 and Vulkan; `RECOMP_GPU_ANISO=1` separately enhances eligible D3D11 samplers. |
 | Visibility | Synchronous | `RECOMP_GPU_ZPASS=async` is opt-in. |
 | Clean readback elision | Off | `RECOMP_GPU_SKIP_CLEAN_READBACK=1` is an environment-only experiment; dirty and diagnostic frames retain readback. |
 | Persistent pixel-shader cache | Off | `RECOMP_GPU_PSCACHE=1` enables the combiner cache. |
@@ -702,10 +1149,11 @@ setting-to-environment mapping.
 | Window / display scaling / VSync | Windowed / 2x linear / on | Display size is separate from a fixed internal-resolution preset; native mode follows its 4:3 picture. |
 
 The launcher starts the tutorial configuration. To compare the renderers
-from the command line after building, set `RECOMP_GPU` to `cpu` or `d3d11`
-and run `python tools\build.py run --experimental-tutorial`; keep all other
-settings and the scene controlled. Full setup and options are in the
-[user guide](./USER_GUIDE.md#d3d11-renderer-and-benchmark-diagnostics).
+from the command line after building, set `RECOMP_GPU` to `cpu`, `d3d11` or
+the bring-up-only `vulkan` and run
+`python tools\build.py run --experimental-tutorial`; keep all other settings
+and the scene controlled. Full setup and options are in the
+[user guide](./USER_GUIDE.md#d3d11-vulkan-and-benchmark-diagnostics).
 
 ## Diagnostics and validation
 
@@ -714,6 +1162,11 @@ settings and the scene controlled. Full setup and options are in the
   waits, submitted-work batches/backpressure, alias activity and
   shared-presentation counts. `RECOMP_GPU_TEXLOG=1` logs individual
   texture uploads.
+- Vulkan startup reports the selected device, vendor/device IDs, Vulkan and
+  driver versions, queue family, DXC pin and validation state. Its periodic
+  report counts flips, draws, clears, readbacks, surfaces and pipelines.
+  `RECOMP_VULKAN_VALIDATION=1` requires the Khronos validation layer and
+  debug-utils extension; any validation error fails the native fixture.
 - `RECOMP_GPU_SHADER_DIAG=1` bounds vertex-program preparation reports to 32
   events. `RECOMP_GPU_VSH_VERIFY` caps skip reports at 16; the separate
   `RECOMP_NV2A_WAIT_DIAG=1` reports prolonged event-driven PFB waits at most
@@ -726,7 +1179,7 @@ settings and the scene controlled. Full setup and options are in the
   recent-method diagnostics; format-binding counts are not visibility.
   Movement collection and unexplained black/dark/solid/unchanged intervals
   are inconclusive until separately reviewed; see the
-  [benchmark instructions](./USER_GUIDE.md#d3d11-renderer-and-benchmark-diagnostics).
+  [benchmark instructions](./USER_GUIDE.md#d3d11-vulkan-and-benchmark-diagnostics).
 - Use numbered flip-time captures for image comparisons. Report-time dumps
   can be mid-frame, before HUD and composite. Flips can repeat, and
   whole-frame pixel changes can come from the HUD or fades; neither measure
@@ -759,10 +1212,32 @@ replace matched gameplay or original-hardware validation.
 
 ## Current limits
 
-- The reported roughly 6 FPS during movement with default launcher settings
-  has not been explained or shown fixed by a controlled, matched benchmark.
-  The final cache-fix binary was not rebenchmarked. Earlier whole-frame
-  change rates are not validated world FPS.
+- Vulkan now has validation-clean base and CPU-transformed extended draws,
+  gathered-input GPU execution of eligible NV2A vertex programs with
+  verification readback and non-finite triangle rejection,
+  exact 2D/cube texture cache/rewrite tracking, four texture stages, register
+  combiners, compatible color render-target aliases, precise visibility and
+  default-off supplied mip chains, and an integrated retail draw/flip/readback
+  capture through the existing CPU presenter. It still has no native Vulkan
+  swap chain, scaled/native-resolution handoff, direct raw guest-stream vertex
+  fetch or window clip. Surface layout changes after creation fail rather
+  than migrate. In one matched Basic Controls capture, 134 of
+  307,200 pixels
+  (0.0436%) exceed 8/255 versus D3D11; mean channel error is 0.374562 and the
+  maximum is 29. That closes the first stationary full-pixel-pipeline
+  comparison. Component review places all 134 over-8 pixels in exposed
+  animated world content around the opaque tutorial panel; three opaque panel
+  regions have none and differ by at most six channel levels. The exact cause
+  of those subthreshold cross-API numeric differences remains unisolated.
+  This is not movement/movie/fade parity, native presentation, stability, or
+  a performance gate.
+- The previous uninstrumented Vulkan diagnostics isolated gameplay intervals
+  around 8.960-11.240 flips/s. A later single legacy-route GPU-VSH diagnostic
+  reported 26.391 stationary and 38.862 movement flips/s, and a caller-profiled
+  repeat reported 26.683 and 38.503. These observations show that CPU vertex
+  interpretation was the immediate Vulkan throughput blocker, but the route
+  and frames remain unreviewed and the runs are not alternating A/B/A or
+  distinct-world-frame evidence.
 - One native xemu Basic Controls scene is matched: the packed-stencil option
   reduces the large whole-frame brightness difference, while its unsupported
   ownership cases and title-wide behavior keep G4 open. Sun-facing, fade and
@@ -796,6 +1271,12 @@ replace matched gameplay or original-hardware validation.
   levels and the run was neither matched nor continuously reviewed.
   Performance, VRAM headroom, broader title mip/LOD behavior and native 4K
   display output remain unvalidated. The launcher keeps 480p as its default.
+- A later Vulkan mip probe took the legacy script's wrong Join Deathmatch
+  route and was stopped. It uploaded one supplied six-level format-`0x0E` BC
+  chain without a Vulkan validation error, proving integrated title data
+  reached the path but not scene correctness, movie playback, image parity or
+  performance. The script deliberately sent A presses through the intro
+  movies; their absence on screen in that run is not a renderer conclusion.
 
 Keep disc content, generated game code, screenshots, runtime captures and
 logs local. Use synthetic fixtures for shareable reproduction. Current

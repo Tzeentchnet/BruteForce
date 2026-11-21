@@ -19,6 +19,61 @@ python -m pytest -q tests\test_build.py tests\test_bench_performance.py
 The tests include a synthetic disc image and do not require game data. The
 synthetic extraction test uses the installed toolkit's XISO reader.
 
+The neutral frame comparator's whole-image, regional and four-connected
+over-8/255 component accounting has focused coverage:
+
+```powershell
+python -m pytest -q tests\test_compare_frames.py
+```
+
+The Vulkan source build uses pinned Vulkan-Headers and DXC dependencies.
+`build.py setup` installs both along with the framework; verify them without
+network or modification with:
+
+```powershell
+python tools\dependencies.py --verify
+```
+
+The renderer startup, renderer-neutral surface/texture layout, and hardware
+Vulkan fixtures are standalone native tests. The Vulkan case uses the
+framework's synthetic conformance XBE and returns CTest-style code 77 when no
+suitable Vulkan 1.3 device is available:
+
+```powershell
+cmake -S . -B build\smoke -G "Visual Studio 17 2022" -A x64 `
+  "-DBRUTEFORCE_GEN_DIR=$PWD\tests\fixtures\generated"
+cmake --build build\smoke --config Release --parallel 4 --target `
+  bruteforce_renderer_startup_test bruteforce_surface_layout_test `
+  bruteforce_texture_layout_test bruteforce_vulkan_test
+& build\smoke\Release\bruteforce_renderer_startup_test.exe
+& build\smoke\Release\bruteforce_surface_layout_test.exe
+& build\smoke\Release\bruteforce_texture_layout_test.exe
+$env:RECOMP_VULKAN_VALIDATION = "1"
+& build\smoke\Release\bruteforce_vulkan_test.exe `
+  "$PWD\.deps\xboxrecomp\tools\conformance\test.xbe"
+Remove-Item Env:\RECOMP_VULKAN_VALIDATION
+```
+
+Use `RECOMP_VULKAN_DEVICE=<decimal-index>` to repeat the Vulkan fixture on
+each installed adapter. Validation must report zero errors. These tests cover
+transactional startup, injected loader/probe failures, clear/base draw,
+CPU-transformed extended draw, a gathered-input NV2A vertex program, exact
+vertex-output verification readback, whole-triangle rejection for non-finite
+output, a two-stage register combiner, the default
+texture-zero-times-diffuse combiner, cube-face selection, the explicit
+non-aliased packed-depth fallback, exact texture reuse and source/palette
+rewrites, depth/RGB565 readback, compatible full/self/subregion color aliases,
+precise visibility on base and extended draws including AA normalization,
+invalid mip-option rejection, level-zero render-target mip fallback, forced
+2D lower-level selection and rewrite invalidation, positive-X cube lower-level
+selection, short-pitch rejection, and shutdown after callback-thread
+quiescence. The
+pipeline failure case exercises rollback from the actual graphics-pipeline
+creation path. Device suitability includes geometry shaders and shader clip
+distances for the GPU-VSH path. The texture-layout fixture covers linear, swizzled,
+block-compressed, paletted, mip, cube and rejected declarations. These tests
+do not establish native presentation, broader retail parity, or performance.
+
 After changing the xboxrecomp base, selected commits, or local framework
 patches, verify the reproducible checkout and run its recompiler suite:
 
@@ -171,7 +226,9 @@ cmake --build build\smoke --config Release --parallel 4 --target `
   bruteforce_pushbuffer_test bruteforce_pgraph_test bruteforce_window_clip_test `
   bruteforce_color_unpack_test bruteforce_texture_math_test `
   bruteforce_frame_stats_test bruteforce_gpu_audit_test `
-  bruteforce_d3d11_test bruteforce_gpu_shared_present_test
+  bruteforce_d3d11_test bruteforce_gpu_shared_present_test `
+  bruteforce_renderer_startup_test bruteforce_surface_layout_test `
+  bruteforce_vulkan_test
 $env:BRUTEFORCE_TEST_HOST = "$PWD\build\smoke\Release\bruteforce.exe"
 $env:BRUTEFORCE_TEST_FENCE = "$PWD\build\smoke\Release\bruteforce_fence_test.exe"
 $env:BRUTEFORCE_TEST_CAMERA_TRACE = "$PWD\build\smoke\Release\bruteforce_camera_trace_test.exe"

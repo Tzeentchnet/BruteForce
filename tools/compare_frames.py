@@ -10,7 +10,9 @@ unchanged pixels. The maximum is the largest individual channel difference.
 "Over 8" counts pixels with any channel differing by more than 8/255,
 independently of the selected tolerance. Regional differences cover every
 non-identical grid cell, including partial cells at image edges; omitted cells
-are identical. The optional mask is white above the selected tolerance.
+are identical. Over-8 components use four-neighbour connectivity and report
+the twelve largest coherent areas. The optional mask is white above the
+selected tolerance.
 """
 
 import argparse
@@ -77,6 +79,99 @@ def _absolute_difference(total, maximum, pixel_count):
     }
 
 
+def _over_8_components(mask, width, height):
+    active = {}
+    previous = []
+    complete = []
+    next_id = 0
+
+    for y in range(height):
+        runs = []
+        x = 0
+        row = y * width
+        while x < width:
+            while x < width and not mask[row + x]:
+                x += 1
+            if x == width:
+                break
+            start = x
+            while x < width and mask[row + x]:
+                x += 1
+            runs.append((start, x))
+
+        parent = {}
+
+        def root(component):
+            while component in parent:
+                parent[component] = parent.get(parent[component], parent[component])
+                component = parent[component]
+            return component
+
+        current = []
+        previous_index = 0
+        for start, end in runs:
+            while (previous_index < len(previous)
+                   and previous[previous_index][1] <= start):
+                previous_index += 1
+            overlaps = []
+            scan = previous_index
+            while scan < len(previous) and previous[scan][0] < end:
+                component = root(previous[scan][2])
+                if component not in overlaps:
+                    overlaps.append(component)
+                scan += 1
+
+            if not overlaps:
+                component = next_id
+                next_id += 1
+                active[component] = {
+                    "x": start, "y": y, "right": end, "bottom": y + 1,
+                    "pixels": 0,
+                }
+            else:
+                component = overlaps[0]
+                for other in overlaps[1:]:
+                    other = root(other)
+                    component = root(component)
+                    if other == component:
+                        continue
+                    target = active[component]
+                    merged = active.pop(other)
+                    target["x"] = min(target["x"], merged["x"])
+                    target["y"] = min(target["y"], merged["y"])
+                    target["right"] = max(target["right"], merged["right"])
+                    target["bottom"] = max(target["bottom"], merged["bottom"])
+                    target["pixels"] += merged["pixels"]
+                    parent[other] = component
+
+            stats = active[root(component)]
+            stats["x"] = min(stats["x"], start)
+            stats["right"] = max(stats["right"], end)
+            stats["bottom"] = y + 1
+            stats["pixels"] += end - start
+            current.append((start, end, root(component)))
+
+        current = [(start, end, root(component))
+                   for start, end, component in current]
+        current_ids = {component for _, _, component in current}
+        for component in list(active):
+            if component not in current_ids:
+                complete.append(active.pop(component))
+        previous = current
+
+    complete.extend(active.values())
+    components = [{
+        "x": stats["x"],
+        "y": stats["y"],
+        "width": stats["right"] - stats["x"],
+        "height": stats["bottom"] - stats["y"],
+        "pixels": stats["pixels"],
+    } for stats in complete]
+    components.sort(key=lambda item: (
+        -item["pixels"], item["y"], item["x"], item["height"], item["width"]))
+    return len(components), components[:12]
+
+
 def compare(path_a, path_b, tolerance=8, cell=16, diff_out=None, *,
             reference_label="reference", candidate_label="candidate"):
     cell = _validate_inputs(path_a, path_b, tolerance, cell, diff_out,
@@ -100,6 +195,7 @@ def compare(path_a, path_b, tolerance=8, cell=16, diff_out=None, *,
     maximum_difference = 0
     cells = {}
     regional = {}
+    over_8_mask = bytearray(w * h)
     mask = Image.new("L", a.size, 0) if diff_out is not None else None
     mask_px = mask.load() if mask else None
     for y in range(h):
@@ -136,6 +232,7 @@ def compare(path_a, path_b, tolerance=8, cell=16, diff_out=None, *,
                 region["pixels_over_tolerance"] += d > tolerance
             if d > 8:
                 over_8 += 1
+                over_8_mask[y * w + x] = 1
             if d > tolerance:
                 over += 1
                 key = (x // cell, y // cell)
@@ -159,6 +256,8 @@ def compare(path_a, path_b, tolerance=8, cell=16, diff_out=None, *,
                 stats["sum"], stats["max_channel"], width * height),
         })
     pixel_count = w * h
+    component_count, largest_components = _over_8_components(
+        over_8_mask, w, h)
     return {
         "size": [w, h],
         "tolerance": tolerance,
@@ -174,6 +273,8 @@ def compare(path_a, path_b, tolerance=8, cell=16, diff_out=None, *,
         "fraction_differing": round(differing / pixel_count, 6),
         "pixels_over_8": over_8,
         "fraction_over_8": round(over_8 / pixel_count, 6),
+        "over_8_component_count": component_count,
+        "largest_over_8_components": largest_components,
         "absolute_difference": _absolute_difference(
             total_difference, maximum_difference, pixel_count),
         "regional_differences": regional_differences,

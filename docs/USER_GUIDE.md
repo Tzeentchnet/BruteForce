@@ -7,7 +7,8 @@ the shortest supported build-and-run path, start with the
 ## Requirements and build workflow
 
 - 64-bit Windows 10 or 11, a Direct3D 11-capable GPU, and sufficient disk space
-  for the extracted disc, generated C, and build.
+  for the extracted disc, generated C, and build. Explicit Vulkan testing
+  requires a Vulkan 1.3-capable driver; the default D3D11 path does not.
 - Python 3.10 or later with Tkinter for the launcher, Git, CMake 3.20 or later, and Visual Studio 2022
   17.5 or later Build Tools with the C++ workload and Windows SDK. The MSVC
   build enables its experimental C11 atomics support for the guest memory
@@ -44,9 +45,11 @@ To build the game and selected native fixtures in one build, repeat
 `--extra-target`, for example `--extra-target bruteforce_d3d11_test
 --extra-target bruteforce_gpu_shared_present_test`.
 
-`setup` installs the pinned framework and fixes in `.deps\xboxrecomp`. It
-refuses to overwrite a different or modified checkout; preserve and move an
-older checkout before rerunning setup for the current patch set. `extract`
+`setup` installs the pinned framework and fixes in `.deps\xboxrecomp`, plus
+the pinned Vulkan-Headers and DXC build dependencies in `.deps`. No Vulkan
+SDK is required. It refuses to overwrite a different or modified framework
+checkout or accept mismatched Vulkan dependencies; preserve and move an older
+checkout before rerunning setup for the current patch set. `extract`
 verifies the executable before extraction and compares existing files byte-for-byte instead
 of overwriting them. `generate` analyzes all executable sections, recovers
 ABIs, includes the observed function entries in `fingerprints\retail-seeds.json`,
@@ -71,13 +74,13 @@ only for a controlled comparison; an explicit value overrides the default.
 The command also enables the toolkit's vblank and unresolved-stub diagnostics
 unless the corresponding `RECOMP_VBLANK` or `RECOMP_STUB_LOG` environment
 variable is already set. `run --graphics` explicitly enables the upstream pushbuffer
-executor, framebuffer window, and Direct3D 11 presentation; the default run
-is headless. For a bounded diagnostic, set `RECOMP_WATCHDOG_SECS` to a number
+executor, framebuffer window, and host presentation; the default run is
+headless. For a bounded diagnostic, set `RECOMP_WATCHDOG_SECS` to a number
 of seconds before running. The watchdog exits after that fixed time even if
 the game is making progress. Successful file reads are quiet by default; set
 `RECOMP_READ_TRACE=1` to enable their verbose logging and byte dumps. A
 graphical `build.py` run selects D3D11 unless `RECOMP_GPU` explicitly selects
-the CPU reference or null probe. Failed
+the Vulkan bring-up backend, CPU reference, or null probe. Failed
 reads remain logged. When running the executable directly, the toolkit writes
 `xbox_kernel.log` in the current directory and replaces any existing file with
 that name. Untranslated instructions and unresolved indirect calls stop the
@@ -140,6 +143,8 @@ defaults to Direct3D 11 at 480p with experimental options off or using their
 existing defaults; existing saved renderer choices are retained. Graphical
 `build.py` runs also default to D3D11 unless `RECOMP_GPU` explicitly selects
 another path. The individual GPU paths have the limitations below.
+The planned Vulkan-first default and D3D12 startup fallback are design work
+only; they add no current launcher choice or runtime dependency.
 
 The guest-visible EEPROM video preference defaults to NTSC 4:3 480i/60.
 Set either option to the exact value `1` before launch to advertise widescreen
@@ -394,7 +399,7 @@ python -m pytest -q -p no:cacheprovider -o tmp_path_retention_count=1000000 `
   -o tmp_path_retention_policy=all --basetemp $testdir tests\test_audio_analysis.py
 ```
 
-## D3D11 renderer and benchmark diagnostics
+## D3D11, Vulkan, and benchmark diagnostics
 
 ```powershell
 python tools\build.py run --experimental-tutorial
@@ -405,8 +410,78 @@ Remove-Item Env:\RECOMP_GPU
 
 The launcher and graphical `build.py` runs select `d3d11` by default.
 `RECOMP_GPU=cpu` selects the CPU rasterizer, the correctness reference;
-`RECOMP_GPU=null` is a measurement probe that draws nothing. The D3D11
-renderer uses the D3DCompiler runtime
+`RECOMP_GPU=null` is a measurement probe that draws nothing.
+
+`RECOMP_GPU=vulkan` explicitly selects the non-default Vulkan 1.3 bring-up
+backend:
+
+```powershell
+python tools\dependencies.py --verify
+$env:RECOMP_GPU = "vulkan"
+python tools\build.py run --experimental-tutorial
+Remove-Item Env:\RECOMP_GPU
+```
+
+The Vulkan runtime dynamically loads the system `vulkan-1.dll`; an end-user
+Vulkan SDK is not required. It automatically prefers discrete, integrated,
+virtual, then CPU devices. Set `RECOMP_VULKAN_DEVICE=<decimal-index>` to
+require a physical-device enumeration index. An invalid or unsuitable
+explicit index fails closed. A suitable device must provide Vulkan 1.3
+dynamic rendering, geometry shaders, shader clip distances, precise
+occlusion queries and the required color/depth formats.
+`RECOMP_VULKAN_VALIDATION=1` enables Vulkan
+validation, but requires `VK_LAYER_KHRONOS_validation` and
+`VK_EXT_debug_utils` to be installed; the project does not bundle the
+validation layer.
+
+The current Vulkan milestone supports base clears/draws, CPU-transformed
+extended batches, and gathered-input GPU execution of eligible NV2A vertex
+programs, plus blend/cull/alpha and depth/stencil state, four sampled
+texture stages, level-zero 2D/cube textures by default and supplied mip chains
+behind `RECOMP_GPU_MIPS=1`, the full general/final register-combiner
+interpreter, precise visibility queries, RGB565 guest conversion, bounded
+command submission, exact snapshot-checked texture caching, compatible
+full/self/subregion color render-target aliases, and mandatory guest readback
+through the existing CPU presenter. Non-aliased
+`LIN_D24S8` stages explicitly sample white, matching the CPU reference's
+unsupported-format behavior. Validation-enabled fixtures pass on NVIDIA and
+AMD. Vulkan has reached and captured the retail Basic Controls state; the
+matched frame has 134 of 307,200 pixels over 8/255 versus D3D11. A reviewed
+component overlay places all 134 in animated world content visible outside
+the opaque tutorial panel. Three opaque panel regions have zero pixels over
+8/255 and maximum channel differences of four to six. This closes that
+threshold discrepancy for one stationary UI state, not exact numeric,
+movement, movie, fade or wider-scene parity.
+
+The Vulkan GPU-VSH path uses one statically compiled interpreter rather than
+runtime per-program compilation. The framework supplies exactly the float
+inputs each program reads, and programs that write constants retain the CPU
+fallback. A geometry stage rejects a whole triangle if any transformed
+position or clip distance is non-finite. `RECOMP_GPU_VSH=0` disables the path,
+and `RECOMP_GPU_VSH_VERIFY=<n>` reruns every nth accepted batch in a compute
+shader and compares its output with the CPU interpreter. Verification is a
+slow diagnostic and is inactive unless requested.
+
+Vulkan still has no native presentation, render scaling, direct raw guest-
+stream vertex fetch, or window clip. Surface layout
+changes after creation and incompatible render-target overlaps fail
+explicitly. The retained matched tutorial capture predates the GPU-VSH path,
+so it does not establish GPU-VSH movement, movie, fade, PVIDEO, or full-game
+parity.
+
+The Vulkan cache retains at most 2,048 entries and 128 MiB of exact source
+snapshots; P8 entries also compare exact palette bytes. Periodic
+`[GPU-Vulkan]` lines report flips, draws, clears, readbacks, surfaces,
+pipelines, resident textures, cache hits, uploads, mip uploads, visibility
+queries and visibility reads. A texture-cache hit does not add a GPU wait;
+replacement/eviction waits before destroying potentially referenced images.
+Synchronous precise visibility remains the default. Set
+`RECOMP_GPU_ZPASS=async` to select the exact ordered asynchronous report path;
+it never fabricates a count and retains bounded backpressure. D3D11 remains
+the graphical default and retail comparison path
+until native presentation, wider parity, stability and performance gates pass.
+
+The D3D11 renderer uses the D3DCompiler runtime
 (`d3dcompiler_47.dll`, part of Windows 10 and 11). `RECOMP_GPU_VSH=0` keeps
 vertex programs on the CPU. `RECOMP_GPU_VSH_VERIFY=<n>` compares every nth
 GPU-program batch with the CPU interpreter; fully culled batches are logged
@@ -438,9 +513,9 @@ selects the index. Both modes retain the same exact descriptor, allocation,
 source and palette checks. Other values reject D3D11 initialization. The
 linear path is not a compatibility fallback or a launcher setting.
 
-Guest mipmaps and anisotropy are separate experimental D3D11 switches; both
-accept only `0` or `1` and default to `0`. They are environment options, not
-launcher settings:
+Guest mipmaps are an experimental D3D11/Vulkan switch. Anisotropy remains a
+separate D3D11-only enhancement. Both accept only `0` or `1`, default to `0`,
+and are environment options rather than launcher settings:
 
 ```powershell
 $env:RECOMP_GPU_MIPS = "1"      # upload and sample supported guest mip chains
@@ -449,21 +524,29 @@ python tools\build.py run --experimental-tutorial
 Remove-Item Env:\RECOMP_GPU_MIPS, Env:\RECOMP_GPU_ANISO
 ```
 
-`RECOMP_GPU_ANISO=1` alone is inactive and reports why. With mips off,
-D3D11 and the unchanged CPU reference continue to sample level zero.
-With mips on, supplied swizzled, P8 and BC 2D/cube chains are sampled using
-the programmed min/mag/mip filters, LOD clamps and bias. This intentionally
-can differ from the CPU reference. No missing levels are generated; linear
-textures and render-target aliases remain at level zero. Depth/stencil
-aliases reject multi-level declarations.
+`RECOMP_GPU_ANISO=1` alone is inactive and reports why; Vulkan does not enable
+anisotropy. With mips off, D3D11, Vulkan and the unchanged CPU reference
+continue to sample level zero. With mips on, D3D11 and Vulkan sample supplied
+swizzled, P8 and BC 2D/cube chains using the programmed min/mag/mip filters,
+LOD clamps and bias. This intentionally can differ from the CPU reference. No
+missing levels are generated; linear textures and render-target aliases remain
+at level zero. Depth/stencil aliases reject multi-level declarations.
 Unreadable or known-short chains may fall back to level zero if that is safe,
-otherwise they are rejected. `[GPU-MIPS]` reports these fallbacks and
-approximated or unknown filters; `RECOMP_GPU_TEXLOG=1` reports declared
-`levels` and the number `uploaded`. LOD interpretation, title behavior,
-matched xemu images, VRAM and performance remain unverified, so these
-options are not recommended as defaults.
+otherwise they are rejected. `[GPU-MIPS]` reports these fallbacks,
+approximated or unknown filters, and Vulkan multi-level uploads;
+`RECOMP_GPU_TEXLOG=1` reports D3D11 declared `levels` and the number
+`uploaded`. One stopped Vulkan legacy-navigation probe reached the wrong
+multiplayer menu but did upload one supplied six-level BC chain without a
+validation error. That proves title data reached the path, not correct scene
+selection, matched output, VRAM headroom or performance. These options are
+not recommended as defaults.
 
-`BRUTEFORCE_PERF_COUNTERS=1` enables detailed title and D3D11 performance
+The benchmark's legacy menu script deliberately sends A presses through the
+intro movies. A movie file opening without remaining visible in such a run is
+not a playback failure or a playback validation result. Use a direct run or
+manual readiness when validating movies.
+
+`BRUTEFORCE_PERF_COUNTERS=1` enables detailed title and renderer performance
 diagnostics. Approximately every ten seconds, the normal D3D11 statistics
 are followed by interval reports for:
 
@@ -475,6 +558,13 @@ are followed by interval reports for:
   comparison time;
 - snapshot copies and bytes, rewrites, entry and snapshot evictions,
   failed-upload discards and unsupported-cache hits.
+
+Vulkan additionally reports per-300-flip wall time and, with this switch,
+draw setup, uploads, descriptor updates, command recording, mandatory
+readback, queue/fence waits, asynchronous report submission, completion scans
+and fence-status polling. The caller attribution used by the detailed switch
+performs checked guest reads and can make `NtQueryVirtualMemory` prominent in
+profiles. Instrumented rates are diagnostic only.
 
 The switch accepts only `0` or `1` and is off by default. It adds QPC reads
 and atomic aggregation in the measured paths, so use it to identify work in
@@ -608,9 +698,9 @@ steady-state gain. The title captures were visually matched but not
 byte-identical or frame-locked, so the cache remains off by default.
 
 `RECOMP_GPU_ZPASS=async` enables experimental asynchronous GPU visibility
-reports; synchronous reports remain the default. The asynchronous path
-passes synthetic WARP and hardware fixtures but remains experimental in the
-title.
+reports; synchronous reports remain the default. D3D11 and Vulkan preserve
+ordered publication and bounded backpressure. Their synthetic hardware
+fixtures pass, but the option remains experimental in the title.
 
 `RECOMP_GPU_DEPTH_TEXTURE=1` enables experimental `LIN_D24S8` depth-texture
 aliases on D3D11. It only accepts exact matches to GPU-created D24S8 surfaces
@@ -889,9 +979,12 @@ rejects unequal sizes and does not align, crop, resize, or color-correct its
 inputs. Its RGB statistics include whole-image absolute differences and all
 non-identical grid cells, with a default 16-pixel cell size. It also counts
 pixels with any channel differing by strictly more than 8/255, independently
-of `--tolerance`; the optional mask uses the selected tolerance. Alpha is
-ignored. A CPU reference and xemu provide useful independent comparisons, but
-neither alone proves original-hardware correctness.
+of `--tolerance`, and reports the count and twelve largest four-connected
+components of those pixels. Sparse components help target review but do not
+classify animation or establish correctness automatically. The optional mask
+uses the selected tolerance. Alpha is ignored. A CPU reference and xemu
+provide useful independent comparisons, but neither alone proves
+original-hardware correctness.
 
 ## Experimental window clipping
 

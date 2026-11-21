@@ -13,6 +13,8 @@
 #include "crash_diagnostics.h"
 #include "gpu/d3d11_backend.h"
 #include "gpu/null_backend.h"
+#include "gpu/renderer_startup.h"
+#include "gpu/vulkan_backend.h"
 #include "perf_counters.h"
 #include "profile.h"
 
@@ -146,10 +148,6 @@ static int configure_save_root(char **out)
     return 1;
 }
 
-/* RECOMP_GPU selects the renderer: unset or "cpu" keeps the framework's CPU
- * rasterizer, the correctness reference; "d3d11" renders on the GPU
- * (gpu/d3d11_backend.c). "null" is a measurement probe that draws nothing
- * (gpu/null_backend.c). */
 static int configure_renderer(void)
 {
     const char *gpu = getenv("RECOMP_GPU");
@@ -158,9 +156,23 @@ static int configure_renderer(void)
         return 1;
     if (strcmp(gpu, "d3d11") == 0)
         return bruteforce_d3d11_install();
+    if (strcmp(gpu, "vulkan") == 0) {
+        BruteforceRendererCandidate candidate = {
+            "Vulkan", bruteforce_vulkan_install, NULL
+        };
+        BruteforceRendererStartupResult result =
+            bruteforce_renderer_select_explicit(&candidate);
+        if (result.status == BRUTEFORCE_RENDERER_STARTUP_SUCCESS)
+            return 1;
+        fprintf(stderr, "[GPU] explicit Vulkan startup %s at %s: %s\n",
+                bruteforce_renderer_startup_status_name(result.status),
+                result.stage[0] ? result.stage : "unknown stage",
+                result.reason[0] ? result.reason : "no reason supplied");
+        return 0;
+    }
     if (strcmp(gpu, "null") == 0)
         return bruteforce_null_backend_install();
-    fprintf(stderr, "RECOMP_GPU must be cpu, d3d11 or null, not \"%s\"\n", gpu);
+    fprintf(stderr, "RECOMP_GPU must be cpu, d3d11, vulkan or null, not \"%s\"\n", gpu);
     return 0;
 }
 
@@ -331,7 +343,7 @@ int main(int argc, char **argv)
     if (game_dir == NULL || !load_xbe(game_dir, &xbe_data, &xbe_size))
         goto cleanup;
 
-    printf("Brute Force static recompilation: D3D11 bring-up\n");
+    printf("Brute Force static recompilation: renderer bring-up\n");
     printf("Loading verified game from %s\n", game_dir);
     if (!xbox_MemoryLayoutInit(xbe_data, xbe_size)) {
         fprintf(stderr, "Cannot initialize the Xbox memory layout\n");
@@ -409,8 +421,11 @@ cleanup:
                 (unsigned long)GetLastError());
         ExitProcess(1);
     }
-    if (memory_ready)
+    if (memory_ready) {
         xbox_MemoryLayoutShutdown();
+        memory_ready = 0;
+    }
+    bruteforce_vulkan_shutdown();
     free(xbe_data);
     free(save_root);
     free(game_dir);

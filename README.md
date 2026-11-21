@@ -18,7 +18,27 @@ copy.
 
 This is an experimental Windows release for the North American retail game:
 
-- Direct3D 11 is the default renderer; the CPU reference remains available.
+- Direct3D 11 is the current default renderer; the CPU reference remains
+  available. An explicit, non-default Vulkan 1.3 bring-up backend now covers
+  the base and CPU-transformed extended draw contracts, four texture stages,
+  register combiners, cube maps, default-off supplied mip chains, exact
+  texture caching, compatible color render-target aliases, precise visibility,
+  depth/stencil, bounded submission, RGB565 conversion, and mandatory guest
+  readback through the existing CPU presenter. Eligible vertex-program batches
+  now run through a static Vulkan interpreter from gathered float inputs;
+  raw guest-stream fetch remains on the framework CPU path. At the captured Basic Controls
+  state, 134 of 307,200 pixels exceed 8/255 versus the matched D3D11 frame.
+  Review places those sparse pixels in animated world content visible around
+  the tutorial panel; three opaque panel regions have no pixels over 8/255.
+  NVIDIA and AMD fixtures cover the interpreter, whole-triangle non-finite
+  rejection, and verification readback. One unreviewed legacy-route diagnostic
+  reported 26.391 stationary and 38.862 movement flips/s, up from the earlier
+  roughly 9-11 gameplay flips/s, but this is not distinct-world-frame or A/B/A
+  evidence. Native Vulkan presentation, direct raw-stream fetch, broader scene
+  parity, and accepted performance evidence remain open.
+- A Vulkan-first default with D3D12 startup fallback remains the gated design
+  direction. D3D12 and production `auto` selection are not implemented, and
+  D3D11 remains selectable through both parity gates.
 - Tutorial gameplay is running, but full-game correctness is not established.
 - Networking is not supported.
 - Internal-resolution scaling retains a 4:3 picture; true widescreen is not
@@ -40,7 +60,9 @@ Detailed evidence and open gates live in
 You need 64-bit Windows 10 or 11, a Direct3D 11-capable GPU, Python 3.10 or
 later with Tkinter, Git, CMake 3.20 or later, Visual Studio 2022 Build Tools
 17.5 or later with the C++ workload and Windows SDK, and an XDVDFS/XISO image
-made from the supported retail disc. See the
+made from the supported retail disc. Explicit Vulkan testing additionally
+requires a Vulkan 1.3-capable driver. The build downloads pinned Vulkan
+headers and DXC; no Vulkan SDK installation is required. See the
 [user guide](docs/USER_GUIDE.md#requirements-and-build-workflow) for the full
 requirements and incremental workflow.
 
@@ -52,12 +74,13 @@ python tools\build.py all --disc "F:\path\to\your\Brute Force.xiso.iso"
 & ".\Brute Force.cmd"
 ```
 
-The `all` command downloads the pinned public framework, verifies and extracts
-the supplied disc, generates the recompiled sources, and builds a Release
-executable. Disc contents, generated sources, logs, saves, and build products
-remain local and are excluded from Git. If an older framework checkout is
-already installed, preserve and move it before rerunning setup; generations
-from the previous pin must be regenerated.
+The `all` command downloads the pinned public framework and Vulkan build
+dependencies, verifies and extracts the supplied disc, generates the
+recompiled sources, and builds a Release executable. Disc contents, generated
+sources, logs, saves, and build products remain local and are excluded from
+Git. If an older framework checkout is already installed, preserve and move
+it before rerunning setup; generations from the previous pin must be
+regenerated.
 
 The supported executable fingerprint is recorded in
 [`fingerprints/retail.json`](fingerprints/retail.json); other revisions are

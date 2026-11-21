@@ -69,6 +69,11 @@ def test_whole_image_and_all_changed_regions(synthetic_frames):
     assert result["fraction_differing"] == 0.5
     assert result["pixels_over_8"] == 4
     assert result["fraction_over_8"] == round(4 / 12, 6)
+    assert result["over_8_component_count"] == 2
+    assert result["largest_over_8_components"] == [
+        {"x": 2, "y": 1, "width": 2, "height": 2, "pixels": 3},
+        {"x": 2, "y": 0, "width": 1, "height": 1, "pixels": 1},
+    ]
     assert result["pixels_over_tolerance"] == 2
     assert result["fraction_over_tolerance"] == round(2 / 12, 6)
     assert result["histogram"] == {
@@ -155,6 +160,8 @@ def test_identical_png_and_bmp_ignore_alpha(tmp_path):
         "0": 6, "1-2": 0, "3-8": 0, "9-32": 0, "33-255": 0,
     }
     assert result["pixels_differing"] == result["pixels_over_8"] == 0
+    assert result["over_8_component_count"] == 0
+    assert result["largest_over_8_components"] == []
     assert result["absolute_difference"] == {
         "sum": 0, "mean_per_channel": 0.0, "max_channel": 0,
     }
@@ -172,7 +179,30 @@ def test_regional_details_are_not_limited_to_legacy_top_twelve(tmp_path):
     assert len(result["regional_differences"]) == 17
     assert [region["x"] for region in result["regional_differences"]] == list(range(17))
     assert result["pixels_over_8"] == 17
+    assert result["over_8_component_count"] == 1
+    assert result["largest_over_8_components"] == [
+        {"x": 0, "y": 0, "width": 17, "height": 1, "pixels": 17},
+    ]
     assert result["absolute_difference"]["sum"] == 17 * 9
+
+
+def test_over_8_components_merge_runs_and_finalize_across_empty_rows(tmp_path):
+    reference = tmp_path / "reference.png"
+    candidate = tmp_path / "candidate.png"
+    a = Image.new("RGB", (5, 4), (0, 0, 0))
+    b = a.copy()
+    for position in ((0, 0), (2, 0), (0, 1), (1, 1), (2, 1), (4, 3)):
+        b.putpixel(position, (9, 0, 0))
+    a.save(reference)
+    b.save(candidate)
+
+    result = compare_frames.compare(reference, candidate)
+
+    assert result["over_8_component_count"] == 2
+    assert result["largest_over_8_components"] == [
+        {"x": 0, "y": 0, "width": 3, "height": 2, "pixels": 5},
+        {"x": 4, "y": 3, "width": 1, "height": 1, "pixels": 1},
+    ]
 
 
 def test_whole_image_and_region_sums_exceed_uint32(tmp_path):
@@ -192,6 +222,11 @@ def test_whole_image_and_region_sums_exceed_uint32(tmp_path):
     assert result["size"] == list(size)
     assert result["pixels_differing"] == expected_pixels
     assert result["pixels_over_8"] == expected_pixels
+    assert result["over_8_component_count"] == 1
+    assert result["largest_over_8_components"] == [{
+        "x": 0, "y": 0, "width": size[0], "height": size[1],
+        "pixels": expected_pixels,
+    }]
     assert result["pixels_over_tolerance"] == expected_pixels
     assert result["histogram"]["33-255"] == expected_pixels
     assert result["absolute_difference"] == expected_difference

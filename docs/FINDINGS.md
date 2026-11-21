@@ -88,6 +88,380 @@ The clean replay, focused fixtures, exact regeneration review and two bounded
 retail smokes accept v0.18.0 as the supported framework pin for this game
 revision. They do not promote any performance or rendering-correctness phase.
 
+## Vulkan feasibility review and integrated bring-up (2026-11-20)
+
+This section combines the original source/upstream review with the base and
+first integrated-retail Vulkan milestones. The implementation, hardware
+fixtures and local retail captures are observed results; future parity,
+native-presentation and default-policy statements remain plans.
+
+**Observed implementation:**
+
+- `RECOMP_GPU=vulkan` now selects an explicit, non-default Vulkan 1.3 backend.
+  It dynamically loads the system `vulkan-1.dll`, completes loader, instance,
+  physical-device, logical-device, queue, synchronization, shader and probe
+  pipeline initialization before callback registration, and returns a
+  structured status, stage and reason on failure. D3D11 remains the launcher
+  and graphical `build.py` default; D3D12 and production `auto` selection do
+  not exist.
+- The backend registers official `Nv2aBackend` clear, base draw and flip
+  callbacks plus the existing local transformed-draw, untransformed
+  vertex-program, readback and visibility callbacks. It supports full and
+  partial color clears, blend/cull/alpha
+  state, depth/stencil state, four level-zero texture stages by default,
+  default-off supplied mip chains, RGB565 guest conversion, and eight bounded
+  command/fence slots. Eligible batches now execute a static SPIR-V NV2A
+  interpreter from gathered float inputs. Direct raw-stream fetch remains
+  disabled; ineligible batches and programs that write constants stay on the
+  CPU.
+- CPU-transformed `Nv2aXBatch` draws use one static extended vertex shader and
+  one static pixel shader that interprets up to eight general register
+  combiners and the final combiner. It carries diffuse/specular color, fog and
+  four coordinate sets; supports projected/normalized 2D samples, native cube
+  samples, passthrough and clip-plane stages; and applies alpha test. A null
+  combiner uses the shared stage-zero-times-diffuse constructor.
+- Textures use a 2,048-entry cache, a 4,096-bucket exact descriptor index and
+  a 128 MiB retained-snapshot budget.
+  Reuse requires exact descriptors, 2D/cube identity, allocation/mapping
+  identities and source bytes, including exact palette bytes for P8. Cube
+  images retain all six 128-byte-aligned faces. With `RECOMP_GPU_MIPS=1`,
+  each exposed face/level is decoded from the immutable snapshot and uploaded
+  to a multi-level image; lower-level rewrites invalidate the entry. Cache
+  hits add no GPU wait; replacement or eviction uses command-slot fence
+  retirement before destroying a potentially referenced image.
+- Compatible tracked color surfaces can now be sampled directly as full
+  external aliases. A currently bound self-alias takes an ordered copy, and a
+  row-aligned subregion alias takes an ordered transient copy sized to the
+  programmed texture. Incompatible overlap still fails explicitly.
+- One precise occlusion query belongs to each bounded command slot. A query
+  is reset/begun/ended in draw order, retrieved only after that slot's fence,
+  accumulated with saturation, and normalized by `aa_sx * aa_sy` to logical
+  guest pixels. Visibility clear drains earlier queries before resetting the
+  running total. This is deliberately synchronous correctness behavior.
+- `RECOMP_GPU_ZPASS=async` instead uses a bounded 1,024-report ring, exact
+  ordered query retirement and completion publication after an explicit
+  memory barrier. Report boundaries may share a submission, and an
+  unsubmitted report batch flushes after 0.25 ms. No result is skipped or
+  fabricated.
+- Non-aliased `LIN_D24S8` cannot be decoded as color by the CPU reference and
+  therefore samples white explicitly. Compatible tracked color aliases in
+  that format still use the render-target alias path. This does not implement
+  the separate experimental GPU-owned depth-alias behavior.
+- Host color images use BGRA8. This is an observed portability decision:
+  the NVIDIA GeForce RTX 5070 did not expose B5G6R5 as a color attachment,
+  so RGB565 guest surfaces are explicitly converted on upload/readback. The
+  AMD Radeon integrated adapter did not expose D24S8, so device selection
+  accepts D24S8 or D32S8; Z16 similarly selects D16 or D32.
+- DXC's alpha-test `discard` SPIR-V declares
+  `DemoteToHelperInvocation`, so device suitability requires and enables
+  Vulkan 1.3 `shaderDemoteToHelperInvocation` along with dynamic rendering,
+  geometry shaders, shader clip distances, precise occlusion queries, a
+  graphics queue, required BGRA8 operations and compatible depth formats.
+- Vulkan-Headers `vulkan-sdk-1.4.363.0` and DXC `v1.9.2609` are pinned and
+  verified by commit/tree and archive SHA-256; every required extracted DXC
+  file is compared with that archive before CMake executes the compiler. Nine
+  base/partial-clear/extended/VSH HLSL entry points are compiled to Vulkan 1.3
+  SPIR-V at build time. The source build needs no installed Vulkan SDK; the
+  runtime still requires a suitable driver and system loader.
+- Renderer-neutral checked surface layouts, immutable texture storage/span
+  calculations, allocation-stable guest snapshots, texture filter/LOD
+  decoding and the default combiner constructor are shared with D3D11.
+  Devices, images, caches, pipelines, descriptors, commands, queries and
+  synchronization remain backend-specific.
+- Presentation is deliberately unchanged. Every Vulkan flip reads guest
+  pixels back before the existing CPU-upload presenter consumes them. There
+  is no Vulkan swap chain, scaled native image handoff or D3D11/Vulkan
+  interop requirement. Normal shutdown first stops and joins the framework's
+  NV2A poll thread, then unregisters the base/extended callbacks and destroys
+  Vulkan resources.
+
+**Validation performed:**
+
+- The renderer-startup fixture passed explicit no-fallback,
+  Vulkan-to-D3D12 fake-candidate fallback, invalid-configuration stop and
+  both-candidates-fail cases. The surface-layout fixture passed pitched
+  32-bit/16-bit and invalid-layout cases.
+- With `RECOMP_VULKAN_VALIDATION=1`, the native clear/draw/readback fixture
+  passed injected loader, pre-probe and actual graphics-pipeline failures
+  without partial registration, then full/partial clears including a partial
+  color clear with depth attached, a triangle, CPU-transformed extended
+  draws, a gathered-input NV2A vertex program, exact compute verification
+  readback, non-finite whole-triangle rejection, two-stage and default
+  combiners, cube positive-X selection, explicit
+  packed-depth fallback, decoded textures, exact cache reuse, source and P8
+  palette rewrites, forced 2D lower-mip selection and rewrite invalidation,
+  positive-X cube lower-mip selection, level-zero render-target fallback,
+  invalid mip-option rejection, depth rejection, RGB565 conversion, full
+  external, self and row-aligned subregion aliases, precise base/extended
+  visibility and AA normalization, readback and teardown with zero validation
+  errors on both an NVIDIA GeForce RTX 5070 and an AMD Radeon integrated
+  graphics adapter.
+  No Intel adapter was available. The
+  texture-layout fixture separately passed linear, swizzled, block-compressed,
+  paletted, mip, cube and rejected declarations.
+- The existing D3D11 regression selection reported 244 passed and 150
+  skipped after the neutral snapshot/layout extraction; the focused
+  dependency/build Python selection reported 45 passed. The main executable
+  and D3D11 synthetic target built, and retail generation
+  `20261120-163420-f9e3b4ed` rebuilt with the Vulkan sources.
+- The first integrated-retail executable SHA-256 was
+  `6b25f0dfbe8bc9c240437e16d0a0ea5d02a1450f94e9bcc1e71c512cf5c182bd`.
+  A validation-enabled NVIDIA run reached the Basic Controls state at
+  99.81 seconds, executed 1,345 flips and produced two byte-identical 640x480
+  captures with SHA-256
+  `e55a7a6c7cebc5d93d6b340e62d8e5c6ff664f7630a7a96ee57635f252b0e805`.
+  No Vulkan validation or renderer failure was logged. The 180-second
+  watchdog ended the process during the longer stationary measurement, after
+  the captures; exit code 3 is the watchdog path, not a renderer crash.
+- Periodic diagnostics in that retail run recorded 41,180 draws, three
+  uploads and 41,177 cache hits at 300 flips; 99,764 draws, 16 uploads and
+  99,748 hits at 600; 185,436 draws, 188 uploads and 185,104 hits at 900; and
+  231,003 draws, 226 uploads and 230,630 hits at 1,200. This proves reuse in
+  the observed run, not a performance result.
+- Precise visibility was then enabled in executable SHA-256
+  `c8bbe9b0dd8ef0e13e5de5c1061d2c3d30501aa6dc1589b8a719d2ff840ded89`.
+  Its first attempt stalled after flip 1 in a guest kernel wait loop without
+  a Vulkan validation or renderer failure; the retry reached Basic Controls
+  at 80.29 seconds and completed the stationary interval. It submitted
+  1,607.6 draws and 132,454.7 vertices per frame, closely matching D3D11's
+  1,608.4 and 132,641.7. Two captures were byte-identical with SHA-256
+  `56175e37552107656cd1d4104e937b1830981844962565a67f8ba74392473827`.
+  Visibility restored expected geometry volume but did not restore pixel
+  output: 149,590 pixels (48.6947%) remained over 8/255, mean channel error
+  was 12.609581 and maximum error 75. Outside `[85,58)-[555,420)`, 130,195
+  of 137,060 pixels (94.9912%) exceeded 8/255. The completed interval's
+  1.261 flips/s is one synchronous-query correctness run, not A/B/A
+  performance evidence.
+- The CPU-transformed register-combiner/cube implementation produced the last
+  matched executable SHA-256
+  `17ef3c06b9e205ffcf93cc532b02f2fcf23b3638e07de81d9cfae27ed182887f`.
+  The first two integration attempts stopped deliberately around 550 flips
+  on an active cube map; six-layer cube images and a native cube view then
+  advanced both retries into the tutorial hold. Those next two attempts
+  stopped deliberately on a non-aliased `LIN_D24S8` stage; explicitly using
+  the CPU reference's white unsupported-stage result removed that blocker.
+- Two final validation-enabled attempts reached Basic Controls at 80.20 and
+  80.27 seconds and produced byte-identical capture pairs within each run.
+  Their hashes were
+  `b81bb0546d28ba0fe53a34af0ad4cebcac6ee081d16399d625bb438a80070870`
+  and
+  `086c4ef18bc68d875207aa44da636cfd00bb2c362b8e003fb11c681dbf8ccf7d`.
+  Neither log reported a Vulkan validation or renderer failure. Their
+  300-second watchdogs ended after 87 and 82 stationary rows, before the
+  harness's 120-flip completion gate. The first incomplete interval observed
+  1,608.0 draws and 132,463.5 vertices per frame at about 0.897 flips/s; the
+  retry observed 1,607.9 and 132,423.2 at about 0.900 flips/s. These are
+  incomplete correctness observations, not performance results. A separate
+  420-second attempt remained in the pre-world menu path for 3,056 flips and
+  timed out; it is another navigation/stability failure, not a successful
+  run or evidence of a Vulkan device error.
+- The default-off Vulkan mip implementation produced current executable
+  SHA-256
+  `8ab947dec007dfd852db9ceed4c3248faa438838e8776e3d69567d56244feeee`.
+  One validation-enabled legacy-navigation probe was stopped after the user
+  observed that it had entered Join Deathmatch instead of the tutorial. The
+  run reached 3,435 flips, had no Vulkan validation or device failure, and
+  uploaded one supplied six-level format `0x0E` BC chain at guest address
+  `0x81C68880`; the 3,300-flip diagnostic reported 19 total texture uploads
+  and one mip upload. The movie files for both logos, the intro montage and
+  menu background opened successfully. The legacy script sends A at 20, 23,
+  28 and 32 seconds, so their absence on screen is intentional skipping, not
+  movie-rendering evidence. The wrong menu, unreviewed capture and observed
+  roughly 7 flips/s invalidate scene correctness, image comparison and
+  performance conclusions. This probe establishes only that real title data
+  reached the Vulkan multi-level path without a reported renderer failure.
+- A same-generation D3D11 reference reached the same reviewed state at
+  92.06 seconds and produced eight byte-identical captures with SHA-256
+  `9c347b5fa87b8983deb8da4887db0131ff42fb6bfc9e0642614de0a7deddf04f`.
+  `compare_frames.py` reports 247,492 differing pixels (80.5638%),
+  149,939 over 8/255 (48.8083%), mean absolute difference 10.563163 per
+  channel and maximum channel difference 64. A diagnostic tutorial-panel crop
+  `[85,58)-[555,420)` has 19,906 of 170,140 pixels (11.6998%) over 8 and
+  mean 2.248047; the region outside that crop has 130,033 of 137,060
+  (94.8730%) over 8 and mean 20.885167. At that base milestone the tutorial
+  panel and HUD were structurally present while the world remained visibly
+  different. The later visibility and pixel-pipeline results below isolate
+  most of that difference; this historical comparison alone does not prove
+  which missing state accounted for every pixel.
+- Comparing that D3D11 reference with the first final combiner capture finds
+  191,517 non-identical pixels (62.3428%), but only 134 (0.0436%) exceed
+  8/255. The many small differences produce mean absolute error 0.374562 per
+  channel and maximum channel error 29. In the tutorial-panel crop, 8 of
+  170,140 pixels (0.004702%) exceed 8/255 with mean 0.335293; outside it,
+  126 of 137,060 (0.091931%) exceed 8/255 with mean 0.423309. The retry has
+  563 pixels (0.1833%) over 8/255, mean 0.413018 and maximum 46, showing that
+  capture timing still affects the remaining small differences. Relative to
+  the visibility-only Vulkan capture, the first combiner capture changes
+  148,389 pixels over 8/255 and reduces mean channel error by 12.235019.
+  This isolates the full pixel pipeline as the large prior blocker and closes
+  the first stationary Basic Controls comparison, not movement, menu, movie,
+  fade, PVIDEO, raw-VSH or original-hardware parity.
+- A follow-up review explains the 134 over-8/255 pixels without changing
+  renderer behavior. The neutral comparator now reports four-connected
+  over-8 components: this pair contains 102 components, the largest only
+  26 pixels in `[277,47)-[290,53)`. Its mask review places every component in
+  exposed animated world content such as the projectile streak, particles,
+  grass and vegetation around the irregular tutorial-panel boundary. The
+  eight pixels previously described as inside the rectangular tutorial crop
+  are below or beside the opaque panel within that bounding rectangle.
+  Three reviewed opaque regions confirm zero pixels over 8/255: the
+  139,590-pixel main panel has mean channel error 0.306899 and maximum 6, the
+  7,812-pixel header has mean 0.432582 and maximum 4, and the 7,056-pixel
+  footer has mean 0.387991 and maximum 6. Of all 191,517 non-identical
+  pixels, 183,706 differ by at most 2/255. The retry differs from D3D11 in
+  563 pixels over 8/255, while the two Vulkan attempts differ from each other
+  in 421, reinforcing that exposed world timing changes this sparse tail.
+  The remaining subthreshold differences are consistent with cross-API
+  interpolation, sampling, arithmetic and UNORM conversion precision, but
+  that mechanism is a hypothesis rather than an isolated cause. This closes
+  the over-8 discrepancy for the retained stationary opaque UI, not
+  bit-exact parity or any broader scene gate.
+- The D3D11 reference reported 13.813 flips/s for one completed stationary
+  interval. The base Vulkan interval and both final combiner intervals did not
+  complete; the visibility-only interval completed at 1.261 flips/s. These
+  runs were not an alternating A/B/A campaign. Neither startup time nor any
+  of these flip rates is accepted performance evidence.
+
+### Vulkan throughput isolation and gathered GPU-VSH (2026-11-20)
+
+These later runs use supported retail generation
+`20261120-163420-f9e3b4ed`, four raster threads, one guest core, audio off,
+`RECOMP_GPU=vulkan`, supplied mips and ordered asynchronous visibility. The
+legacy route and all captured flips are unreviewed. Rates below are flips,
+not distinct world frames, and none is an A/B/A comparison.
+
+- Executable
+  `df5fe182bedb572ab1fb84f96dca6dc71ca0e3926ab856557c8ad2754c1efcf2`
+  replaced the former full-cache descriptor scan with a 4,096-bucket exact
+  index. At flip 8,700 it recorded 1,874,768 cache hits and 1,878,193 chain
+  probes, approximately 1.00 probe per hit. Gameplay remained about 1.06
+  probes per hit. Complete key and exact source/palette byte comparisons
+  remain mandatory.
+- One retry exposed the known pre-movie loader failure mode: it stopped after
+  two flips with no draw or renderer error while guest zero-delay polling
+  prevented useful progress. A successful uninstrumented route later recorded
+  17.986 flips/s at flip 8,700, 8.960 at 9,000 and 11.240 at 9,300; its
+  recognized stationary interval was 9.084 flips/s. The texture index removed
+  descriptor traversal but did not fix gameplay throughput.
+- Phase-instrumented executable
+  `c7941cebac5063e42389757814dfaa7cb1d1ecb79c020de3c13b4a594a1daa69`
+  showed that exact snapshots were material but not dominant. One 31.492
+  second, 300-flip interval copied 30.7 GB of source/palette bytes in 3.184
+  seconds; all Vulkan draw work took 5.003 seconds, descriptor updates
+  156 ms, vertex/constant copies 248 ms, command recording 746 ms and
+  mandatory readback 1.309 seconds, including 542 ms waiting for the queue.
+  Another 19.037 second interval spent 1.302 seconds in snapshots and 2.102
+  seconds in all draw work. Instrumentation overhead makes these attribution
+  data, not production rates.
+- The report-instrumented executable used by the sampled run had SHA-256
+  `07a750221d2ec84f8e7d5a0fbff47f498dea5bbf0c5ca6ec12f4f1cff8e552ef`.
+  A representative 300-flip interval processed 121,116 reports, 1,158,576
+  poll callbacks, 1,401,331 completion calls and 417,324 fence-status polls.
+  Their measured costs were 77.6, 152.0, 155.5 and 116.0 ms respectively.
+  High report-call volume was therefore not the missing tens of seconds.
+- A 40-second caller-attributed movement profile found the game thread 99.9%
+  busy, with 71.521% in the real PFB poll `sub_00372180_gen`.
+  `BRUTEFORCE_PERF_COUNTERS=1` made checked caller reads visible as 23.463% in
+  `NtQueryVirtualMemory`; that share is diagnostic overhead. The NV2A thread
+  was 84.6% busy: `vsh_run_decoded` used 32.059%, `run_mac` 26.677% and
+  `fetch_attr` 1.902%. CPU NV2A program interpretation therefore accounted
+  for about 58.7% of NV2A samples and satisfied the plan's evidence gate for
+  GPU execution. The profile parser now classifies both the wrapper and
+  generated PFB-poll symbols; reparsing reports 71.52% guest GPU polling.
+- The Vulkan `draw_vsh` path now uploads up to 136 instructions, all 192
+  constants, gathered float inputs and a 32-bit remapped triangle list to one
+  static SPIR-V interpreter. It implements the D3D11 generator's source,
+  MAC/ILU, relative-constant, masking, output, AA, clip, depth, color, fog and
+  coordinate behavior. A geometry shader drops an entire non-finite
+  primitive. `vsh_raw_ok` remains unset, so direct raw guest streams retain
+  framework gathering and unsupported/constant-writing cases retain CPU
+  fallback. Verification re-runs only a selected batch in a compute shader
+  and returns `Nv2aXVsOut`; ordinary draws allocate no verification output.
+- Validation-enabled fixtures pass on the NVIDIA GeForce RTX 5070 and AMD
+  Radeon integrated adapter. They assert a known MOV program's image and
+  exact position/color readback, reject a whole triangle containing a
+  non-finite position, and reject stale readback from a fully culled batch.
+- The 37,823,488-byte production executable has SHA-256
+  `108c787713c52007fe67e7c90ed33db77e4e6443cca11c075db0be5baec314cc`.
+  Its completed uninstrumented legacy-route retry reported 26.391 stationary
+  and 38.862 movement flips/s, with a 25.480/s movement 1% low. It observed
+  4,094,522 gathered GPU-program batches and no declined program batch. The
+  first attempt reached movement but ended on the 165-second watchdog; no
+  renderer failure was logged.
+- A sparse `RECOMP_GPU_VSH_VERIFY=100000` retail run logged its first three
+  selected batches and 12 vertices with zero CPU/GPU differences. No mismatch
+  or readback failure appeared before the phase timeout, by which point
+  1,745,525 gathered batches had been accepted. This is sampled semantic
+  evidence, not continuous verification or scene review.
+- The post-change caller profile reported 26.683 stationary and 38.503
+  movement flips/s. NV2A busy time fell from 84.55% to 45.34%;
+  `vsh_run_decoded` and `run_mac` were absent from its hot list.
+  `fetch_attr` remained at 2.092%, `gpu_vsh_batch` at 1.608% and
+  `vulkan_xdraw_vsh` at 0.515%. The game thread still spent 59.069% in
+  `sub_00372180_gen`; caller profiling made `NtQueryVirtualMemory` account
+  for another 29.858%, so the profiled cadence is diagnostic.
+
+The immediate 3-11-flip/s Vulkan gameplay blocker is therefore resolved well
+enough to resume correctness work, not to claim renderer performance parity.
+Matched movement images, reviewed scene identity and alternating A/B/A runs
+remain required before comparing Vulkan with D3D11 or reporting distinct
+world cadence. PFB, semaphore, visibility, flip and readback synchronization
+were not skipped or satisfied early.
+
+**Observed upstream state:** a read-only search of all 500 available
+sp00nznet/xboxrecomp pull-request records and tracking index
+[sp00nznet/xboxrecomp#184](https://github.com/sp00nznet/xboxrecomp/pull/184)
+found no official pull request advertising a Vulkan or D3D12 backend.
+The index demonstrates D3D11 and Metal implementations and mentions another
+project's Vulkan/MoltenVK renderer at the older D3D8 translation seam; it is
+coordination evidence, not an implementation to select here. In open issue
+[sp00nznet/xboxrecomp#306](https://github.com/sp00nznet/xboxrecomp/issues/306),
+the maintainer chose to retain and incrementally extend official
+`Nv2aBackend`, keep full renderers downstream for now, prohibit per-draw GPU
+round trips, document callback threading, and keep presentation as a host
+service. Merged
+[sp00nznet/xboxrecomp#319](https://github.com/sp00nznet/xboxrecomp/pull/319),
+included in v0.18, is the first accepted step: a reusable fake-backend
+contract fixture. Open
+[sp00nznet/xboxrecomp#312](https://github.com/sp00nznet/xboxrecomp/issues/312)
+asks about adjacent host presentation hooks but has no maintainer response.
+No upstream communication was performed.
+
+**Accepted direction:** Vulkan is the future fresh graphical default and
+D3D12 is its automatic startup-only backup. `auto` will initialize Vulkan
+fully before guest execution and try D3D12 only for a reported Vulkan
+availability or initialization failure. Explicit backends fail closed.
+Failure after guest work begins does not switch API. D3D11 stays selectable
+until both new backends pass shared synthetic, matched-frame, native
+presentation and ordering gates; the CPU renderer remains the correctness
+reference. Vulkan will be the downstream conformance exemplar: generic
+contract extensions, helpers, tests and documentation are prepared as small
+upstream candidates, with the long-term goal of an optional, default-off
+Vulkan backend PR after the host presentation contract, parity, maintainer
+direction and explicit user approval. The base and CPU-transformed
+pixel-pipeline backend is the first downstream exemplar milestone; current
+runtime defaults are unchanged.
+
+**Remaining hypotheses and gates:** pinned DXC has produced the static Vulkan
+base and extended shaders. The static register-combiner interpreter has a
+near-matched stationary retail result, but shared generated raw vertex HLSL
+has not been shown equivalent across SPIR-V and DXIL. Surface/texture layouts,
+checked guest snapshots, texture filter/LOD decoding and the default combiner
+constructor are extracted; scale, cross-backend cache-key and shader-input
+policy are not. A host-owned presentation service still must accept a
+completed same-API image and
+synchronization while retaining window, swap-chain, CPU, PVIDEO and
+diagnostic ownership. The exact handoff is not accepted upstream and remains
+a downstream prototype to validate, not observed behavior. Raw GPU vertex
+programs, scaling, window clip, native presentation, reviewed target-scene
+mip parity, wider matched-retail parity and stability, Intel coverage, D3D12
+and automatic fallback remain open.
+
+No measured result predicts that Vulkan or D3D12 will improve cadence. The
+dominant recorded G3 PFB flush wait is upstream of the host graphics API.
+Future performance claims remain behind correctness and same-generation
+A/B/A gates, with distinct world frames reported separately from flips.
+
 ## Earlier v0.17 integrated synthetic validation boundary
 
 The complete 43-patch v0.17 framework stack independently replayed to tree
@@ -2898,11 +3272,12 @@ path below deliberately differs.
 
 ### Experimental mipmap sampling: synthetic evidence (2026-11-11)
 
-The project D3D11 backend now has default-off `RECOMP_GPU_MIPS` and
-`RECOMP_GPU_ANISO` switches; the CPU rasterizer remains a level-zero
-reference. These are generic backend experiments, not observations of the
-North American retail game's mip use. No game, emulator, or performance
-campaign was run for this change.
+The project D3D11 and Vulkan backends now share default-off
+`RECOMP_GPU_MIPS`; `RECOMP_GPU_ANISO` remains D3D11-only, and the CPU
+rasterizer remains a level-zero reference. The original 2026-11-11 D3D11
+change was generic synthetic work with no game, emulator or performance
+campaign. The 2026-11-20 Vulkan extension adds the bounded title observation
+below without turning the option into a default.
 
 The Release synthetic D3D11 matrix passed 293 cases with WARP and an NVIDIA
 GeForce RTX 5070 enabled (driver version query unavailable). Per device it
@@ -2931,6 +3306,25 @@ depth/stencil alias frames matched with mips off/on while multi-level aliases
 were rejected. These checks cover known patterns, not retail textures or an
 original-hardware oracle.
 
+The validation-enabled Vulkan fixture passes on NVIDIA GeForce RTX 5070 and
+AMD Radeon integrated graphics. It rejects an invalid option, keeps a
+multi-level render-target declaration at level zero, forces a supplied 2D
+lower level, detects a same-frame lower-level rewrite, and selects the
+positive-X lower cube level through the NV2A 128-byte face stride. The full
+D3D11 regression remains 244 passed and 150 skipped after extracting neutral
+filter/LOD decoding.
+
+Current Vulkan executable SHA-256
+`8ab947dec007dfd852db9ceed4c3248faa438838e8776e3d69567d56244feeee`
+completed only a stopped wrong-route retail probe. Before entering Join
+Deathmatch it uploaded one six-level format `0x0E` BC chain from guest address
+`0x81C68880`; no Vulkan validation or device failure was logged. The user's
+roughly 7 FPS observation is menu-path data, not a controlled frame-rate
+result. The legacy benchmark sent its fixed A presses while the logo and intro
+movie files were open, so movies not remaining visible is expected script
+behavior rather than playback evidence. No matched Vulkan mip frame was
+accepted.
+
 The implementation treats CONTROL0 min/max as unsigned 4.8 and the 13-bit
 filter bias as signed 5.8, based on the public Nouveau NV30
 [sampler encoding](https://github.com/Kenji-NX/mesa/blob/main/src/gallium/drivers/nouveau/nv30/nv30_texture.c)
@@ -2948,10 +3342,11 @@ default-enabling the option.
 
 Linear and render-target aliases remain level-zero-only; depth/stencil
 aliases reject multi-level declarations, with diagnostics. No missing levels
-are generated. VRAM use, cache cost, title-supplied levels,
-4K image quality and distinct-world-frame performance remain unmeasured.
-Future comparisons require matched scale-1 xemu/CPU/D3D11 frames and controlled
-same-generation A/B/A runs with settings and frame counts recorded.
+are generated. One title-supplied BC chain is observed, but target-scene
+supply, VRAM use, cache cost, 4K image quality and distinct-world-frame
+performance remain unmeasured. Future comparisons require reviewed matched
+scale-1 xemu/CPU/D3D11/Vulkan frames and controlled same-generation A/B/A runs
+with settings and frame counts recorded.
 
 ### Blood Wake-derived internal-resolution milestone
 
@@ -3281,7 +3676,7 @@ on runtime validation in either title:
 | Just-in-time frames, present pacing, and process QoS (v0.3.1-v0.3.3) | The latency mode coordinates Blood Wake's title-specific high-frame-rate walk with present slots, GPU limits, measured pass work, and a process QoS/timer policy. | Do not transplant. Brute Force has no established high-frame-rate title mode, and its performance plan forbids weakening PFB flush, semaphore, report, or flip holds. Revisit only after native distinct-world-frame cadence and the existing event-driven wait work are established, with each wait and ownership boundary preserved in fixtures. |
 | CPU-written loading-screen upload and device recovery | Blood Wake restores CPU-written loading imagery to the GPU path and rebuilds graphics resources after device loss. | The loading/movie case is already covered by Brute Force's logical guest shadow and scaled GPU upload path. Graphics recovery is not: Brute Force intentionally stops on removal rather than claiming pending work completed. Recovery remains a separate ownership and synchronization design, not code to import opportunistically. |
 | Clang DSP trace stub (v0.3.2) | The xemu shim adds a no-op `trace_dsp56k_execute_instruction_disasm(...)` macro so the DSP sources compile with Clang. | Concrete and portable, but Brute Force is currently Windows/MSVC-only and has no failing Clang build. Add it with the existing GPL shim notice if a supported Clang or non-Windows DSP build is introduced; it is not an immediate runtime feature. |
-| API-neutral renderer core, HDR/EDID handling, and future D3D12 work | Blood Wake moved shared renderer policy into `src/gpu/core/`, hardened HDR monitor-data handling, and prepared API-neutral ownership. | The refactor is useful design evidence but does not justify replacing Brute Force's established D3D11 surface, readback, scaling, and synchronization contracts. HDR is premature while brightness/bloom equivalence is unresolved. Direct3D 12 remains explicitly deferred. |
+| API-neutral renderer core, HDR/EDID handling, and future D3D12 work | Blood Wake moved shared renderer policy into `src/gpu/core/`, hardened HDR monitor-data handling, and prepared API-neutral ownership. | The refactor is design evidence for the accepted Vulkan/D3D12 migration, not code to transplant wholesale. Extract only behavior proven generic by D3D11 and a second backend, preserve Brute Force's surface, readback, scaling and synchronization contracts, and keep HDR deferred while brightness/bloom equivalence is unresolved. |
 
 #### Earlier Blood Wake candidates that remain open
 
@@ -3393,4 +3788,7 @@ establish G4 or physical presentation. The final integrated matrix and Phase
 
 Open work includes broader gameplay and input, physical controllers, audio,
 graphics compatibility, unresolved calls and instructions, and safe device
-reset behavior. Direct3D 12 is deferred.
+reset behavior. Vulkan now has an explicit base and CPU-transformed
+pixel-pipeline backend but remains outside the launcher default and lacks
+broad retail parity and native presentation. D3D12 and production automatic
+selection are not implemented.

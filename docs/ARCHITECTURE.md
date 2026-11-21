@@ -55,12 +55,36 @@ At a high level, the current host validates and maps `default.xbe`, initializes
 the framework's kernel and guest paths, and enters the statically recompiled
 guest. The guest opens disc bundles and cached resources; with graphics
 enabled, the launcher and `build.py` default to the D3D11 GPU backend. The
-CPU rasterizer remains available as the reference path. The window can use
-D3D11 presentation, including an experimental shared-GPU path that retains
-guest readback. USB support is optional. This describes the present
-recompilation environment, not the original Xbox's complete engine design.
-See [FINDINGS.md](./FINDINGS.md) for observed guest entry points and
-limitations.
+CPU rasterizer remains available as the reference path. Explicit
+`RECOMP_GPU=vulkan` selects a non-default Vulkan 1.3 backend; it renders to
+backend-owned images, reads logical guest pixels back, and still uses the
+existing CPU-upload presenter. It consumes CPU-transformed extended batches,
+four texture stages, register-combiner state, cube maps and precise visibility
+through the existing local extended seam. The same default-off mip switch used
+by D3D11 exposes supplied 2D/cube chains through Vulkan. Its exact image cache
+and compatible full/self/subregion color-target aliases reach a near-matched
+retail Basic Controls capture. Eligible untransformed vertex-program batches
+now use a static SPIR-V interpreter with gathered float inputs and an opt-in
+compute readback verifier; direct raw guest-stream fetch, native presentation
+and broader state/scene parity remain open. The window can otherwise use D3D11
+presentation, including an experimental shared-GPU path that retains guest
+readback. USB support is optional. This describes the present recompilation
+environment, not the original Xbox's complete engine design. See
+[FINDINGS.md](./FINDINGS.md) for observed guest entry points and limitations.
+
+The accepted 2026-11-20 host-renderer direction is Vulkan first with D3D12
+as a startup-only fallback. The first explicit Vulkan base milestone is now
+implemented, but this remains a planned default architecture rather than an
+observation about the game: there is no D3D12 backend or production `auto`
+selector, and D3D11 remains the current graphical default. Vulkan consumes
+the official base callbacks plus the existing local transformed-batch,
+untransformed vertex-program, readback and visibility extensions. The
+framework still gathers Vulkan inputs with `fetch_attr`; programs that write
+constants retain the CPU interpreter fallback. Future backends will consume the same decoded NV2A
+contract, while title addresses and guest structures remain outside generic
+framework changes. The CPU rasterizer remains the reference and D3D11 stays
+selectable until both replacements pass parity. See the
+[renderer migration design](./RENDERING.md#vulkan-first-backend-architecture-and-bring-up-status).
 
 Audio is enabled by default unless `--no-audio` or `RECOMP_AUDIO=0` is
 selected. The host initializes xboxrecomp's MCPX APU, installs a full-shutdown
@@ -118,6 +142,24 @@ at flip, scaling it into the physical target before shared presentation.
 This is distinct from PVIDEO overlay composition. The opt-in D3D11
 combiner-shader cache stores derived bytecode locally, not game resources;
 per-flip readback remains mandatory.
+
+The backend-neutral split is limited to proven host policy. Checked surface layouts, immutable texture storage/span calculations,
+allocation-stable guest snapshots, texture filter/LOD decoding and the
+default-combiner state constructor are now shared by D3D11 and Vulkan; future
+candidates include scale math, cross-backend cache identity, more shader
+inputs and frame ownership.
+Vulkan uses the shared snapshots for its own exact image cache, but Vulkan,
+D3D12 and D3D11 rendering devices, resources, cache entries, descriptors,
+pipelines, queries and render synchronization remain backend-specific.
+Following the upstream contract, the host service continues to own the
+window, platform presentation surface, swap chain, final present, input, CPU
+snapshots, PVIDEO and frame identity. The backend supplies a
+completed same-API image, synchronization and required
+guest readback through a separately tested handoff. Vulkan is developed as a
+downstream exemplar for incremental `Nv2aBackend` extensions and a possible
+later optional upstream backend; no title addresses, asset knowledge or
+generated game code enter that implementation. This design does not change
+the disc, archive, asset or generated-game-code boundaries described below.
 
 ## Packaging and runtime paths
 

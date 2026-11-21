@@ -64,6 +64,12 @@ placement, reuse, protection and physical naming are corrected (#268, #286,
 is base capability only and is not selected for Brute Force without title
 evidence. `RECOMP_PORTABLE_MATH` from #335 likewise remains inactive because
 this project has no rollback or cross-host determinism requirement.
+Merged #319 is also the first implementation step accepted from #306: a
+test-only fake-backend contract fixture. The maintainer direction keeps
+official `Nv2aBackend`, grows it in small synthetic-test PRs, keeps complete
+renderers downstream for now, and leaves presentation with the host service.
+The planned Vulkan work below builds on that boundary rather than reviving
+#184's larger decoded-state seam wholesale.
 
 PR #315 is marked merged on GitHub, but v0.18.0 immediately reverts its merge
 in `1ce3d64b4385a41179b76e92e361f23fd2cb1c61` because the 16-bit `IDIV`
@@ -288,7 +294,7 @@ guidance and not a duplicate of the ownership or configuration contracts below.
 | Readiness | Candidate | Why an issue rather than a PR | Status or next action |
 | --- | --- | --- | --- |
 | Resolved | Item 38, `XC_VIDEO` layout and policy | v0.17.0 corrects the high-word encoding identified by retail XAPI wrappers and independent EEPROM documentation. The compatibility default and configuration surface were separate policy decisions. | [#301](https://github.com/sp00nznet/xboxrecomp/issues/301) closed on 2026-11-06. Merged #320, included in v0.18, adds exact-value widescreen and 480p opt-ins while preserving the 4:3 480i/60 default. |
-| Filed | Renderer backend ownership and contract | Items 12, 15, 24-28, 31, 36, 39 and 40 intersect one versioning, capability, ownership, failure, synchronization and presentation boundary. Separate issues would fragment that decision. | Filed as [#306](https://github.com/sp00nznet/xboxrecomp/issues/306). Add backend-neutral reproducers or requirements there only with approval; do not file competing surface-ownership or output-sizing issues. |
+| Direction recorded | Renderer backend ownership and contract | Items 12, 15, 24-28, 31, 36, 39 and 40 intersect one versioning, capability, ownership, failure, synchronization and presentation boundary. Separate issues would fragment that decision. | [#306](https://github.com/sp00nznet/xboxrecomp/issues/306) keeps `Nv2aBackend`, grows it in small synthetic-test PRs, keeps full renderers downstream for now, and keeps presentation host-owned. Merged #319, included in v0.18, is the first fake-backend fixture. Add requirements or reproducers there only with approval. |
 | Ready with approval | Item 6a, `MmQueryStatistics` uses host free memory | Current `main` caps host `ullAvailPhys` to half of the Xbox's fixed 64 MiB total, so a modern host normally reports 8,192 available pages regardless of guest allocations. The defect is concrete, but the correct accounting must cover image, stack, heap, contiguous, extended and exported allocator paths and devkit memory. No exact issue or PR exists; #261/#269/#286 concern physical-page identity rather than this API contract. | File a requirements-first issue with the current-code reproducer and local fixture limitations. Keep patch 0007 out of the issue as a proposed solution until exported allocators and reset/concurrency are covered. |
 | Coordinate in #306 | Item 36, CPU writes to GPU-owned colour surfaces | The failure and project workaround are concrete, but a generic ownership/write-notification contract crosses #184's renderer work and #285's readback seam. | Distill the existing CPU-write/GPU-overlay fixture into a backend-neutral reproducer, then add its required ordering cases to #306 with approval. |
 | Coordinate in #306 | Item 39, aspect-aware output sizing | #184 carries title-facing aspect and Hor+ heuristics, but not the presenter's requested-picture-size contract. A standalone issue would split the same API discussion. | With approval, ask in #306 whether the backend should request a ratio or validated dimensions; file separately only if maintainers request it. |
@@ -854,12 +860,14 @@ own GPU back end, an extended interface for it, and its own pacing fixes.
     minification; independently, the existing texture metadata does not
     carry CONTROL0 LOD clamps as explicit fields. Whole-chain source bounds,
     cube spacing, P8 ranges and cache invalidation need to agree.
-    *Evidence:* a synthetic D3D11 scene selects distinct levels and catches
-    same-frame lower-level rewrites; the off path remains level zero. This
-    does not establish that the Brute Force retail revision supplies a
-    particular chain or that its enabled image matches xemu/NV2A.
-    *Change:* generic project-side layout, uploads, SRV exposure and
-    descriptor-based sampler identity use the existing raw register mirror.
+    *Evidence:* synthetic D3D11 and Vulkan scenes select distinct 2D/cube
+    levels and catch same-frame lower-level rewrites; the off path remains
+    level zero. A stopped Vulkan retail probe on the wrong multiplayer route
+    uploaded one supplied six-level BC chain without a validation error. This
+    does not establish target-scene image parity with xemu/NV2A.
+    *Change:* generic project-side layout and filter/LOD decoding use the
+    existing raw register mirror. Uploads, image/SRV exposure and resource
+    ownership remain backend-specific.
     `RECOMP_GPU_MIPS` and `RECOMP_GPU_ANISO` are independently default-off;
     no framework patch or pinned-tree change was made. Explicit fallbacks
     retain the CPU reference, and no title addresses or content are involved.
@@ -867,14 +875,17 @@ own GPU back end, an extended interface for it, and its own pacing fixes.
     Morton indices exceed their source span instead of reading out of bounds.
     Blood Wake's mip upload and `VFX_ANISO` are prior art; no code was copied
     from it for this implementation.
-    *Tests:* WARP and RTX 5070 synthetic 2D/cube upload and sampled-image
-    fixtures cover swizzled, linear, BC and P8 formats, all exposed levels,
-    filters, fractional clamps, positive/negative bias, declared-count and
-    palette/last-face rewrites, guarded and tracked-short chains including
-    fallback rewrites under approximate caching, and a final-level invalid P8
-    index. Render-target, depth and stencil alias regressions exercise their
-    level-zero/rejection behavior. They do not prove NV2A semantics, title
-    compatibility, race freedom for concurrent guest writes, or performance.
+    *Tests:* WARP, RTX 5070 and AMD integrated synthetic 2D/cube upload and
+    sampled-image fixtures cover swizzled, linear, BC and P8 formats, exposed
+    levels, filters, fractional clamps, positive/negative bias,
+    declared-count and palette/last-face rewrites, guarded and tracked-short
+    chains including fallback rewrites under approximate caching, and a
+    final-level invalid P8 index. Vulkan additionally checks invalid option
+    rejection, level-zero render-target fallback, forced lower-level
+    selection and rewrite invalidation with validation enabled. Render-target,
+    depth and stencil alias regressions exercise their level-zero/rejection
+    behavior. They do not prove NV2A semantics, reviewed title compatibility,
+    race freedom for concurrent guest writes, or performance.
     *Overlap:* checked read-only 2026-11-11: [#184](https://github.com/sp00nznet/xboxrecomp/pull/184)
     tracks GPU backend work; merged [#253](https://github.com/sp00nznet/xboxrecomp/pull/253)
     concerns CPU filtering without this D3D11 mip path; merged
@@ -888,8 +899,8 @@ own GPU back end, an extended interface for it, and its own pacing fixes.
     xemu and hardware evidence; define generic backend metadata and
     ownership/race contracts with #184; verify additional titles, formats,
     aliases and performance. Recheck upstream before any approved filing.
-    *Status:* project implementation and synthetic fixture; framework
-    contribution candidate, not prepared or filed.
+    *Status:* D3D11 and Vulkan project implementations and synthetic fixtures;
+    framework contribution candidate, not prepared or filed.
 
 15. **Present from the back end, with readback on demand.**
     *Problem:* the presenter copies or converts the flipped guest frame on
@@ -2232,6 +2243,135 @@ own GPU back end, an extended interface for it, and its own pacing fixes.
     *Status:* existing merged framework capability selected by a title-side
     default; bounded retail startup validation passed.
 
+50. **Use a Vulkan exemplar to evolve the official backend and host
+    presentation contracts.**
+    *Problem:* official `Nv2aBackend` intentionally lacks register-combiner
+    state, texture stages 1-3, durable failure and several lifecycle and
+    capability details needed by a complete GPU renderer. The local extended
+    seam proves those needs but bundles them too broadly for the accepted
+    upstream direction. Separately, the Windows presenter accepts a D3D11
+    keyed-mutex source; a Vulkan backend can use CPU readback for bring-up but
+    cannot preserve scaled native output through that D3D11-specific route.
+    *Evidence:* the pinned v0.18 base includes merged
+    [#319](https://github.com/sp00nznet/xboxrecomp/pull/319), whose reusable
+    fake backend checks callback order, exactly-once delivery, borrowed-data
+    copies, thread ownership, registration, replacement and removal without
+    changing the production API. In
+    [#306](https://github.com/sp00nznet/xboxrecomp/issues/306), the maintainer
+    chose to retain and grow `Nv2aBackend` one synthetic-test PR at a time,
+    keep full D3D11/Metal renderers downstream for now, forbid a GPU round
+    trip per draw, document callback threading, and keep presentation as a
+    host service. Before this milestone the project source had only D3D11 and
+    null backends; scaling, GPU texture decode, queries, generated shaders and
+    shared presentation remain D3D11-specific. The downstream Vulkan 1.3
+    backend now proves transactional startup, official base callbacks,
+    bounded submission, exact 2D/cube texture reuse, compatible color-target
+    aliases, CPU-transformed four-stage register combiners, precise visibility
+    and mandatory readback without putting Vulkan objects in the executor or
+    presenter. Checked surface/texture layouts, allocation-stable guest
+    snapshots, texture filter/LOD decoding and the default combiner constructor
+    are proven D3D11/Vulkan extractions. A wider-scene profile then attributed
+    58.7% of NV2A-thread samples to CPU vertex-program interpretation. The
+    existing optional `draw_vsh` contract was sufficient for a Vulkan static
+    interpreter over gathered float inputs: post-change profiling removes the
+    interpreter from the NV2A hot list and lowers NV2A busy time from 84.55%
+    to 45.34%. Direct raw-stream fetch, wider matched parity and host-native
+    presentation remain unproved.
+    *Change:* develop Vulkan downstream as the conformance exemplar while
+    shaping every generic dependency for upstream independently:
+    version/capabilities, durable failure, texture stages and combiners,
+    vertex-program or visibility semantics, helpers, fixtures and
+    backend-authoring documentation. Do not propose local patch 0016
+    wholesale. Keep a narrow project adapter until official extensions land.
+    The current Vulkan adapter registers official `Nv2aBackend` and uses the
+    existing local transformed-draw, untransformed vertex-program, readback
+    and visibility callbacks. Eligible programs run in a static SPIR-V
+    interpreter from framework-gathered inputs; `vsh_raw_ok` stays unset and
+    constant-writing programs keep CPU fallback. This is evidence for
+    independently shaped optional state/visibility extensions, not a proposal
+    to upstream the bundled seam. Presentation remains outside `Nv2aBackend`:
+    the host owns the window,
+    platform surface, swap chain, resize, VSync, CPU/PVIDEO fallback and final
+    present; the Vulkan backend produces a completed image, synchronization,
+    frame identity and mandatory guest readback. Prototype that handoff
+    downstream without putting Vulkan types in the executor contract.
+    Vulkan's eight fence-backed command slots, 128-operation batches,
+    1,024-entry ordered asynchronous report ring, publication barrier and
+    fence-retired texture destruction are backend implementation patterns,
+    not new framework callbacks. Preserve them as a future optional-backend
+    candidate; propose a framework abstraction only if another backend proves
+    the same ownership boundary.
+    *Tests:* #319 remains the callback-contract authority. Project fixtures
+    now cover explicit no-fallback selection, fake Vulkan-to-D3D12 startup
+    fallback, invalid-configuration stop, both-candidates-fail behavior,
+    injected loader/pre-probe/actual-pipeline failures without partial
+    registration, callback-thread-safe teardown, checked surface layouts
+    including short-pitch rejection, and immutable linear/swizzled/BC/P8/mip/
+    cube texture layouts. The Vulkan hardware fixture covers clear,
+    depth-compatible partial clear, base and CPU-transformed extended draws,
+    two-stage/default register combiners, positive-X cube selection, explicit
+    packed-depth fallback, exact unchanged/source-rewrite/palette-rewrite
+    texture behavior, forced 2D/cube lower-mip selection, lower-level rewrite
+    invalidation, level-zero render-target fallback, depth rejection, RGB565
+    conversion, full external/self/subregion color aliases, a gathered-input
+    NV2A vertex program, exact compute verification readback, non-finite
+    whole-primitive rejection, precise
+    base/extended visibility with AA normalization, and readback with zero
+    validation errors on NVIDIA GeForce RTX 5070 and AMD Radeon integrated
+    adapters. The unchanged D3D11 selection reports 244 passed and 150 skipped.
+    NVIDIA retail visibility
+    restored D3D11-like draw/vertex volume; the transformed combiner path then
+    reduced the matched Basic Controls difference to 134 pixels over 8/255
+    (0.0436%). Four-connected component review places all 134 in exposed
+    animated world content around the opaque panel; three reviewed opaque
+    regions have zero pixels over 8/255 and maximum channel differences of
+    four to six. This remains one stationary state, does not isolate the
+    subthreshold cross-API numeric drift, and keeps broader parity open. A
+    sparse unreviewed retail verifier reported no mismatch through 1,745,525
+    accepted gathered batches. One unreviewed route improved from earlier
+    8.960-11.240 gameplay intervals to 26.391 stationary and 38.862 movement
+    flips/s; these are not distinct world frames or A/B/A evidence.
+    Add independent
+    semantic fixtures for each optional state extension. A fake
+    presentation-source/host pair must cover callback threads, image and
+    synchronization lifetime, frame identity, resize epochs, native versus
+    CPU/PVIDEO routes, VSync result, device loss and shutdown. The optional
+    Vulkan backend ultimately needs game-data-free clear, state, texture,
+    shader, visibility, readback and presentation tests across software and
+    hardware devices where available.
+    *Overlap:* refreshed read-only on 2026-11-20 across all 500 available
+    upstream pull-request records, tracking index
+    [#184](https://github.com/sp00nznet/xboxrecomp/pull/184), #306, merged
+    #319 and open host-hook discussion
+    [#312](https://github.com/sp00nznet/xboxrecomp/issues/312). #184's D3D11
+    and Metal seam remains prior art, not an ABI to revive wholesale. #306
+    supplies the accepted incremental/backend-downstream/host-presentation
+    direction. #312 explicitly asks whether presentation hooks fit that
+    direction but has no maintainer response. Merged #285 supplies the
+    pre-snapshot synchronization callback; extend it rather than create a
+    competing readback boundary. No official Vulkan or D3D12 backend PR was
+    found, and no upstream interaction was performed.
+    *Before filing:* implement and validate the downstream Vulkan exemplar,
+    split only proven generic pieces into small synthetic-test candidates,
+    refresh overlap, and request explicit approval before every upstream
+    issue, PR or comment. After the contract and host presentation handoff
+    are accepted and Vulkan passes parity, ask maintainers whether they will
+    take an optional, default-off Vulkan backend. Open that backend PR only
+    with both maintainer direction and the user's explicit approval.
+    *Status:* downstream base, visibility and CPU-transformed pixel-pipeline
+    exemplar implemented and validation-clean on the two available hardware
+    vendors. Exact 2D/cube/mip texture identity, compatible color aliases,
+    synchronous/ordered-asynchronous visibility, register-combiner and
+    gathered GPU-VSH semantics are proven locally for the covered fixtures
+    and sampled retail batches. One wrong-route
+    retail probe confirms a supplied six-level BC chain reaches Vulkan but is
+    not parity evidence. Direct raw-stream vertex fetch, wider matched parity,
+    native presentation and the upstream contribution series remain pending. The
+    first contract fixture is merged as #319. The neutral
+    layout/snapshot/filter/default-combiner helpers have not been proposed
+    upstream. No Vulkan backend PR exists, and no upstream interaction was
+    performed.
+
 ### Open upstream work to select or coordinate with
 
 These existing PRs may help Brute Force directly or own an interface touched
@@ -2241,9 +2381,11 @@ Measure performance changes with the
 before adding them to the selected list. Coordination-only rows should not be
 selected as if they were interchangeable implementations.
 
-| PR | Purpose | Relevance | Status |
+| Work | Purpose | Relevance | Status |
 | --- | --- | --- | --- |
 | [#184](https://github.com/sp00nznet/xboxrecomp/pull/184) | Index the portability, kernel and GPU-backend series | Coordination point for 0008 and 0014-0029; explicitly not intended to merge | Open draft index |
+| [#306](https://github.com/sp00nznet/xboxrecomp/issues/306) | Incrementally evolve `Nv2aBackend`; keep renderers downstream and presentation host-owned | Governs the contract used by the Vulkan exemplar; #319 is its merged first fixture | Open design record with maintainer direction; build on it, do not duplicate |
+| [#312](https://github.com/sp00nznet/xboxrecomp/issues/312) | Decide which downstream host-layer hooks belong upstream | Its unanswered presentation question is adjacent to the host-owned Vulkan handoff | Open discussion; no maintainer response |
 | [#222](https://github.com/sp00nznet/xboxrecomp/pull/222) | Re-sent NV2A state, window clip, clear rect and face culling | Fold demonstrated 0009/0010 corrections and fixtures here instead of competing | Open |
 | [#231](https://github.com/sp00nznet/xboxrecomp/pull/231) | Pipeline the CPU rasterizer behind the executor | CPU reference path; overlaps 0008 and 0013 | Open, stacked on merged #228; not measured |
 | [#266](https://github.com/sp00nznet/xboxrecomp/pull/266) | Treat a short sequencer-off interval as active | Audio alternative adjacent to local 0030-0034 | Open; do not select without title A/B/A |

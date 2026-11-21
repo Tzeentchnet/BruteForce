@@ -17,6 +17,14 @@ def entry(name):
     return SimpleNamespace(name=name)
 
 
+def test_setup_installs_framework_and_renderer_dependencies(monkeypatch):
+    calls = []
+    monkeypatch.setattr(build, "setup_toolkit", lambda: calls.append("toolkit"))
+    monkeypatch.setattr(build, "setup_dependencies", lambda: calls.append("renderer"))
+    assert build.main(["setup"]) == 0
+    assert calls == ["toolkit", "renderer"]
+
+
 def test_build_command_batches_extra_targets():
     command = build.cmake_build_command("Release", 4, ("bruteforce_d3d11_test", "bruteforce_present_test"))
     assert command[command.index("--target"):] == [
@@ -41,6 +49,10 @@ def test_ltcg_build_uses_isolated_flags_and_metadata(tmp_path, monkeypatch):
     build.generate()
     build_dir = tmp_path / "build"
     monkeypatch.setattr(build, "BUILD_DIR", build_dir)
+    vulkan_headers = tmp_path / "vulkan-headers"
+    dxc = tmp_path / "dxc.exe"
+    monkeypatch.setattr(build, "verify_dependencies",
+                        lambda: (vulkan_headers, dxc))
     commands = []
 
     def fake_run(name, command, cwd, log):
@@ -57,6 +69,8 @@ def test_ltcg_build_uses_isolated_flags_and_metadata(tmp_path, monkeypatch):
     assert configure[configure.index("-B") + 1] == build_dir / "compiler-ltcg"
     assert "-DBRUTEFORCE_ENABLE_LTCG=ON" in configure
     assert "-DBRUTEFORCE_ENABLE_AVX2=OFF" in configure
+    assert f"-DBRUTEFORCE_VULKAN_HEADERS_DIR={vulkan_headers}" in configure
+    assert f"-DBRUTEFORCE_DXC={dxc}" in configure
     assert commands[1][1][2] == build_dir / "compiler-ltcg"
     assert commands[0][2].name == "configure-ltcg.log"
     assert commands[1][2].name == "build-Release-ltcg.log"

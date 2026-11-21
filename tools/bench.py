@@ -105,7 +105,8 @@ MOVEMENT_CAPTURE_OFFSETS = (2.0, 5.0)
 PANEL_SECONDS = 3.0
 # Guest functions that poll for GPU progress (FINDINGS: the PFB flush poll and
 # the fence wait). A game thread in them is waiting for the NV2A thread.
-GUEST_GPU_WAITS = ("sub_00372180", "sub_00371CE0", "pfb_flush_wait_once",
+GUEST_GPU_WAITS = ("sub_00372180", "sub_00372180_gen", "sub_00371CE0",
+                   "pfb_flush_wait_once",
                    "nv2a_pfb_flush_wait", "xbox_Nv2aPfbFlushWait",
                    "nv2a_segment_wait_once")
 KERNEL_WAIT_SYMBOL_MARKERS = (

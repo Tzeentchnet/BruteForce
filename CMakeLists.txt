@@ -11,6 +11,12 @@ set(XBOXRECOMP_DIR "${CMAKE_CURRENT_SOURCE_DIR}/.deps/xboxrecomp" CACHE PATH
     "Path to the pinned, patched xboxrecomp checkout")
 set(BRUTEFORCE_GEN_DIR "" CACHE PATH "Directory containing this build's generated C")
 set(BRUTEFORCE_COMPILE_JOBS 4 CACHE STRING "Parallel MSVC compilation jobs")
+set(BRUTEFORCE_VULKAN_HEADERS_DIR
+    "${CMAKE_CURRENT_SOURCE_DIR}/.deps/vulkan-headers" CACHE PATH
+    "Path to the pinned Vulkan-Headers checkout")
+set(BRUTEFORCE_DXC
+    "${CMAKE_CURRENT_SOURCE_DIR}/.deps/dxc/bin/x64/dxc.exe" CACHE FILEPATH
+    "Path to the pinned DirectX Shader Compiler")
 option(BRUTEFORCE_LINK_SYMBOLS "Generate local symbols for crash diagnostics" OFF)
 option(BRUTEFORCE_ENABLE_LTCG "Enable Release whole-program optimization for the title executable" OFF)
 option(BRUTEFORCE_ENABLE_AVX2 "Enable Release AVX2 code generation for the title executable" OFF)
@@ -28,6 +34,30 @@ foreach(required recomp_types.h recomp_funcs.h recomp_dispatch.c)
         message(FATAL_ERROR "Missing ${required}. Run: python tools/build.py generate")
     endif()
 endforeach()
+if(NOT EXISTS "${BRUTEFORCE_VULKAN_HEADERS_DIR}/include/vulkan/vulkan.h"
+   OR NOT EXISTS "${BRUTEFORCE_DXC}")
+    message(FATAL_ERROR
+        "Pinned Vulkan dependencies are missing. Run: python tools/dependencies.py")
+endif()
+find_package(Python3 REQUIRED COMPONENTS Interpreter)
+get_filename_component(BRUTEFORCE_DXC_X64_DIR "${BRUTEFORCE_DXC}" DIRECTORY)
+get_filename_component(BRUTEFORCE_DXC_BIN_DIR "${BRUTEFORCE_DXC_X64_DIR}" DIRECTORY)
+get_filename_component(BRUTEFORCE_DXC_DIR "${BRUTEFORCE_DXC_BIN_DIR}" DIRECTORY)
+execute_process(
+    COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/tools/dependencies.py"
+            --verify
+            --vulkan-headers-dir "${BRUTEFORCE_VULKAN_HEADERS_DIR}"
+            --dxc-dir "${BRUTEFORCE_DXC_DIR}"
+    WORKING_DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}"
+    RESULT_VARIABLE BRUTEFORCE_DEPENDENCY_VERIFY_RESULT
+    OUTPUT_VARIABLE BRUTEFORCE_DEPENDENCY_VERIFY_OUTPUT
+    ERROR_VARIABLE BRUTEFORCE_DEPENDENCY_VERIFY_ERROR)
+if(NOT BRUTEFORCE_DEPENDENCY_VERIFY_RESULT EQUAL 0)
+    message(FATAL_ERROR
+        "Pinned Vulkan dependency verification failed:\n"
+        "${BRUTEFORCE_DEPENDENCY_VERIFY_OUTPUT}"
+        "${BRUTEFORCE_DEPENDENCY_VERIFY_ERROR}")
+endif()
 
 file(READ "${CMAKE_CURRENT_SOURCE_DIR}/fingerprints/retail.json" BRUTEFORCE_FINGERPRINT)
 string(JSON BRUTEFORCE_XBE_SHA256 GET "${BRUTEFORCE_FINGERPRINT}" xbe_sha256)
@@ -42,16 +72,37 @@ target_compile_definitions(xbox_apu PRIVATE RECOMP_EXTERNAL_APU_DSP=1)
 target_link_libraries(xbox_apu PUBLIC recomp_xemu_dsp)
 
 file(GLOB RECOMP_SOURCES CONFIGURE_DEPENDS "${BRUTEFORCE_GEN_DIR}/*.c")
-set(BRUTEFORCE_GPU_SOURCES src/gpu/d3d11_backend.c src/gpu/render_scale.c src/gpu/rc_hlsl.c
-    src/gpu/shader_cache.c src/gpu/vsh_hlsl.c src/gpu/texture_decode.c
-    src/gpu/texture_sampler.c)
+set(BRUTEFORCE_VULKAN_SHADERS
+    "${CMAKE_CURRENT_BINARY_DIR}/generated/vulkan_shaders.h")
+add_custom_command(
+    OUTPUT "${BRUTEFORCE_VULKAN_SHADERS}"
+    COMMAND "${Python3_EXECUTABLE}"
+            "${CMAKE_CURRENT_SOURCE_DIR}/tools/compile_vulkan_shaders.py"
+            --dxc "${BRUTEFORCE_DXC}"
+            --source "${CMAKE_CURRENT_SOURCE_DIR}/src/gpu/vulkan_base.hlsl"
+            --output "${BRUTEFORCE_VULKAN_SHADERS}"
+    DEPENDS
+        "${CMAKE_CURRENT_SOURCE_DIR}/tools/compile_vulkan_shaders.py"
+        "${CMAKE_CURRENT_SOURCE_DIR}/tools/dependencies.py"
+        "${CMAKE_CURRENT_SOURCE_DIR}/src/gpu/vulkan_base.hlsl"
+        "${BRUTEFORCE_DXC}"
+    VERBATIM)
+set(BRUTEFORCE_GPU_SOURCES src/gpu/combiner_state.c src/gpu/d3d11_backend.c
+    src/gpu/guest_snapshot.c
+    src/gpu/render_scale.c src/gpu/rc_hlsl.c src/gpu/renderer_startup.c
+    src/gpu/shader_cache.c src/gpu/surface_layout.c src/gpu/texture_layout.c
+    src/gpu/vsh_hlsl.c src/gpu/texture_decode.c src/gpu/texture_filter.c
+    src/gpu/texture_sampler.c
+    src/gpu/vulkan_backend.c "${BRUTEFORCE_VULKAN_SHADERS}")
 add_executable(bruteforce src/main.c src/recomp_manual.c src/crash_diagnostics.c
     src/perf_counters.c src/profile.c src/gpu/null_backend.c
     ${BRUTEFORCE_GPU_SOURCES} ${RECOMP_SOURCES})
 target_compile_definitions(bruteforce PRIVATE WIN32_LEAN_AND_MEAN NOMINMAX)
 target_include_directories(bruteforce PRIVATE
     "${CMAKE_CURRENT_BINARY_DIR}"
+    "${CMAKE_CURRENT_BINARY_DIR}/generated"
     "${BRUTEFORCE_GEN_DIR}"
+    "${BRUTEFORCE_VULKAN_HEADERS_DIR}/include"
     "${XBOXRECOMP_DIR}/include"
     "${XBOXRECOMP_DIR}/src"
     "${XBOXRECOMP_DIR}/src/kernel"
@@ -214,10 +265,47 @@ target_compile_definitions(bruteforce_d3d11_test PRIVATE
     WIN32_LEAN_AND_MEAN NOMINMAX _CRT_SECURE_NO_WARNINGS BRUTEFORCE_D3D11_TESTING)
 target_include_directories(bruteforce_d3d11_test PRIVATE
     "${CMAKE_CURRENT_SOURCE_DIR}/src"
+    "${CMAKE_CURRENT_BINARY_DIR}/generated"
+    "${BRUTEFORCE_VULKAN_HEADERS_DIR}/include"
     "${XBOXRECOMP_DIR}/src"
     "${XBOXRECOMP_DIR}/src/kernel"
 )
 target_link_libraries(bruteforce_d3d11_test PRIVATE xboxrecomp d3d11 d3dcompiler dbghelp bcrypt)
+
+add_executable(bruteforce_renderer_startup_test EXCLUDE_FROM_ALL
+    tests/renderer_startup_test.c src/gpu/renderer_startup.c)
+target_include_directories(bruteforce_renderer_startup_test PRIVATE
+    "${CMAKE_CURRENT_SOURCE_DIR}/src")
+
+add_executable(bruteforce_surface_layout_test EXCLUDE_FROM_ALL
+    tests/surface_layout_test.c src/gpu/surface_layout.c)
+target_include_directories(bruteforce_surface_layout_test PRIVATE
+    "${CMAKE_CURRENT_SOURCE_DIR}/src"
+    "${XBOXRECOMP_DIR}/src/kernel")
+
+add_executable(bruteforce_texture_layout_test EXCLUDE_FROM_ALL
+    tests/texture_layout_test.c src/gpu/texture_layout.c)
+target_include_directories(bruteforce_texture_layout_test PRIVATE
+    "${CMAKE_CURRENT_SOURCE_DIR}/src"
+    "${XBOXRECOMP_DIR}/src"
+    "${XBOXRECOMP_DIR}/src/kernel")
+target_link_libraries(bruteforce_texture_layout_test PRIVATE xboxrecomp)
+
+add_executable(bruteforce_vulkan_test EXCLUDE_FROM_ALL
+    tests/vulkan_test.c src/gpu/combiner_state.c src/gpu/guest_snapshot.c
+    src/gpu/vulkan_backend.c src/perf_counters.c
+    src/gpu/renderer_startup.c src/gpu/surface_layout.c src/gpu/texture_filter.c
+    src/gpu/texture_layout.c
+    "${BRUTEFORCE_VULKAN_SHADERS}")
+target_compile_definitions(bruteforce_vulkan_test PRIVATE
+    WIN32_LEAN_AND_MEAN NOMINMAX _CRT_SECURE_NO_WARNINGS BRUTEFORCE_VULKAN_TESTING)
+target_include_directories(bruteforce_vulkan_test PRIVATE
+    "${CMAKE_CURRENT_SOURCE_DIR}/src"
+    "${CMAKE_CURRENT_BINARY_DIR}/generated"
+    "${BRUTEFORCE_VULKAN_HEADERS_DIR}/include"
+    "${XBOXRECOMP_DIR}/src"
+    "${XBOXRECOMP_DIR}/src/kernel")
+target_link_libraries(bruteforce_vulkan_test PRIVATE xboxrecomp)
 
 add_executable(bruteforce_color_unpack_test EXCLUDE_FROM_ALL
     tests/color_unpack_test.c "${XBOXRECOMP_DIR}/src/kernel/nv2a_combiner.c")

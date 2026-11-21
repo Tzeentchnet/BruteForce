@@ -35,6 +35,22 @@ No prior v0.17 frame-rate or audio-scheduling result becomes a v0.18 result;
 all performance phases and their existing reference, ordering and A/B/A gates
 remain unchanged.
 
+The 2026-11-20 renderer direction now targets Vulkan as the future fresh
+graphical default and D3D12 as its startup-only fallback. The explicit Vulkan
+1.3 base, precise visibility, CPU-transformed register-combiner path and
+gathered-input GPU-VSH interpreter are implemented, and default-off supplied
+mip chains have cross-vendor synthetic coverage. Earlier correctness builds
+reported 0.9-1.261 flips/s, the wrong-scene mip probe about 7 flips/s, and a
+later uninstrumented exact-index route 8.960-11.240 gameplay flips/s. Profiling
+then attributed about 58.7% of NV2A-thread samples to CPU vertex-program
+interpretation. The gathered Vulkan interpreter removes those functions from
+the sampled hot list; one unreviewed route reported 26.391 stationary and
+38.862 movement flips/s, with a caller-profiled repeat at 26.683 and 38.503.
+These are diagnostics, not an alternating A/B/A result or distinct-world FPS.
+D3D11 remains the measured GPU baseline until matched correctness and
+presentation gates pass, and no graphics API is presumed to improve the
+guest-side PFB flush wait.
+
 Before the runtime-only Phase 4 fix, integrated v0.17 Release generation
 `20261111-084222-7bdb6e56`'s codegen-identical executable completed one CPU
 and one D3D11 scripted movement bring-up without retries. The post-deadlock
@@ -125,7 +141,7 @@ cache-enabled hit/compile diagnostics remain separate.
 | --- | --- |
 | 0 | Mostly done. Harness (`tools/bench.py`), frame statistics (patch 0014), census and ceiling probes (0015), profiler (`src/profile.c`), null back end and surface guard (`src/gpu/null_backend.c`) exist and were run. Reviewed movement manifests now report baseline-to-change and change-to-change cadence percentiles and 1% lows. The profile summary separates known guest GPU polls and caller-attributed kernel waits from unrelated kernel waits; `--profile-callers` enables the latter at additional diagnostic cost. `BRUTEFORCE_PERF_COUNTERS=1` adds atomic interval counts and opt-in timing for title pointer validation, `VirtualQuery`, exact texture-cache lookup/comparison, snapshot copies, rewrites and eviction; concurrent validation and exact P8 rewrite fixtures cover the counters. A three-run reviewed camera-pan campaign records G2, G3, readback, visibility, validation and texture-cache work on the final Release generation. A six-leg reviewed sync/async visibility campaign then isolated the existing visibility option: async improved reviewed throughput by 11.7%, but its 15.697/s mean 1% low and 65.467% G3 still fail. Guest-surface captures do not establish displayed-present cadence. Request audit 0025 now has a complete fresh-generation scripted report as well as the older partial diagnostic; neither has operator-reviewed scene identity or a matched xemu frame. The harness gives every enabled attempt and retry an isolated audit report, records its controls and rejects missing/incomplete output. Flip-ID capture mapping 0026 is synthetic-tested. Presenter capture 0027 verified one link per GDI and CPU-upload route in short, unmatched retail probes, but did not validate physical visibility. Matched CPU-reference output and native-rate confirmation remain open. The current-generation surface guard completed in one attempt and resolved title-code access inside an accumulated colour range, but staged-pushbuffer overlap, one excluded page and missing live lifetime tracking prevent classification as a rendered-surface read. The current answer is to retain readback; do not repeat the same diagnostic without improving its model. Missing: measurements for open #231 and current-base behavior from merged #272/#273. |
 | 1 | Implemented, G4 not met. D3D11 back end (`src/gpu/`, `RECOMP_GPU=d3d11`) with the extended interface (0016). Synthetic WARP and hardware fixtures match apart from listed edge pixels. The new GPU-vertex tutorial capture differs from the CPU reference in 0.52% of pixels beyond 8/255; an older CPU-vertex capture differs substantially. |
-| 2 | Implemented (0017, on by default with the D3D11 back end). Stationary hold 3.20 → 30.41 rendered fps (3 runs each, alternating). An unreviewed retail diagnostic sampled 23,400 GPU-program batches without reported vertex differences through its last report. WARP and hardware fixtures cover additional packed formats, relative constants and culling against the CPU interpreter; matched-scene and complete format/hardware verification remain open. |
+| 2 | Implemented for D3D11 and for Vulkan gathered inputs. D3D11 stationary hold improved 3.20 → 30.41 rendered fps in its historical alternating campaign. Vulkan now runs one static SPIR-V NV2A interpreter, rejects non-finite primitives, and supports compute verification readback; NVIDIA and AMD fixtures pass. A sparse unreviewed retail verifier reported no mismatch through 1,745,525 accepted batches. Vulkan direct raw-stream fetch remains open, `fetch_attr` still accounts for 2.09% of sampled NV2A time, and matched-scene G4 coverage is incomplete. |
 | 3 | Partial. Async visibility reports (0018) and shared GPU presentation (0024) are opt-in. Three reviewed alternating runs per visibility mode measured 27.401 versus 30.606 world changes/s, but async still failed the 1%-low and G3 gates and remains opt-in. Submitted renderer work now has a two-event bound, and default-off elision skips copies only for demonstrably coherent, unscaled 32-bit guest surfaces. Tracked-surface flips still wait; dirty surfaces, diagnostics and scaled/16-bit frames still read back. General on-demand guest-reader interception is not implemented. CPU-written Bink frames synchronize before scaled submission. No new retail performance comparison was run. |
 | 4 | Steps 1–3 implemented behind independent default-off switches with synthetic coverage. One fixed-tree segment-only smoke and one all-three smoke reached reviewed movement after correcting the PGRAPH/PFB dependency cycle. The 24-run alternating isolation/combined campaign is deferred; no performance gate is claimed. The last measured G3 remains 65.467% with async visibility. PFB, GET, semaphore, report, interrupt and flip ordering remain mandatory. Step 4 is deferred pending G3. |
 | 5 | In progress. GPU compute decodes common textures; exact D24 and packed D24S8/stencil surface aliases and GPU window clipping are experimental opt-ins. A native xemu Basic Controls match now establishes that packed-stencil reconstruction, rather than a global gamma change, removes the large brightness error in that state: 43.4320% of pixels exceed 8/255 without it and 3.7119% with it. Unsupported ownership cases and other scenes keep the option experimental and G4 unmet. D3D11 honors partial clear rectangles, and patch 0022 removes redundant software depth clears when a backend owns drawing and clearing. Patch 0019 cached hot `getenv` calls. Checked texture/colour snapshots and tracked lifetimes replace repeated page queries on those paths. The first reviewed texture-index campaign proves the index removes descriptor-scan work but has historical caller gaps and one regressing cadence pair. The caller-corrected partial repeat closes the observed attribution gap, but its only A/B pair fails input timing and run 04 locks before readiness. The operator closed the campaign as inconclusive; G2/G4/G5 remain open. |
@@ -587,8 +603,16 @@ from the ceiling probe: most of the null-backend ceiling.
    interpreter (Blood Wake's `vsh_readback`). Use it in fixtures on WARP and
    in occasional live diagnostics.
 
+Vulkan implements step 1 with one static interpreter shader rather than
+per-program compilation. It currently implements the gathered-input branch
+of step 2 only and intentionally leaves `vsh_raw_ok` unset. Its compute
+readback implements step 3 without adding output allocation or a wait to
+ordinary draws.
+
 **Exit:** no `nv2a_vsh_run` or `fetch_attr` in the NV2A-thread profile during
-gameplay, apart from constant-writing programs. G4 still holds.
+gameplay, apart from constant-writing programs. The Vulkan interpreter clears
+the `nv2a_vsh_run` part of this gate, but gathered `fetch_attr` remains at
+2.09% of the sampled NV2A thread. G4 still holds.
 
 ## Phase 3: remove synchronous round trips
 
@@ -805,6 +829,70 @@ The mode does not relax G4, does not justify skipping guest readback before
 its consumers are replaced, and must not skip or prematurely satisfy flush,
 semaphore, report or flip synchronization.
 
+## Vulkan and D3D12 backend migration
+
+This is a correctness and maintainability workstream, not a claim that a
+newer host API is faster. The architecture and startup policy are defined in
+[RENDERING.md](./RENDERING.md#vulkan-first-backend-architecture-and-bring-up-status);
+the ordered implementation tasks are
+[NEXTSTEPS F](./NEXTSTEPS.md#f-vulkan-default-renderer-migration-retail-capture-achieved-parity-pending).
+Current D3D11 measurements remain the baseline until Vulkan reaches matched
+retail rendering and native-presentation parity.
+
+Current status is partial M1. M0 has transactional startup/fake-fallback
+coverage, the accepted #319 baseline, and renderer-neutral surface/texture
+layouts, checked snapshots and filter/LOD decoding, but official optional
+extensions are not complete. M1 has NVIDIA/AMD validation-clean base and
+CPU-transformed extended draws, precise visibility, register combiners, exact
+2D/cube/mip texture rewrites, compatible full/self/subregion color aliases,
+and one state-matched NVIDIA retail tutorial capture. It does not have raw GPU
+vertex programs, scale, native presentation, broader matched scenes or the
+complete ordering matrix. No M1-M5 gate is met.
+
+The retail captures are correctness bring-up evidence only. The final
+combiner attempts ended at their 300-second watchdogs before the stationary
+interval completed; the same-generation D3D11 reference completed one
+interval at 13.813 flips/s. The separate visibility-only interval and stopped
+wrong-menu mip probe are not comparable replacements. The runs were not an
+alternating A/B/A campaign, so no Vulkan/D3D11 performance comparison is
+recorded.
+
+| Gate | Required evidence |
+| --- | --- |
+| M0: contract and extraction | Reuse merged #319 for callback order, exactly-once delivery, borrowed data, callback threads and registration lifecycle. Focused additions cover complete initialization before registration, structured failure, Vulkan-to-D3D12 startup fallback, explicit no-fallback choices, teardown and both-backends-fail behavior. Every required `Nv2aBackend` extension is optional and independently synthetic-tested; each renderer-neutral extraction leaves focused D3D11 fixtures unchanged. |
+| M1: Vulkan rendering parity | Shared synthetic clear, state, texture, shader, visibility, readback, alias, scale and ordering fixtures pass. Matched CPU/D3D11/Vulkan captures cover the opening, stationary tutorial and movement, menus, movies, HUD, fades and render-to-texture. Unsupported state or resource failure stops explicitly. |
+| M2: Vulkan native presentation | The host presentation service owns the window, Vulkan surface and swap chain, resize/fullscreen/VSync controls, final present, frame identity, PVIDEO and pinned-frame CPU fallback. The backend supplies a completed image, synchronization and mandatory guest readback through a separately tested handoff. CPU upload is bring-up evidence only. |
+| M3: D3D12 parity and backup | D3D12 passes the same semantic and presentation matrix, including WARP where applicable. Forced Vulkan loader, feature, device, compiler and presenter failures each select D3D12 only from `auto`; explicit Vulkan still fails closed. |
+| M4: default promotion | Available NVIDIA, AMD and Intel Vulkan paths are exercised, current saved renderer choices survive launcher migration, active-backend diagnostics are unambiguous, and both-backends-fail stops rather than selecting D3D11, CPU or `null`. Only then may fresh graphical settings select `auto`. |
+| M5: performance characterization | After M1-M4, run same-generation, same-scene A/B/A comparisons with at least three runs per backend. Record guest-CPU mode, thread count, GPU, driver, API, scale and options; report distinct world frames separately from flips. First-run DXC compilation and warm-cache results are separate. |
+
+The contract reference is official `Nv2aBackend`, grown according to
+sp00nznet/xboxrecomp#306 rather than replaced with the local extended seam.
+Vulkan remains downstream while it proves the needed optional extensions and
+host-service presentation handoff. Generic pieces can be proposed upstream
+one at a time; an optional Vulkan backend PR is a later goal that requires
+parity, maintainer direction and explicit user approval.
+
+The synchronization reference is semantic rather than API-specific. Vulkan
+command buffers and fences or timeline primitives, D3D12 command lists and
+fences, and D3D11 immediate-context queries must all enforce the same
+submitted-work bound, ordered visibility reports, readback-before-consumer
+rule, render-to-texture dependencies, and guest-visible PFB, semaphore,
+software-trap and flip holds. No backend may pass a gate by acknowledging
+work earlier than the current contract permits.
+
+Device loss after guest work starts is not a fallback case. A runtime switch
+would require a separately tested reconstruction of GPU-owned colour and
+depth surfaces, texture and pipeline caches, pending queries, presentation
+epochs and guest-visible ordering. Until such a design exists, every backend
+must report the failed operation and stop without claiming outstanding work
+completed.
+
+D3D11 remains selectable through M4 and subsequent field validation. Its
+eventual retirement is a separate decision after Vulkan and D3D12 both meet
+the gates; the migration must not remove the only currently validated GPU
+comparison path early.
+
 ## Not in scope, or explicitly rejected
 
 - Further SIMD or threading work on the CPU rasterizer beyond what it needs
@@ -812,9 +900,10 @@ semaphore, report or flip synchronization.
 - Skipping or prematurely clearing the PFB flush handshake, or marking
   submitted fences complete before their inputs are consumed. FINDINGS
   explains why these are invalid.
-- Direct3D 12, which is deferred.
-- A Vulkan back end, which is deferred; see
-  [NEXTSTEPS decision 10](./NEXTSTEPS.md#decisions-settled-2026-10-30-updated-2026-11-13).
+- Runtime Vulkan-to-D3D12 switching after device loss. The accepted fallback
+  is startup-only, before backend registration and guest execution.
+- Treating Vulkan or D3D12 as a performance shortcut around guest PFB,
+  semaphore, report or flip synchronization.
 - Mipmaps are an opt-in correctness experiment for the 4K target (NEXTSTEPS
   B10), not an established performance win; other LOD-transition
   enhancements stay deferred. Preserve the default scale-1 reference.
@@ -843,6 +932,20 @@ semaphore, report or flip synchronization.
   cache can avoid repeated combiner pixel-shader compiles on later runs.
   Vertex and other shaders are not cached. Measure title first-run stutter
   separately from the steady state.
+- **Cross-API drift.** Shared HLSL and renderer-neutral descriptors reduce
+  duplication but do not prove Vulkan, D3D12 and D3D11 use identical clip,
+  depth, interpolation, format, query or sampling rules. Keep per-backend
+  output fixtures and CPU-reference comparisons; do not normalize a mismatch
+  merely to make two host APIs agree. In the retained Basic Controls pair,
+  all 134 over-8/255 pixels form 102 sparse components in exposed animated
+  world content, while reviewed opaque UI regions have none. The remaining
+  one-to-six-LSB UI differences are correctness evidence to retain, not a
+  performance result or justification for changing synchronization.
+- **Presentation compatibility.** A Vulkan default cannot depend on optional
+  D3D11/Vulkan external-memory interop. Native same-API presentation must
+  remain a host service, with the backend supplying completed images and
+  synchronization while the host retains its window, swap chain,
+  CPU/PVIDEO fallbacks, frame identity, resize epochs and captures.
 - **Synchronization.** PGRAPH software-method traps, flip holds, and the
   semaphore hook all run on the NV2A thread. The backend must not block that
   thread on the GPU while a trap is pending. A queued segment also cannot
@@ -871,12 +974,17 @@ semaphore, report or flip synchronization.
   | Phase 2 | 13 |
   | Phase 3 | 15 |
   | Phase 4 | 16, 17, 18 |
+  | Vulkan/D3D12 migration | 12-15 and 50; build on #306 and merged #319, coordinate the unanswered host-presentation question in #312, and treat #184 as prior art rather than the target ABI |
 
   Title-specific pieces stay in `src/`: the KickOff hook, Brute Force
-  addresses, and census conclusions. Coordinate the back-end interface with
-  [#184](https://github.com/sp00nznet/xboxrecomp/pull/184) and
-  [#285](https://github.com/sp00nznet/xboxrecomp/pull/285) before preparing
-  a PR.
+  addresses, and census conclusions. Build on the incremental contract in
+  [#306](https://github.com/sp00nznet/xboxrecomp/issues/306) and merged
+  [#319](https://github.com/sp00nznet/xboxrecomp/pull/319); coordinate the
+  readback seam with [#285](https://github.com/sp00nznet/xboxrecomp/pull/285)
+  and the unresolved host-presentation question with
+  [#312](https://github.com/sp00nznet/xboxrecomp/issues/312). Do not revive
+  #184's decoded-state seam wholesale or prepare an upstream backend PR
+  without explicit approval.
 - **README:** status, the renderer switch, and build requirements (the
   D3DCompiler runtime) once a phase changes user-facing behaviour.
 - **THIRD_PARTY_NOTICES:** attribution for adapted Blood Wake files.

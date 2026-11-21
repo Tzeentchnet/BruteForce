@@ -61,9 +61,12 @@
 #include "video/gpu_present.h"
 #include "d3d11_backend.h"
 #include "d3d11_device_status.h"
+#include "combiner_state.h"
+#include "guest_snapshot.h"
 #include "render_scale.h"
 #include "rc_hlsl.h"
 #include "shader_cache.h"
+#include "surface_layout.h"
 #include "texture_decode.h"
 #include "texture_sampler.h"
 #include "vsh_hlsl.h"
@@ -718,10 +721,6 @@ uint32_t bruteforce_d3d11_test_device_thread(void)
 
 #define MAX_SURF 32
 typedef struct {
-    uint64_t layout, allocation, bounds;
-} GuestSpanIdentity;
-
-typedef struct {
     uint32_t va, pitch, bpp, w, h, pw, ph, aa_sx, aa_sy;
     unsigned scale_epoch;
     ID3D11Texture2D *tex;
@@ -767,147 +766,30 @@ static Depth *s_cur_depth;
 static uint32_t s_gen = 1;          /* frame number */
 static int s_tex_strict_bounds;
 
-typedef enum {
-    GUEST_COPY_OK,
-    GUEST_COPY_INVALID,
-    GUEST_COPY_SHORT,
-    GUEST_COPY_UNREGISTERED,
-    GUEST_COPY_CHANGED,
-    GUEST_COPY_UNREADABLE
-} GuestCopyResult;
-
-enum GuestBoundsPolicy {
-    GUEST_BOUNDS_IGNORE,
-    GUEST_BOUNDS_REQUIRED,
-    GUEST_BOUNDS_TRACK_IF_REGISTERED
-};
-
-/* The RAM views and the separate contiguous/tiled views have distinct host
- * backing. Keep allocation identity in the appropriate backing domain. */
-static int guest_data_span(uint32_t va, size_t bytes, uint64_t *physical)
-{
-    uint64_t mapped = xbox_GetMappedSize(), end, relative;
-    uint64_t tiled_size = mapped < XBOX_CONTIG_SIZE ? mapped : XBOX_CONTIG_SIZE;
-    if (!mapped || !va || !bytes || bytes > XBOX_CONTIG_SIZE)
-        return 0;
-    end = (uint64_t)va + bytes;
-    if (va < XBOX_CONTIG_BASE && (uint64_t)va < mapped * (1ull + XBOX_NUM_MIRRORS)) {
-        relative = va % mapped;
-        if (end > XBOX_CONTIG_BASE || bytes > mapped - relative)
-            return 0;
-        *physical = relative;
-        return 1;
-    }
-    if (va >= XBOX_CONTIG_BASE &&
-        (uint64_t)va < (uint64_t)XBOX_CONTIG_BASE + XBOX_CONTIG_SIZE) {
-        relative = (uint64_t)va - XBOX_CONTIG_BASE;
-        if (bytes > XBOX_CONTIG_SIZE - relative)
-            return 0;
-        *physical = relative;
-        return 2;
-    }
-    if (va >= XBOX_TILED_BASE &&
-        (uint64_t)va < (uint64_t)XBOX_TILED_BASE + tiled_size) {
-        relative = (uint64_t)va - XBOX_TILED_BASE;
-        if (bytes > tiled_size - relative)
-            return 0;
-        *physical = relative;
-        return 2;
-    }
-    return 0;
-}
-
-static uint64_t guest_allocation_identity(uint32_t va, uint32_t *remaining)
-{
-    uint64_t physical;
-    int domain = guest_data_span(va, 1, &physical);
-    if (domain == 1)
-        return xbox_HeapBlockIdentity((uint32_t)physical, remaining);
-    if (domain == 2)
-        return xbox_ContiguousBlockIdentity(XBOX_CONTIG_BASE + (uint32_t)physical, remaining);
-    if (remaining)
-        *remaining = 0;
-    return 0;
-}
-
 static GuestCopyResult checked_guest_copy(uint32_t va, size_t bytes, void *dest,
                                           int bounds_policy, GuestSpanIdentity *identity)
 {
-    GuestSpanIdentity before = {0}, after = {0};
-    uint32_t remaining, after_remaining;
-    uintptr_t offset = (uintptr_t)xbox_GetMemoryOffset(), host;
-    uint64_t physical, start = 0;
-    SIZE_T copied = 0;
-    GuestCopyResult result = GUEST_COPY_INVALID;
+    uint64_t start = 0;
+    GuestCopyResult result;
     int perf = g_bruteforce_perf_counters_enabled;
 
     if (perf) start = bruteforce_perf_clock();
-    if (!guest_data_span(va, bytes, &physical) || offset > UINTPTR_MAX - va)
-        goto done;
-    host = offset + va;
-    if (bytes > UINTPTR_MAX - host)
-        goto done;
-    before.layout = xbox_MemoryLayoutGeneration();
-    if (!before.layout)
-        goto done;
-    before.allocation = guest_allocation_identity(va, &remaining);
-    if (remaining && (!before.allocation || bytes > remaining)) {
-        result = GUEST_COPY_SHORT;
-        goto done;
-    }
-    if (bounds_policy != GUEST_BOUNDS_IGNORE) {
-        before.bounds = xbox_GuestBoundsIdentity(va, &remaining);
-        if (!before.bounds && bounds_policy == GUEST_BOUNDS_REQUIRED) {
-            result = GUEST_COPY_UNREGISTERED;
-            goto done;
-        }
-        if (before.bounds && bytes > remaining) {
-            result = GUEST_COPY_SHORT;
-            goto done;
-        }
-    }
-    if (!ReadProcessMemory(GetCurrentProcess(), (const void *)host, dest, bytes, &copied) ||
-        copied != bytes) {
-        result = GUEST_COPY_UNREADABLE;
-        goto done;
-    }
-    after.layout = xbox_MemoryLayoutGeneration();
-    after.allocation = guest_allocation_identity(va, &after_remaining);
-    if (bounds_policy != GUEST_BOUNDS_IGNORE)
-        after.bounds = xbox_GuestBoundsIdentity(va, &remaining);
-    if (before.layout != after.layout || before.allocation != after.allocation ||
-        before.bounds != after.bounds || (after_remaining && bytes > after_remaining) ||
-        (after.bounds && bytes > remaining)) {
-        result = GUEST_COPY_CHANGED;
-        goto done;
-    }
-    if (identity) *identity = before;
-    result = GUEST_COPY_OK;
-done:
+    result = gpu_guest_copy(va, bytes, dest, bounds_policy, identity);
     if (perf)
         bruteforce_perf_record_guest_range(result == GUEST_COPY_OK, 0, 0, 0,
                                            bruteforce_perf_clock() - start, 0);
     return result;
 }
 
+static uint64_t guest_allocation_identity(uint32_t va, uint32_t *remaining)
+{
+    return gpu_guest_allocation_identity(va, remaining);
+}
+
 static int guest_identity_still_valid(uint32_t va, size_t bytes, int bounds_policy,
                                       const GuestSpanIdentity *expected)
 {
-    uint32_t remaining;
-    uint64_t allocation, bounds = 0;
-    if (!expected->layout || xbox_MemoryLayoutGeneration() != expected->layout)
-        return 0;
-    allocation = guest_allocation_identity(va, &remaining);
-    if (allocation != expected->allocation || (remaining && bytes > remaining))
-        return 0;
-    if (bounds_policy != GUEST_BOUNDS_IGNORE) {
-        bounds = xbox_GuestBoundsIdentity(va, &remaining);
-        if ((!bounds && bounds_policy == GUEST_BOUNDS_REQUIRED) ||
-            (bounds && bytes > remaining))
-            return 0;
-    }
-    return bounds == expected->bounds &&
-           xbox_MemoryLayoutGeneration() == expected->layout;
+    return gpu_guest_identity_still_valid(va, bytes, bounds_policy, expected);
 }
 
 static int query_suspend_clear(void);
@@ -1270,15 +1152,22 @@ static Surf *find_surf(uint32_t va)
  * layout. */
 static Surf *get_surf(const Nv2aSurface *in)
 {
-    uint32_t bpp = in->bytes_per_pixel ? in->bytes_per_pixel : 4;
-    uint32_t w = in->pitch && in->pitch / bpp >= in->width ? in->pitch / bpp : in->width;
-    uint32_t h = in->height;
+    GpuSurfaceLayout layout;
+    uint32_t bpp, w, h;
     uint32_t aa_sx = in->aa_sx > 1 ? in->aa_sx : 1;
     uint32_t aa_sy = in->aa_sy > 1 ? in->aa_sy : 1;
     uint32_t pw, ph;
     Surf *s = NULL;
     int i, stale;
 
+    if (!gpu_surface_layout(in, &layout)) {
+        fprintf(stderr, "[GPU-D3D11] invalid color surface layout for %08X\n",
+                in ? in->color_va : 0);
+        return NULL;
+    }
+    bpp = layout.bytes_per_pixel;
+    w = layout.width;
+    h = layout.height;
     if (aa_sx > 2 || aa_sy > 2) {
         fprintf(stderr, "[GPU-SCALE] unsupported guest anti-aliasing factors %ux%u\n",
                 aa_sx, aa_sy);
@@ -4204,21 +4093,6 @@ static void d3d_draw(const Nv2aSurface *s, const Nv2aBatch *b)
     s_st.tris += b->count / 3;
 }
 
-/* Without programmed combiners the CPU path draws stage 0 times diffuse; a
- * one-stage combiner computing T0 * D0 (or D0 alone) is the same thing. */
-static void simple_combiner(const Nv2aXBatch *b, Nv2aCombiner *rc)
-{
-    memset(rc, 0, sizeof *rc);
-    rc->control = 1;
-    rc->stage_program = b->tex_valid[0] ? 1 : 0;
-    /* A = T0 (reg 8) or 1 (reg 0 inverted), B = D0 (reg 4); out to R12
-     * (spare0), which the final combiner absent reads as the result. */
-    rc->color_icw[0] = (b->tex_valid[0] ? 0x08u : 0x20u) << 24 | 0x04u << 16;
-    rc->alpha_icw[0] = (b->tex_valid[0] ? 0x18u : 0x30u) << 24 | 0x14u << 16;
-    rc->color_ocw[0] = 0x0Cu << 4;
-    rc->alpha_ocw[0] = 0x0Cu << 4;
-}
-
 /* The rasteriser state for a batch: no culling, unless the batch asks the
  * back end to cull as the CPU path would (draw_vsh with RECOMP_CULL_FACE).
  * NULL when both faces are culled. The executor's surface space has y
@@ -4263,7 +4137,7 @@ static int xdraw_prepare(const Nv2aSurface *s, const Nv2aXBatch *b)
         return -1;
     rc = b->rc;
     if (!rc) {
-        simple_combiner(b, &simple);
+        gpu_combiner_default(b->tex_valid[0], &simple);
         rc = &simple;
     }
     memset(&key, 0, sizeof key);

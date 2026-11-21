@@ -29,6 +29,55 @@ one core. Their stable captures differ by more than 8/255 in 677 pixels
 (0.2204%). This accepts the framework base, not performance, movement
 correctness, listening quality or long-session reliability.
 
+The last matched build of the same generation, with visibility and the
+CPU-transformed Vulkan pixel pipeline, produced executable SHA-256
+`17ef3c06b9e205ffcf93cc532b02f2fcf23b3638e07de81d9cfae27ed182887f`.
+Precise queries first restored the expected stationary geometry volume:
+1,607.6 draws and 132,454.7 vertices per frame versus D3D11's 1,608.4 and
+132,641.7. Four texture stages, register combiners and cube maps then reduced
+the matched Basic Controls difference from 149,590 pixels over 8/255
+(48.6947%) to 134 (0.0436%); mean channel error is 0.374562 and maximum
+channel error is 29. The validation-enabled NVIDIA capture pair is
+byte-identical with SHA-256
+`b81bb0546d28ba0fe53a34af0ad4cebcac6ee081d16399d625bb438a80070870`.
+This closes the first stationary full-pixel-pipeline comparison. Native
+presentation, matched gathered-GPU-VSH output, direct raw-stream fetch,
+wider scene/stability parity and any accepted performance claim remain open.
+
+Four-connected follow-up on that retained pair finds 102 components among
+the 134 over-8/255 pixels, with a largest component of 26 pixels. Reviewed
+mask locations are all exposed animated world content around the irregular
+tutorial-panel boundary. Three opaque panel regions have zero pixels over
+8/255 and maximum channel differences of four to six. The remaining
+subthreshold cross-API numeric drift is not isolated, but the sparse
+over-threshold tail is no longer an unexplained stationary UI difference.
+
+The current default-off Vulkan mip build has executable SHA-256
+`8ab947dec007dfd852db9ceed4c3248faa438838e8776e3d69567d56244feeee`.
+NVIDIA and AMD fixtures select supplied lower levels for 2D and cube textures,
+observe lower-level rewrites, and keep render-target aliases at level zero.
+One validation-enabled retail probe uploaded a supplied six-level format
+`0x0E` BC chain, then took the legacy script's wrong Join Deathmatch route
+and was stopped after 3,435 flips. Its roughly 7 flips/s menu observation,
+missing on-screen movies and capture are not correctness or performance
+evidence: the script deliberately skipped the movies and never reached the
+target scene.
+
+The current 37,823,488-byte gathered-GPU-VSH diagnostic executable has
+SHA-256
+`108c787713c52007fe67e7c90ed33db77e4e6443cca11c075db0be5baec314cc`.
+Its static SPIR-V NV2A interpreter, non-finite triangle filter and compute
+verification readback pass with zero Vulkan validation errors on the NVIDIA
+and AMD adapters. One uninstrumented legacy-route collection reported 26.391
+stationary and 38.862 movement flips/s; a caller-profiled repeat reported
+26.683 and 38.503. This materially improves the preceding 8.960-11.240
+gameplay intervals and removes `vsh_run_decoded`/`run_mac` from the sampled
+NV2A hot list, but it is still unreviewed diagnostic evidence, not distinct
+world frames or A/B/A. A sparse retail verifier logged its first three checks
+with zero differences and no later mismatch through 1,745,525 accepted
+program batches. The throughput blocker is cleared for continued correctness
+work; matched scene review still precedes renderer comparisons.
+
 The preceding v0.17 toolkit used selected #314/#319/#320 commits and 43
 local patches, with tree `3e3ae3600802d2bf4446d86fc546322d60849047`.
 The framework tools on that earlier tree reported 995 passed, 2 skipped and 134
@@ -152,9 +201,13 @@ cause. No code was imported. The
 independent foreground-only display-awake policy is now implemented and
 synthetic-tested behind a default-off switch. Shader-preparation diagnostics
 are bounded and opt-in; actual precompilation and native fixed-function work
-still need title evidence and parity fixtures. Audio, latency, HDR, and
-Direct3D 12 work remain deferred. See
-[FINDINGS](FINDINGS.md#blood-wake-v025-v033-refresh) and the new
+still need title evidence and parity fixtures. Audio, latency, and HDR work
+remain deferred. Vulkan and Direct3D 12 are now an accepted, gated renderer
+migration; the explicit Vulkan base, visibility, CPU-transformed pixel
+pipeline and first near-matched CPU-presented retail capture milestones are
+implemented, but this is not a broad parity or performance claim. See
+[the Vulkan review and bring-up](FINDINGS.md#vulkan-feasibility-review-and-integrated-bring-up-2026-11-20),
+[the Blood Wake review](FINDINGS.md#blood-wake-v025-v033-refresh), and the new
 [UPSTREAM candidates](UPSTREAM.md#performance-and-gpu-back-end-candidates).
 
 ## Current boundary
@@ -1097,7 +1150,143 @@ listed differences, newly visible side geometry survives matching title
 culling, HUD and movies retain their shape, and guest readback remains 4:3.
 Split-screen support is a deferred follow-up, not part of this gate.
 
-## Decisions (settled 2026-10-30; updated 2026-11-13)
+## F. Vulkan-default renderer migration (gathered GPU-VSH implemented)
+
+The 2026-11-20 design in
+[RENDERING](RENDERING.md#vulkan-first-backend-architecture-and-bring-up-status) replaces
+the earlier Vulkan/D3D12 deferral. The explicit Vulkan 1.3 base, precise visibility,
+CPU-transformed full-pixel-pipeline and gathered-input GPU-VSH milestones are
+implemented. The backend reaches and
+near-matches the retail Basic Controls state through mandatory readback and
+CPU upload. This is not a default change or broad retail parity result.
+D3D11 remains the current launcher and graphical `build.py` default, and the
+CPU renderer remains the correctness reference. Native Vulkan presentation,
+direct raw-stream vertex fetch, matched wider-scene/stability validation,
+D3D12 and production `auto` remain open.
+
+The upstream shape follows
+[sp00nznet/xboxrecomp#306](https://github.com/sp00nznet/xboxrecomp/issues/306):
+grow official `Nv2aBackend` incrementally, keep full renderers downstream for
+now, forbid per-draw GPU round trips, document callback threading, and keep
+presentation as a host service rather than backend window ownership. Merged
+[sp00nznet/xboxrecomp#319](https://github.com/sp00nznet/xboxrecomp/pull/319)
+already supplies the reusable fake-backend contract fixture. Vulkan is the
+downstream exemplar used to prove each generic extension and presentation
+requirement. The long-term goal is an optional, default-off upstream Vulkan
+backend PR after the contract is accepted, parity passes, maintainers agree
+to take a full renderer, and the user explicitly approves opening it.
+
+The target fresh graphical policy is `auto`: complete Vulkan initialization
+before guest execution, then try D3D12 only when Vulkan is unavailable or
+fails startup initialization. Explicit `vulkan`, `d3d12`, and `d3d11`
+selections fail closed without falling through. If both automatic candidates
+fail, stop rather than silently changing to D3D11, CPU, or `null`. Device
+loss after guest work begins is fatal; reconstructing GPU-authoritative state
+for live backend switching is outside this workstream.
+
+1. **Adopt the upstream contract baseline (complete for this milestone).**
+   Reuse #319 for callback order,
+   exactly-once delivery, borrowed-data copies, callback threads and backend
+   registration/replacement/removal. Add focused project fixtures for the
+   uncovered selector lifecycle: Vulkan success, Vulkan-to-D3D12 fallback,
+   both-backends-fail, explicit no-fallback choices, no partial registration
+   and teardown. The project lifecycle fixture and Vulkan failure injection
+   now cover this scope; production `auto` remains gated on F8-F9.
+2. **Shape extensions for official `Nv2aBackend` (pending).** Do not upstream local
+   patch 0016 as one wholesale seam. Separate version/capabilities, durable
+   failure, texture stages and combiners, vertex programs, visibility and
+   other required state into optional, synthetic-test changes. Keep a narrow
+   adapter for the current D3D11 implementation and rebase it as accepted
+   pieces land.
+3. **Extract only proven renderer-neutral code (in progress).** Move immutable texture and
+   surface layouts, checked snapshots, cache keys, scale calculations, frame
+   identities, and shader inputs out of D3D11-specific ownership one piece at
+   a time. Existing D3D11 fixtures must remain unchanged after each move.
+   Devices, resources, descriptors, pipelines, commands, queries and render
+   fences stay backend-specific; window and swap-chain ownership stays in
+   the host presentation service. Checked surface layouts, immutable texture
+   storage/span calculations and allocation-stable guest snapshots are now
+   shared by D3D11/Vulkan. The default stage-zero-times-diffuse combiner
+   constructor is also shared. Focused texture-layout coverage and the
+   unchanged D3D11 regression suite guard the extractions. Cache resources
+   and synchronization remain backend-specific.
+4. **Pin shared shader and API dependencies (complete for the current Vulkan shaders).** Use one pinned DXC version to
+   produce SPIR-V for Vulkan and DXIL for D3D12; retain D3DCompiler for the
+   transition D3D11 path. Pin and verify Vulkan headers and distributable DXC
+   artifacts, record licences, and require no end-user Vulkan SDK. Include
+   backend, compiler, target, flags and binding ABI in shader-cache identity.
+   Vulkan-Headers 1.4.363.0 and DXC v1.9.2609 are pinned and verified; nine
+   base/clear/extended/VSH shaders build as Vulkan 1.3 SPIR-V. Cross-backend
+   generated-shader cache identity remains future F7/F8 work.
+5. **Bring up Vulkan explicitly downstream (base, visibility, transformed pixel pipeline, gathered GPU-VSH and opt-in mips complete).** The
+   loader/device/queue, validation diagnostics, BGRA8 surfaces, clears, base
+   draws, exactly snapshot-checked 2D/cube texture cache, depth/stencil,
+   RGB565 conversion, compatible full/self/subregion color-target aliases,
+   eight bounded command slots and mandatory guest readback are implemented
+   behind `RECOMP_GPU=vulkan`. CPU-transformed extended batches add four
+   2D/cube texture stages, up to eight general combiners, the final combiner,
+   alpha test and precise visibility reports. Eligible `draw_vsh` batches
+   execute a static NV2A interpreter from gathered inputs; compute readback
+   verifies its executor-format outputs. `RECOMP_GPU_MIPS=1` additionally
+   exposes supplied swizzled, P8 and BC 2D/cube chains with programmed
+   filtering, clamps and bias; aliases remain level zero. NVIDIA and AMD
+   synthetic validation passes. Validation-enabled NVIDIA retail runs reach
+   Basic Controls and capture a near-matched frame without validation or
+   renderer errors. Direct raw-stream fetch, scaling, native presentation and
+   wider parity remain F7 scope.
+6. **Prototype host-owned Vulkan presentation (pending).** `Nv2aBackend` produces and
+   reads back surfaces; it never owns or pumps the window. The host service
+   owns the platform Vulkan surface, swap chain, resize, VSync, final present,
+   CPU/PVIDEO fallback and frame identity. Define a separate tested handoff
+   for the completed image and synchronization without making D3D11/Vulkan
+   interop a requirement. Coordinate with the unanswered presentation part
+   of [sp00nznet/xboxrecomp#312](https://github.com/sp00nznet/xboxrecomp/issues/312).
+7. **Reach Vulkan parity and PR readiness (in progress).** Precise visibility
+   restored D3D11-like draw/vertex volume but left 149,590 of 307,200 pixels
+   over 8/255. The CPU-transformed four-stage register-combiner path reduces
+   that to 134 (0.0436%); only eight tutorial-crop pixels and 126 pixels
+   outside it exceed 8/255. Component review places that sparse over-threshold tail in exposed
+   animated world content and finds none in three opaque panel regions; the
+   remaining one-to-six-LSB panel differences have no isolated cross-API
+   cause. Wider-scene profiling now shows that CPU interpretation consumed
+   about 58.7% of NV2A-thread samples, satisfying the evidence gate. The
+   gathered Vulkan interpreter and compute verifier are implemented and
+   cross-vendor-clean; one unreviewed route improves gameplay cadence to
+   26-39 flips/s and removes the interpreter from the sampled hot list.
+   Review matched movement output and verifier coverage before deciding
+   whether direct raw-stream fetch is needed. Cover movement, menus, movies,
+   fades, PVIDEO and CPU fallback without weakening synchronization.
+   The mip fixture is complete; repeat its retail comparison only with
+   reviewed target-scene readiness because the first legacy attempt entered
+   Join Deathmatch.
+   Extract only
+   approved contract, helper, fixture and documentation pieces into small
+   upstream candidates. When the contract and host presentation boundary are
+   accepted, request explicit approval to propose the optional Vulkan backend
+   itself. Until then the renderer remains an upstream-quality downstream
+   exemplar.
+8. **Implement D3D12 against the same contract (pending).** Reach the same state,
+   readback, ordering, scaling and presentation coverage, with WARP fixtures
+   where applicable. D3D12 remains explicit until its parity gate passes.
+9. **Promote `auto`, not an incomplete backend (pending).** Compare matched CPU,
+   D3D11, Vulkan and D3D12 frames for the opening, tutorial stationary and
+   movement states, menus, movies, HUD, fades, render-to-texture, PVIDEO and
+   CPU fallback. Exercise available NVIDIA, AMD and Intel Vulkan drivers,
+   force every startup-fallback branch, migrate launcher settings without
+   overwriting saved explicit choices, and log the selected backend and any
+   rejected candidate. Only then make `auto` the fresh graphical default.
+10. **Retain D3D11 through both parity gates (active constraint).** Keep it selectable for
+   regressions and field comparison after the default switches. Retirement
+   requires a later explicit decision and is not part of F9.
+
+*Done when:* Vulkan and D3D12 both meet the shared synthetic, matched-frame,
+native-presentation, synchronization and failure gates; automatic startup
+fallback is deterministic and tested; current saved choices survive
+migration; the CPU reference and D3D11 comparison path still work; and any
+performance result follows the same-generation A/B/A protocol with distinct
+world frames reported separately from flips.
+
+## Decisions (settled 2026-10-30; updated 2026-11-20)
 
 1. **Rendering reference:** xemu, run on the same disc at matched states (A2).
 2. **DSP direction:** the xemu v0.8.139 DSP is implemented. Project-owned
@@ -1124,17 +1313,22 @@ Split-screen support is a deferred follow-up, not part of this gate.
 9. **Phase 4 campaign:** defer the 24-run flush/idle/segment/all-three A/B/A
    matrix. The two fixed-tree smokes remain bring-up evidence only; all
    switches stay default-off and no performance gate is waived.
-10. **Vulkan back end (2026-11-13):** deferred, like Direct3D 12. Direct3D
-    11 remains the only GPU target. The title submits NV2A pushbuffers, so a
-    Vulkan back end would sit behind the existing extended render-backend
-    interface (patch 0016) and would have to reproduce D3D11's surface
-    ownership, mandatory guest readback, render scaling, shared and scaled
-    presentation, two-event submission bound, and flip and semaphore
-    ordering. No measurement justifies it: the dominant G3 wait is the PFB
-    flush poll, which is independent of the host graphics API. Revisit only
-    after the open D3D11 performance and correctness gates close, starting
-    with a design note that maps the backend interface onto Vulkan rather
-    than with code.
+10. **Renderer API direction (updated 2026-11-20):** target Vulkan as the
+    fresh graphical default with D3D12 as an automatic startup-only backup.
+    The title still submits NV2A pushbuffers, so both implementations sit
+    behind official `Nv2aBackend` and separately tested optional extensions,
+    following the incremental contract chosen in sp00nznet/xboxrecomp#306
+    rather than upstreaming the local extended seam wholesale. Presentation
+    remains a host service: the backend produces and reads back surfaces but
+    does not own the window or swap chain. Vulkan is the downstream exemplar
+    and eventual optional upstream-backend PR target after maintainer and
+    user approval. Both backends must reproduce current surface ownership,
+    mandatory guest readback, render scaling, native and CPU-fallback
+    presentation, submitted-work bound, visibility, flip, PFB and semaphore
+    ordering. Explicit selections never fall through; runtime device-loss
+    switching is excluded. Keep D3D11 selectable through both parity gates
+    and keep CPU as the correctness reference. No graphics-API performance
+    gain is assumed; the dominant measured PFB flush wait is API-independent.
 11. **Texture-index campaign:** retain the first six-attempt collection and
     the caller-corrected three-run partial collection as inconclusive
     evidence. Together they prove descriptor-scan removal and confirm the
@@ -1148,17 +1342,32 @@ Still open: access to a native 4K display. Optional 5.1 output is deferred.
 
 ## Order
 
-1. Complete A1 and the single-view E1-E2 scope, then A2-A4 as the reference
+1. Treat completed F1/F4 and the initial F3 extraction/F5 base backend as the
+   renderer foundation. Continue shaping incremental official extensions and
+   extracting only helpers proved by a second backend. Do not change the
+   fresh default.
+2. Continue Vulkan parity and native presentation through F5-F7. The
+   integrated retail draw/flip capture, exact 2D/cube texture cache,
+   compatible color-target aliases, precise visibility and CPU-transformed
+   register-combiner path are complete. The retained stationary
+   over-threshold differences are reviewed as exposed world animation. The
+   gathered GPU-VSH path now clears the immediate gameplay-throughput blocker;
+   next validate matched movement and sparse verification output, decide
+   whether direct raw-stream fetch is needed, then implement the host-owned
+   native presentation handoff. Submit no
+   upstream work without approval. Implement D3D12 in F8, promote `auto` only
+   after F9, and retain D3D11 and CPU as F10 requires.
+3. Complete A1 and the single-view E1-E2 scope, then A2-A4 as the reference
    and gamma-ramp question allow. The widescreen trace is diagnostic and must
    not change output.
-2. Implement the single-view E3-E8 scope behind one default-off mode, with a
+4. Implement the single-view E3-E8 scope behind one default-off mode, with a
    4:3 regression gate before wide output. Keep HUD relocation and split
    screen deferred.
-3. Continue B1-B10 behind switches with default scale-1 behavior unchanged.
-4. Run C's human listening pass against the stable scene from A; repeat
+5. Continue B1-B10 behind switches with default scale-1 behavior unchanged.
+6. Run C's human listening pass against the stable scene from A; repeat
    automated audio probes only for a new symptom or materially different
    audio-heavy scene.
-5. Continue D's compatibility work without weakening audio or GPU ordering.
+7. Continue D's compatibility work without weakening audio or GPU ordering.
 
 Update FINDINGS, UPSTREAM, PERFPLAN, ARCHITECTURE and the README in the same
 change as each milestone, as AGENTS requires.

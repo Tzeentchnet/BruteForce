@@ -1423,8 +1423,10 @@ replace matched gameplay or original-hardware validation.
   seam passes lifecycle/concurrency and presenter-capture fixtures. Its
   downstream WSI consumer passes exact-frame native routing, READY-source
   coalescing, forced CPU fallback, resize and explicit shutdown with Vulkan
-  validation enabled on NVIDIA and AMD. Integrated retail presentation,
-  fullscreen/window behavior and device-loss coverage remain next.
+  validation enabled on NVIDIA and AMD. Integrated retail presentation reaches
+  Basic Controls; synthetic fullscreen enter/restore, final composed-image
+  readback and fail-stop surface loss also pass on both vendors. Physical
+  fullscreen/movie review and real device-loss behavior remain open.
 - One native xemu Basic Controls scene is matched: the packed-stencil option
   reduces the large whole-frame brightness difference, while its unsupported
   ownership cases and title-wide behavior keep G4 open. Sun-facing, fade and

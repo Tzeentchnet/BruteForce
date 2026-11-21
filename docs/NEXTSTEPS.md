@@ -1250,9 +1250,9 @@ implemented. The backend reaches and
 near-matches the retail Basic Controls state through mandatory readback and
 CPU upload. This is not a default change or broad retail parity result.
 D3D11 remains the current launcher and graphical `build.py` default, and the
-CPU renderer remains the correctness reference. Native Vulkan presentation,
-direct raw-stream vertex fetch, matched wider-scene/stability validation,
-D3D12 and production `auto` remain open.
+CPU renderer remains the correctness reference. Complete native Vulkan
+presentation parity, direct raw-stream vertex fetch, matched wider-scene/
+stability validation, D3D12 and production `auto` remain open.
 
 The upstream shape follows
 [sp00nznet/xboxrecomp#306](https://github.com/sp00nznet/xboxrecomp/issues/306):

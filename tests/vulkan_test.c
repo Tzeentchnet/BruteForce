@@ -650,6 +650,8 @@ static int run_async_visibility_test(void)
         (uint32_t *)((uintptr_t)color_va + xbox_GetMemoryOffset());
     uint64_t submissions_before;
     uint64_t submissions_after;
+    uint64_t deferred_before;
+    uint64_t deferred_after;
     unsigned i;
 
     memset(&surface, 0, sizeof surface);
@@ -674,9 +676,45 @@ static int run_async_visibility_test(void)
     batch.vertices = quad;
     batch.count = 6;
     batch.state = &state;
-    memset(reports, 0, REPORT_COUNT * sizeof *reports);
-    for (i = 0; i < REPORT_COUNT; ++i)
+    memset(reports, 0, (REPORT_COUNT + 1) * sizeof *reports);
+    for (i = 0; i <= REPORT_COUNT; ++i)
         reports[i].status = UINT32_MAX;
+
+    bruteforce_vulkan_test_clear(&surface, &state, 0xF0, 0xFF000000, 0);
+    bruteforce_vulkan_test_zpass(NV2A_ZPASS_CLEAR);
+    bruteforce_vulkan_test_zpass(NV2A_ZPASS_BEGIN);
+    bruteforce_vulkan_test_draw(&surface, &batch);
+    bruteforce_vulkan_test_zpass(NV2A_ZPASS_END);
+    CHECK(bruteforce_vulkan_test_zpass_report(
+              report_va + REPORT_COUNT * sizeof *reports, 10),
+          "queue deferred visibility report");
+    bruteforce_vulkan_test_set_oldest_zpass_age(-1000.0);
+    bruteforce_vulkan_test_submission_stats(
+        NULL, &submissions_before, NULL);
+    bruteforce_vulkan_test_zpass_poll_stats(&deferred_before);
+    nv2a_pb_exec_poll();
+    bruteforce_vulkan_test_submission_stats(
+        NULL, &submissions_after, NULL);
+    bruteforce_vulkan_test_zpass_poll_stats(&deferred_after);
+    CHECK(submissions_after == submissions_before,
+          "unactionable visibility poll does not flush");
+    CHECK(deferred_after == deferred_before + 1,
+          "unactionable visibility poll is deferred");
+    CHECK(reports[REPORT_COUNT].status == UINT32_MAX,
+          "deferred visibility report remains pending");
+    bruteforce_vulkan_test_set_oldest_zpass_age(1.0);
+    for (i = 0;
+         i < 100000 && reports[REPORT_COUNT].status == UINT32_MAX;
+         ++i) {
+        nv2a_pb_exec_poll();
+        SwitchToThread();
+    }
+    CHECK(reports[REPORT_COUNT].status == 0,
+          "aged visibility report completes");
+    CHECK(reports[REPORT_COUNT].stamp == 10,
+          "aged visibility report preserves its stamp");
+    CHECK(reports[REPORT_COUNT].count == 16,
+          "aged visibility report preserves its exact count");
 
     bruteforce_vulkan_test_submission_stats(
         NULL, &submissions_before, NULL);

@@ -47,6 +47,7 @@
 #define VULKAN_UPLOAD_CHUNK_MIN (1u << 20)
 #define VULKAN_MAX_SAMPLERS 512
 #define VULKAN_MAX_VISIBILITY_REPORTS 1024
+#define VULKAN_ZPASS_FLUSH_DELAY_MS 0.25
 
 #define GUEST(va) ((uint8_t *)((uintptr_t)(va) + xbox_GetMemoryOffset()))
 
@@ -232,6 +233,7 @@ typedef struct VulkanPerfStats {
     uint64_t report_ticks;
     uint64_t report_poll_calls;
     uint64_t report_poll_ticks;
+    uint64_t report_deferred_calls;
     uint64_t report_complete_calls;
     uint64_t report_complete_ticks;
     uint64_t fence_poll_calls;
@@ -448,6 +450,7 @@ typedef struct VulkanState {
     uint64_t zpass_report_query_start;
     uint64_t zpass_report_running;
     uint64_t zpass_reports_completed;
+    uint64_t zpass_report_polls_deferred;
     int zpass_report_reset_next;
     uint64_t last_submission_serial;
     uint64_t completed_submission_serial;
@@ -4154,26 +4157,33 @@ static void vulkan_poll(void)
     LONG owner;
     VulkanVisibilityReport *report;
     uint64_t perf_start;
+    double age_ms;
     if (!s_vk.zpass_async)
         return;
     owner = InterlockedCompareExchange(&s_vk.device_thread, 0, 0);
     if (!owner || (DWORD)owner != GetCurrentThreadId())
         return;
+    if (s_vk.zpass_report_head != s_vk.zpass_report_tail) {
+        report = &s_vk.zpass_reports[
+            s_vk.zpass_report_head % VULKAN_MAX_VISIBILITY_REPORTS];
+        if (!report->submission_assigned) {
+            age_ms = monotonic_ms() - report->queued_ms;
+            if (age_ms < VULKAN_ZPASS_FLUSH_DELAY_MS) {
+                s_vk.zpass_report_polls_deferred++;
+                if (g_bruteforce_perf_counters_enabled)
+                    s_vk.perf.report_deferred_calls++;
+                return;
+            }
+        }
+    }
     perf_start = vulkan_perf_begin();
+    if (s_vk.zpass_report_head != s_vk.zpass_report_tail) {
+        report = &s_vk.zpass_reports[
+            s_vk.zpass_report_head % VULKAN_MAX_VISIBILITY_REPORTS];
+        if (!report->submission_assigned)
+            flush_recording();
+    }
     complete_zpass_reports();
-    if (s_vk.zpass_report_head == s_vk.zpass_report_tail) {
-        vulkan_perf_finish_call(
-            perf_start, &s_vk.perf.report_poll_ticks,
-            &s_vk.perf.report_poll_calls);
-        return;
-    }
-    report = &s_vk.zpass_reports[
-        s_vk.zpass_report_head % VULKAN_MAX_VISIBILITY_REPORTS];
-    if (!report->submission_assigned &&
-        monotonic_ms() - report->queued_ms >= 0.25) {
-        flush_recording();
-        complete_zpass_reports();
-    }
     vulkan_perf_finish_call(
         perf_start, &s_vk.perf.report_poll_ticks,
         &s_vk.perf.report_poll_calls);
@@ -4345,6 +4355,7 @@ static void report_vulkan_perf(double interval_ms)
             " waits=%llu wait_ms=%.3f"
             " reports=%llu report_ms=%.3f"
             " report_polls=%llu report_poll_ms=%.3f"
+            " report_deferred=%llu"
             " report_completes=%llu report_complete_ms=%.3f"
             " fence_polls=%llu fence_poll_ms=%.3f\n",
             interval_ms,
@@ -4377,6 +4388,7 @@ static void report_vulkan_perf(double interval_ms)
             bruteforce_perf_ticks_ms(perf->report_ticks),
             (unsigned long long)perf->report_poll_calls,
             bruteforce_perf_ticks_ms(perf->report_poll_ticks),
+            (unsigned long long)perf->report_deferred_calls,
             (unsigned long long)perf->report_complete_calls,
             bruteforce_perf_ticks_ms(perf->report_complete_ticks),
             (unsigned long long)perf->fence_poll_calls,
@@ -4407,6 +4419,7 @@ static void vulkan_flip(void)
                         " %llu mip uploads,"
                         " %llu visibility queries, %llu visibility reads,"
                         " %llu async reports, %llu pending,"
+                        " %llu deferred report polls,"
                         " %llu submissions, %llu fence waits, max batch %llu,"
                         " %llu upload buffers, %llu descriptor pools,"
                         " %u samplers, interval %llu flips in %.3f ms"
@@ -4428,6 +4441,7 @@ static void vulkan_flip(void)
                 (unsigned long long)s_vk.zpass_reports_completed,
                 (unsigned long long)(s_vk.zpass_report_tail -
                                      s_vk.zpass_report_head),
+                (unsigned long long)s_vk.zpass_report_polls_deferred,
                 (unsigned long long)s_vk.submissions,
                 (unsigned long long)s_vk.submission_waits,
                 (unsigned long long)s_vk.max_batch_operations,
@@ -5332,6 +5346,20 @@ void bruteforce_vulkan_test_submission_stats(
         *submissions = s_vk.submissions;
     if (max_batch_operations)
         *max_batch_operations = s_vk.max_batch_operations;
+}
+
+void bruteforce_vulkan_test_zpass_poll_stats(uint64_t *deferred)
+{
+    if (deferred)
+        *deferred = s_vk.zpass_report_polls_deferred;
+}
+
+void bruteforce_vulkan_test_set_oldest_zpass_age(double age_ms)
+{
+    if (s_vk.zpass_report_head != s_vk.zpass_report_tail)
+        s_vk.zpass_reports[
+            s_vk.zpass_report_head %
+            VULKAN_MAX_VISIBILITY_REPORTS].queued_ms = monotonic_ms() - age_ms;
 }
 
 void bruteforce_vulkan_test_zpass(int op)

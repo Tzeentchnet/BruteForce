@@ -1342,11 +1342,13 @@ for live backend switching is outside this workstream.
    11.97%; backend gathered-vertex copies consumed only 0.56%. Detailed
    counters add overhead and the run's 32.558 movement rate rebounded from
    the pair's 17.469, so neither single run is a renderer decision.
-   First eliminate visibility polls that cannot yet complete, without
-   weakening the 0.25 ms flush deadline, ordered completion, backpressure or
-   synchronous waits. Then investigate exact texture snapshot-copy volume
-   while retaining exact byte and allocation identity checks. Defer direct
-   raw-stream fetch unless the unattributed framework gather cost is
+   The first follow-up now defers visibility polls that cannot yet complete
+   while retaining the 0.25 ms flush deadline, ordered completion,
+   backpressure and synchronous waits. A deterministic pre-deadline/aged-
+   report fixture passes with validation on both available GPU vendors; no
+   extra retail route was used. Next investigate exact texture snapshot-copy
+   volume while retaining exact byte and allocation identity checks. Defer
+   direct raw-stream fetch unless the unattributed framework gather cost is
    independently shown to justify it. Reserve a multi-run A/B/A campaign for
    M5 after native presentation, and only when its acceptance evidence is
    actionable.
@@ -1451,11 +1453,12 @@ Still open: access to a native 4K display. Optional 5.1 output is deferred.
    the manual movie/menu route is visible, and the first matched movement pair
    has complete guest-surface review. Preserve the unresolved color-DMA
    conflict policy. The reduced no-capture pair and final Vulkan counter run
-   are complete; next remove unactionable asynchronous visibility polling,
-   then assess exact texture snapshot copying. Do not prioritize direct
-   raw-stream fetch from the measured 0.56% backend vertex-copy cost alone.
-   Implement the host-owned native presentation handoff after this bounded
-   attribution work. Submit no
+   are complete, and unactionable pre-deadline asynchronous visibility polls
+   are now deferred with cross-vendor synthetic coverage. Next assess exact
+   texture snapshot copying without weakening exactness. Do not prioritize
+   direct raw-stream fetch from the measured 0.56% backend vertex-copy cost
+   alone. Implement the host-owned native presentation handoff after this
+   bounded attribution work. Submit no
    upstream work without approval. Implement D3D12 in F8, promote `auto` only
    after F9, and retain D3D11 and CPU as F10 requires.
 3. Complete A1 and the single-view E1-E2 scope, then A2-A4 as the reference

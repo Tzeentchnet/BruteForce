@@ -73,6 +73,8 @@ clean CPU-written tracked-surface preservation, upload before a later partial
 clear, reported GPU-wins handling for a dirty guest/GPU conflict, and the
 submission wait retained by a guest-coherent full clear,
 precise visibility on base and extended draws including AA normalization,
+ordered asynchronous reporting including a forced pre-deadline no-submit
+poll followed by exact aged completion,
 invalid mip-option rejection, level-zero render-target mip fallback, forced
 2D lower-level selection and rewrite invalidation, positive-X cube lower-level
 selection, short-pitch rejection, and shutdown after callback-thread

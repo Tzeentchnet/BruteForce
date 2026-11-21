@@ -93,7 +93,12 @@ reduced pair, so single-run rates are explicitly unstable. Counters also add
 per-call timing overhead. Use this result only to order implementation:
 remove unactionable visibility polls without weakening synchronization,
 then investigate an exact texture-snapshot invalidation/copy improvement.
-Do not prioritize direct raw-stream fetch from backend copy time alone;
+The first change is implemented: a pre-deadline report that has not been
+assigned to a submission is deferred until it can act, while assigned reports
+and all blocking paths remain unchanged. Its forced pre-deadline/aged-report
+fixture passes with validation on both available GPU vendors. This is
+synthetic correctness evidence, not a retail performance result. Do not
+prioritize direct raw-stream fetch from backend copy time alone;
 framework-side gathering remains in the unattributed interval remainder.
 
 Before the runtime-only Phase 4 fix, integrated v0.17 Release generation
@@ -897,12 +902,14 @@ scale, native presentation, broad menu/movie/fade coverage or the complete
 ordering matrix. No M1-M5 gate is met.
 
 The pre-presentation counter attribution is complete and promotes no gate.
-Its next bounded task is to avoid asynchronous visibility polls when the
-oldest report has no submitted work that can complete. The existing 0.25 ms
-flush deadline, queue backpressure, ordered guest writes, synchronous query
-drains and submission waits remain mandatory. Synthetic ordering and bounded
-submission coverage must pass before any focused retail check. No additional
-manual route is scheduled merely to repeat the baseline.
+The backend now avoids asynchronous visibility polls when the oldest report
+has no submitted work that can complete and the existing 0.25 ms flush
+deadline has not elapsed. Queue backpressure, ordered guest writes,
+synchronous query drains and submission waits remain mandatory. Synthetic
+ordering and bounded-submission coverage pass on both available GPU vendors.
+The next bounded task is an exact texture-snapshot copy/invalidation
+improvement. No additional manual route is scheduled merely to repeat the
+baseline.
 
 The retail captures are correctness bring-up evidence only. The final
 combiner attempts ended at their 300-second watchdogs before the stationary

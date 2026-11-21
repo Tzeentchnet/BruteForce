@@ -292,7 +292,8 @@ def test_parse_runtime_diagnostics():
         'descriptors=300 descriptor_ms=6.250 command_ms=7.500 '
         'readbacks=300 readback_bytes=368640000 readback_ms=400.000 '
         'waits=300 wait_ms=350.000 reports=120 report_ms=8.000 '
-        'report_polls=20 report_poll_ms=1.000 report_completes=100 '
+        'report_polls=20 report_poll_ms=1.000 report_deferred=15 '
+        'report_completes=100 '
         'report_complete_ms=4.000 fence_polls=30 fence_poll_ms=2.000\n'
         '[GPU-PSCACHE] compiled in 12.500 ms\n'
         '[GPU-PSCACHE] compiled in 7.250 ms\n'
@@ -376,6 +377,7 @@ def test_parse_runtime_diagnostics():
         "report_ms": 8.0,
         "report_polls": 20,
         "report_poll_ms": 1.0,
+        "report_deferred": 15,
         "report_completes": 100,
         "report_complete_ms": 4.0,
         "fence_polls": 30,

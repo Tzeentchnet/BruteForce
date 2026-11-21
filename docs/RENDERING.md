@@ -572,9 +572,12 @@ generic seams; stages 6-9 remain open.
    inside draw callbacks, 13.54% to mandatory readback and 11.97% to
    asynchronous report polling, versus 0.56% to backend gathered-vertex
    copies. Draw, texture, wait, report-completion and fence-poll counters have
-   nested boundaries and are not additive. First remove report polls that
-   cannot complete while preserving submission and guest-visible ordering;
-   then investigate an exact texture-snapshot copy/invalidation improvement.
+   nested boundaries and are not additive.    Report polls whose oldest item is both unsubmitted and younger than the
+   existing 0.25 ms flush deadline are now deferred; assigned reports,
+   backpressure, synchronous drains and guest-visible ordering are unchanged,
+   and a forced pre-deadline/aged-report fixture passes on both available GPU
+   vendors. Next investigate an exact texture-snapshot copy/invalidation
+   improvement.
    Direct raw-stream fetch remains open because framework gathering is
    unmeasured, but backend copy time does not make it the first target. Defer
    a multi-run acceptance campaign until native presentation makes it
@@ -1308,9 +1311,12 @@ replace matched gameplay or original-hardware validation.
   polling at 11.97%, and backend gathered-vertex copies at 0.56%. Report
   completion and fence polling are nested within report paths; submission
   waits can be nested in multiple callers. Detailed timing itself adds
-  overhead. The next renderer change is therefore a semantics-preserving
-  actionability guard for asynchronous report polling, not skipped completion
-  or an immediate raw-stream conversion.
+  overhead. The resulting actionability guard now defers only an unsubmitted
+  report before its existing flush deadline. Cross-vendor fixtures verify
+  that the early poll does not submit or publish and that the aged report
+  later completes with its exact ordered value. This is not skipped
+  completion or a retail performance claim. Exact texture snapshot copying,
+  not an immediate raw-stream conversion, is the next measured target.
 - One native xemu Basic Controls scene is matched: the packed-stencil option
   reduces the large whole-frame brightness difference, while its unsupported
   ownership cases and title-wide behavior keep G4 open. Sun-facing, fade and

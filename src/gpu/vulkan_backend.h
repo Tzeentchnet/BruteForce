@@ -29,6 +29,8 @@ void bruteforce_vulkan_test_texture_cache_stats(uint64_t *hits, uint64_t *upload
 void bruteforce_vulkan_test_submission_stats(uint64_t *draws,
                                              uint64_t *submissions,
                                              uint64_t *max_batch_operations);
+void bruteforce_vulkan_test_zpass_poll_stats(uint64_t *deferred);
+void bruteforce_vulkan_test_set_oldest_zpass_age(double age_ms);
 void bruteforce_vulkan_test_zpass(int op);
 uint32_t bruteforce_vulkan_test_zpass_count(void);
 int bruteforce_vulkan_test_zpass_report(uint32_t report_va, uint64_t stamp);

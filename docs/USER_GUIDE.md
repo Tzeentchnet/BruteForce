@@ -499,6 +499,10 @@ those fields in `runtime_diagnostics.vulkan_intervals` together with
 `[GPU-Vulkan]` report. An unmatched report does not shift subsequent
 intervals. This allows one Vulkan-only diagnostic run to replace repeated
 operator-driven comparison runs while locating a bottleneck.
+`report_deferred` counts polls skipped because the oldest asynchronous report
+was still unsubmitted and younger than its existing 0.25 ms flush deadline;
+the periodic Vulkan diagnostic reports the cumulative form as `deferred
+report polls`.
 
 For that single-run diagnostic, keep capture and sampling off and enable only
 the built-in counters:

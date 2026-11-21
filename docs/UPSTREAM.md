@@ -2322,9 +2322,12 @@ own GPU back end, an extended interface for it, and its own pacing fixes.
     Vulkan's eight fence-backed command slots, 128-operation batches,
     1,024-entry ordered asynchronous report ring, publication barrier and
     fence-retired texture destruction are backend implementation patterns,
-    not new framework callbacks. Preserve them as a future optional-backend
-    candidate; propose a framework abstraction only if another backend proves
-    the same ownership boundary.
+    not new framework callbacks. The poll callback now also defers an oldest
+    report that is unsubmitted and younger than the existing 0.25 ms batch
+    deadline; assigned reports and every blocking path retain their ordering.
+    Preserve these as future optional-backend candidate details; propose a
+    framework abstraction only if another backend proves the same ownership
+    boundary.
     Treat color-DMA resolution and guest-write notification as generic
     framework prerequisites rather than encoding Brute Force addresses in the
     Vulkan backend. The current GPU-wins dirty-conflict rule is deliberately
@@ -2376,6 +2379,10 @@ own GPU back end, an extended interface for it, and its own pacing fixes.
     Vulkan backend ultimately needs game-data-free clear, state, texture,
     shader, visibility, readback and presentation tests across software and
     hardware devices where available.
+    The ordered-visibility fixture now forces a pre-deadline report poll,
+    verifies that it neither submits nor publishes, then ages the report and
+    verifies exact ordered completion. The validation-enabled fixture passes
+    this case on both available hardware vendors.
     *Overlap:* refreshed read-only on 2026-11-21 across all 500 available
     upstream pull-request records, tracking index
     [#184](https://github.com/sp00nznet/xboxrecomp/pull/184), #306, merged
@@ -2403,7 +2410,9 @@ own GPU back end, an extended interface for it, and its own pacing fixes.
     vendors. Exact 2D/cube/mip texture identity, compatible color aliases,
     synchronous/ordered-asynchronous visibility, register-combiner and
     gathered GPU-VSH semantics are proven locally for the covered fixtures
-    and sampled retail batches. One wrong-route
+    and sampled retail batches. Unactionable pre-deadline asynchronous report
+    polls are now deferred with NVIDIA and AMD fixture coverage; no retail
+    performance result is claimed. One wrong-route
     retail probe confirms a supplied six-level BC chain reaches Vulkan but is
     not parity evidence. The formerly black manual movie/menu route now
     reaches visible Basic Controls, and one movement pair has complete

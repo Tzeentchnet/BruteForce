@@ -3295,16 +3295,30 @@ percentages identify mechanisms rather than predict an uninstrumented rate.
 The three intervals copied 4,284,600,972 gathered vertex bytes but spent only
 152.164 ms in the backend copies. In contrast, they made exact snapshots of
 37,813,766,859 texture bytes and issued 12,637,369 report-poll callbacks,
-including 8,059,232 fence-status polls. Framework-side vertex gathering is
-part of the unattributed remainder, so this does not prove direct raw-stream
-fetch has zero value. It does show that the measured backend copy is not the
-first target. The next change should eliminate unactionable asynchronous
-visibility polls while retaining the 0.25 ms submission flush deadline,
-ordered completion, bounded backpressure and all synchronous waits. Exact
-texture snapshot copying is the next measured candidate, but it may be
-reduced only with an exact write/invalidation mechanism; approximate hashes
-or stale snapshots are not acceptable. Multi-run A/B/A remains deferred
-until M5, after native presentation makes acceptance evidence actionable.
+including 8,059,232 fence-status polls. Framework-side vertex gathering is part of the unattributed remainder, so
+this does not prove direct raw-stream fetch has zero value. It does show that
+the measured backend copy is not the first target.
+
+The first ordered optimization now defers only an asynchronous visibility
+poll whose oldest report is still unassigned to a submission and younger
+than the existing 0.25 ms flush deadline. Such a report cannot complete.
+When the deadline is reached, the same poll flushes the recording slot before
+checking completion. Assigned reports, report-ring backpressure, synchronous
+visibility drains, submission waits and ordered guest publication retain
+their prior paths. Periodic diagnostics expose cumulative `deferred report
+polls`; detailed intervals expose `report_deferred`.
+
+The game-data-free fixture deterministically places one queued report before
+the deadline, verifies a poll neither submits the recording slot nor writes
+the report, then ages that same report past the deadline and verifies its
+exact stamp and sample count. The complete validation-enabled Vulkan fixture
+passes on the NVIDIA RTX 5070 and AMD Radeon adapters with zero validation
+errors. This proves the no-work guard and preserved completion semantics, not
+a retail speedup; no additional manual route was run. Exact texture snapshot
+copying is the next measured candidate, but it may be reduced only with an
+exact write/invalidation mechanism; approximate hashes or stale snapshots are
+not acceptable. Multi-run A/B/A remains deferred until M5, after native
+presentation makes acceptance evidence actionable.
 
 ### Material index-word census and default-off run executor
 

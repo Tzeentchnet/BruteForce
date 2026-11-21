@@ -4,18 +4,23 @@ The rendering architecture is in [RENDERING.md](RENDERING.md),
 the performance plan is in [PERFPLAN.md](PERFPLAN.md), measured
 results are in [FINDINGS.md](FINDINGS.md), and framework work is
 tracked in [UPSTREAM.md](UPSTREAM.md). The current framework pin is xboxrecomp
-v0.18.0 at `37b61d589168adee3680fabd51805ee81427bf07` with 43 local patches
+v0.18.0 at `37b61d589168adee3680fabd51805ee81427bf07` with 44 local patches
 and no separate selected upstream commits. Its reconstructed tree is
-`8938ce1b635e25832539a0bc6500b2fe2fa14565`. The clean patch replay and
-toolkit verification passed; focused v0.18 framework fixtures passed 32
+`23a92b43c0042297160e985b31d61308e0d15da6`. The clean patch replay and
+exact reverse application, toolkit verification, and the new presentation-
+provider fixture passed; focused v0.18 framework fixtures passed 32
 CTests, the FCMOV/WBINVD fixtures passed nine tests, and the project DSP
 memory and lifecycle fixtures passed. Retail regeneration, exact
 discovery/translation comparison, and bounded one-core, audio-on CPU/D3D11
-smokes also pass. Details, limits and the 128 MB host-mirror observation are
+smokes passed on the preceding 43-patch runtime tree. Patch 0048 is default-
+inactive and has synthetic validation only; no retail result is attributed
+to the new tree. Details, limits and the 128 MB host-mirror observation are
 in [FINDINGS.md](FINDINGS.md).
 
-Supported retail generation `20261120-163420-f9e3b4ed` is a Release build on
-that tree. It translated all 22,295 identified functions with zero failures,
+The latest retail-validated generation `20261120-163420-f9e3b4ed` predates
+patch 0048 and uses the preceding runtime tree
+`8938ce1b635e25832539a0bc6500b2fe2fa14565`. It translated all 22,295
+identified functions with zero failures,
 six unresolved direct-call targets and the same 11 untranslated instruction
 sites as v0.17. Function starts and ends are unchanged; only
 `0x002EA100`'s instruction count changed, from 262 to 265, after code/data
@@ -298,6 +303,15 @@ implemented, but this is not a broad parity or performance claim. See
   matching guest-snapshot pixels. Matched-scene validation and benchmark
   integration remain open; see
   [FINDINGS](FINDINGS.md#presenter-source-capture-alignment).
+- Local framework patch 0048 adds a default-inactive, host-owned framebuffer
+  presentation-provider seam. Registration is frozen before window
+  initialization; provider lifecycle and presentation run on the framebuffer
+  thread, output-size queries may run concurrently, shutdown waits for
+  in-flight callbacks, and provider failures stop instead of silently falling
+  back. Its provider and presenter-capture fixtures pass, including paced and
+  unpaced results, forced CPU input, failed initialization and concurrent
+  shutdown. This is M2 infrastructure only: no Vulkan surface, swap chain or
+  completed-image queue exists yet.
 - The previous stationary campaign measured about 3.2 rendered frames per
   second on the CPU and 30.4 on D3D11 with GPU vertex programs, three runs
   each. The hold is visually static, so these are **rendered**, not distinct,
@@ -1213,7 +1227,7 @@ listed differences, newly visible side geometry survives matching title
 culling, HUD and movies retain their shape, and guest readback remains 4:3.
 Split-screen support is a deferred follow-up, not part of this gate.
 
-## F. Vulkan-default renderer migration (gathered GPU-VSH implemented)
+## F. Vulkan-default renderer migration (presentation provider seam implemented)
 
 The 2026-11-20 design in
 [RENDERING](RENDERING.md#vulkan-first-backend-architecture-and-bring-up-status) replaces
@@ -1299,13 +1313,24 @@ for live backend switching is outside this workstream.
    reviewed movement captures retain the same tutorial scene and scripted
    camera route on D3D11 and Vulkan. Direct raw-stream fetch, scaling, native
    presentation and wider parity remain F7 scope.
-6. **Prototype host-owned Vulkan presentation (pending).** `Nv2aBackend` produces and
-   reads back surfaces; it never owns or pumps the window. The host service
-   owns the platform Vulkan surface, swap chain, resize, VSync, final present,
-   CPU/PVIDEO fallback and frame identity. Define a separate tested handoff
-   for the completed image and synchronization without making D3D11/Vulkan
-   interop a requirement. Coordinate with the unanswered presentation part
-   of [sp00nznet/xboxrecomp#312](https://github.com/sp00nznet/xboxrecomp/issues/312).
+6. **Prototype host-owned Vulkan presentation (provider seam complete; Vulkan
+   module pending).** Local framework patch 0048 adds a versioned, copied
+   `RecompPresentProvider` registration that is default-inactive and separate
+   from `Nv2aBackend`. Its `initialize`, `present` and `shutdown` callbacks
+   run on the framebuffer-window thread; `output_size` may run concurrently.
+   The provider receives stable CPU pixels, dimensions, a CPU-required/source-
+   allowed flag and publication frame ID, and returns paced, unpaced or fatal.
+   Shutdown rejects new calls, waits for in-flight callbacks and runs exactly
+   once. Pinned frames, PVIDEO and presenter-source capture continue to force
+   CPU input. Existing GDI/D3D11 behavior is unchanged without a registered
+   provider, while provider failures stop instead of silently falling back.
+   The next step is the off-by-default Brute Force Vulkan provider: it owns
+   the Win32 Vulkan surface, swap chain, acquire/resize/VSync/final present
+   and a bounded completed-image/synchronization queue while the backend
+   retains mandatory guest readback. Do not require D3D11 keyed-mutex
+   interop. Coordinate any upstream proposal with the unanswered
+   presentation part of
+   [sp00nznet/xboxrecomp#312](https://github.com/sp00nznet/xboxrecomp/issues/312).
 7. **Reach Vulkan parity and PR readiness (in progress).** Precise visibility
    restored D3D11-like draw/vertex volume but left 149,590 of 307,200 pixels
    over 8/255. The CPU-transformed four-stage register-combiner path reduces
@@ -1346,12 +1371,16 @@ for live backend switching is outside this workstream.
    while retaining the 0.25 ms flush deadline, ordered completion,
    backpressure and synchronous waits. A deterministic pre-deadline/aged-
    report fixture passes with validation on both available GPU vendors; no
-   extra retail route was used. Next investigate exact texture snapshot-copy
-   volume while retaining exact byte and allocation identity checks. Defer
+   extra retail route was used. Exact snapshot elision was then rejected as
+   unsafe without an exact write/invalidation mechanism: checked
+   `ReadProcessMemory` snapshots and post-copy layout/allocation/bounds
+   identities preserve guard and lifetime behavior, while Windows write-watch
+   cannot cover the framework's aliased file mappings. Defer
    direct raw-stream fetch unless the unattributed framework gather cost is
-   independently shown to justify it. Reserve a multi-run A/B/A campaign for
-   M5 after native presentation, and only when its acceptance evidence is
-   actionable.
+   independently shown to justify it. Patch 0048's provider seam is complete;
+   implement the actual Vulkan WSI/provider module next. Reserve a multi-run
+   A/B/A campaign for M5 after native presentation, and only when its
+   acceptance evidence is actionable.
    Continue covering menus,
    movies, fades, PVIDEO and CPU fallback without weakening synchronization.
    The mip fixture is complete; repeat its retail comparison only with
@@ -1454,11 +1483,13 @@ Still open: access to a native 4K display. Optional 5.1 output is deferred.
    has complete guest-surface review. Preserve the unresolved color-DMA
    conflict policy. The reduced no-capture pair and final Vulkan counter run
    are complete, and unactionable pre-deadline asynchronous visibility polls
-   are now deferred with cross-vendor synthetic coverage. Next assess exact
-   texture snapshot copying without weakening exactness. Do not prioritize
-   direct raw-stream fetch from the measured 0.56% backend vertex-copy cost
-   alone. Implement the host-owned native presentation handoff after this
-   bounded attribution work. Submit no
+   are now deferred with cross-vendor synthetic coverage. Exact texture
+   snapshot elision has no safe implementation without exact write
+   invalidation and is deferred. Do not prioritize direct raw-stream fetch
+   from the measured 0.56% backend vertex-copy cost alone. The default-
+   inactive host presentation-provider seam is implemented in patch 0048;
+   next implement its off-by-default Vulkan WSI module and bounded completed-
+   image ownership handshake. Submit no
    upstream work without approval. Implement D3D12 in F8, promote `auto` only
    after F9, and retain D3D11 and CPU as F10 requires.
 3. Complete A1 and the single-view E1-E2 scope, then A2-A4 as the reference

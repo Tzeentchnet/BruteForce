@@ -92,7 +92,8 @@ overall movement rate rebounded to 32.558 flips/s, versus 17.469 in the
 reduced pair, so single-run rates are explicitly unstable. Counters also add
 per-call timing overhead. Use this result only to order implementation:
 remove unactionable visibility polls without weakening synchronization,
-then investigate an exact texture-snapshot invalidation/copy improvement.
+then investigate exact texture-snapshot invalidation/copy safety before
+starting native presentation.
 The first change is implemented: a pre-deadline report that has not been
 assigned to a submission is deferred until it can act, while assigned reports
 and all blocking paths remain unchanged. Its forced pre-deadline/aged-report
@@ -100,6 +101,12 @@ fixture passes with validation on both available GPU vendors. This is
 synthetic correctness evidence, not a retail performance result. Do not
 prioritize direct raw-stream fetch from backend copy time alone;
 framework-side gathering remains in the unattributed interval remainder.
+The snapshot review found no exact elision mechanism compatible with guarded,
+aliased file mappings and allocation-lifetime checks, so that optimization is
+deferred rather than approximated. Default-inactive framework patch 0048 now
+supplies the host presentation-provider lifecycle/CPU-fallback seam and its
+synthetic fixtures. It is M2 infrastructure only; no Vulkan swap chain or
+performance result exists.
 
 Before the runtime-only Phase 4 fix, integrated v0.17 Release generation
 `20261111-084222-7bdb6e56`'s codegen-identical executable completed one CPU
@@ -885,11 +892,11 @@ This is a correctness and maintainability workstream, not a claim that a
 newer host API is faster. The architecture and startup policy are defined in
 [RENDERING.md](./RENDERING.md#vulkan-first-backend-architecture-and-bring-up-status);
 the ordered implementation tasks are
-[NEXTSTEPS F](./NEXTSTEPS.md#f-vulkan-default-renderer-migration-retail-capture-achieved-parity-pending).
+[NEXTSTEPS F](./NEXTSTEPS.md#f-vulkan-default-renderer-migration-presentation-provider-seam-implemented).
 Current D3D11 measurements remain the baseline until Vulkan reaches matched
 retail rendering and native-presentation parity.
 
-Current status is partial M1. M0 has transactional startup/fake-fallback
+Current status is partial M1 with M2 infrastructure started. M0 has transactional startup/fake-fallback
 coverage, the accepted #319 baseline, and renderer-neutral surface/texture
 layouts, checked snapshots and filter/LOD decoding, but official optional
 extensions are not complete. M1 has NVIDIA/AMD validation-clean base and
@@ -899,7 +906,11 @@ one state-matched NVIDIA retail tutorial capture, gathered-input GPU vertex
 programs, clean CPU/PVIDEO surface preservation and one completely reviewed
 D3D11/Vulkan movement pair. It does not have direct raw-stream vertex fetch,
 scale, native presentation, broad menu/movie/fade coverage or the complete
-ordering matrix. No M1-M5 gate is met.
+ordering matrix. M2 now has a default-inactive, versioned host presentation-
+provider seam with explicit framebuffer-thread lifecycle, concurrent output-
+size queries, CPU-required routing, frame identity, pacing results, fail-stop
+errors and shutdown waiting. The actual Vulkan surface, swap chain and
+completed-image/synchronization handoff are absent. No M1-M5 gate is met.
 
 The pre-presentation counter attribution is complete and promotes no gate.
 The backend now avoids asynchronous visibility polls when the oldest report
@@ -907,9 +918,13 @@ has no submitted work that can complete and the existing 0.25 ms flush
 deadline has not elapsed. Queue backpressure, ordered guest writes,
 synchronous query drains and submission waits remain mandatory. Synthetic
 ordering and bounded-submission coverage pass on both available GPU vendors.
-The next bounded task is an exact texture-snapshot copy/invalidation
-improvement. No additional manual route is scheduled merely to repeat the
-baseline.
+Exact texture-snapshot elision was reviewed and deferred because checked
+`ReadProcessMemory` plus post-copy layout/allocation/bounds identities
+preserve guard and lifetime behavior, while Windows write-watch cannot track
+the aliased file mappings. No approximate cache or stale snapshot replaces
+that contract. The next bounded task is the off-by-default Vulkan provider
+and its image-ownership handshake. No additional manual route is scheduled
+merely to repeat the baseline.
 
 The retail captures are correctness bring-up evidence only. The final
 combiner attempts ended at their 300-second watchdogs before the stationary

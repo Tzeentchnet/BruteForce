@@ -467,8 +467,24 @@ profile outside Release. Do not start the game merely to validate these
 builds; runtime correctness and performance require the separately reviewed
 campaign in the user guide.
 
+The default-inactive framework presentation-provider seam has its own
+game-data-free lifecycle and concurrency fixture:
+
+```powershell
+cmake -S .deps\xboxrecomp\tests\present_provider -B build\present-provider
+cmake --build build\present-provider --config Release --parallel 4
+ctest --test-dir build\present-provider -C Release --output-on-failure
+python tools\toolkit.py --verify
+```
+
+The fixture covers registration validation/freeze, callback thread ownership,
+stable pixels and frame IDs, paced/unpaced results, concurrent output-size
+queries, invalid dimensions, wrong-thread presentation, in-flight shutdown,
+exactly-once cleanup and failed initialization. It does not create a Vulkan
+surface or swap chain, validate retail presentation or measure performance.
+
 From a VS 2022 x64 developer prompt, the isolated framework's capture and
-presenter-device fixture can be built without retail data:
+presenter-device fixture can also be built without retail data:
 
 ```powershell
 & build\pipeline-toolkit\tests\presenter_capture\run_windows.ps1 `
@@ -476,9 +492,10 @@ presenter-device fixture can be built without retail data:
 ```
 
 Its hidden-window and WARP/hardware tests inject presenter loss and resource
-errors and verify fail-stop markers; add `-SkipHardware` when no hardware
-adapter is available. Tests do not simulate actual driver loss or prove
-retail guest-reader coverage, image parity or throughput.
+errors, validate provider capture records, and verify fail-stop markers; add
+`-SkipHardware` when no hardware adapter is available. Tests do not simulate
+actual driver loss or prove retail guest-reader coverage, native Vulkan
+presentation, image parity or throughput.
 
 Project-owned source is MIT-licensed. The linked executable includes xemu's
 GPL-2.0-or-later DSP interpreter and is distributed, if at all, under

@@ -1,0 +1,805 @@
+diff --git a/docs/runtime/presentation-provider.md b/docs/runtime/presentation-provider.md
+new file mode 100644
+index 0000000..9b0a629
+--- /dev/null
++++ b/docs/runtime/presentation-provider.md
+@@ -0,0 +1,29 @@
++# External framebuffer presentation provider
++
++The Windows framebuffer window normally uses GDI or its opt-in D3D11
++presenter. A downstream host can instead register one
++`RecompPresentProvider` with
++`xbox_FramebufferWindowSetPresentProvider` before the framebuffer window
++starts. No provider is registered by default, so existing presentation is
++unchanged.
++
++The provider structure is copied at registration. Its `context` remains
++borrowed through shutdown. `initialize`, `present`, and `shutdown` execute on
++the framebuffer-window thread. `output_size` may execute concurrently on a
++renderer thread; shutdown waits for an in-flight output query before invoking
++the provider's shutdown callback. Registration, replacement, or removal is
++rejected after initialization begins.
++
++`present` receives the stable CPU snapshot, its dimensions, the publication
++frame ID, and an `allow_source` flag. A provider may select a separately
++published GPU source only when `allow_source` is nonzero and its frame ID
++matches. A zero flag requires the CPU pixels, including for pinned
++framebuffers, PVIDEO composition, and presenter-source capture. The callback
++returns 1 when it paced the framebuffer loop, 0 when it did not, and -1 after
++reporting a fatal failure. Initialization or presentation failure stops
++instead of silently selecting GDI or D3D11.
++
++The provider owns its API-specific window surface, swap chain, resize,
++acquisition, composition, final presentation, and device-loss handling. It
++does not replace guest framebuffer publication, frame identity, CPU/PVIDEO
++fallback, capture, or backend readback.
+diff --git a/src/video/CMakeLists.txt b/src/video/CMakeLists.txt
+index ad8c9b5..3b75c88 100644
+--- a/src/video/CMakeLists.txt
++++ b/src/video/CMakeLists.txt
+@@ -16,7 +16,8 @@ if(TARGET xbox_d3d8)
+ endif()
+ if(WIN32)
+     # gpu_present.c: the framebuffer window's D3D11 presenter.
+-    target_sources(xbox_video PRIVATE gpu_present.c display_awake.c)
++    target_sources(xbox_video PRIVATE gpu_present.c display_awake.c
++                                      present_provider.c)
+     target_link_libraries(xbox_video PUBLIC mfplat mfreadwrite mfuuid mf ole32
+                           d3d11 dxgi dxguid d3dcompiler)
+ else()
+diff --git a/src/video/fb_present.c b/src/video/fb_present.c
+index 4d93080..d3d2960 100644
+--- a/src/video/fb_present.c
++++ b/src/video/fb_present.c
+@@ -42,6 +42,7 @@
+ #include "gpu_present.h"
+ #include "display_awake.h"
+ #include "present_capture.h"
++#include "present_provider.h"
+ #include "recomp_exit_hook.h"   /* src/platform */
+ #include <stdbool.h>
+ #include "pvideo_scanout.h"
+@@ -95,6 +96,14 @@ static void fb_capture_fail(const char *message)
+     abort();
+ }
+ 
++static void fb_provider_fail(const char *message)
++{
++    fprintf(stderr, "  [FBWIN] %s; stopping rather than falling back\n", message);
++    fflush(stderr);
++    TerminateProcess(GetCurrentProcess(), 3);
++    abort();
++}
++
+ static int fb_readable_surface(uint32_t va, uint32_t pitch, uint32_t bpp,
+                                uint32_t aa_sy)
+ {
+@@ -672,6 +681,14 @@ static int fb_show(HWND hwnd, HDC hdc, const BITMAPINFO *bi, uint64_t frame_id,
+     RecompCaptureRecord record;
+     int paced = 0, reject_shared = 0;
+     if (!s_capture.active) {
++        if (recomp_present_provider_active()) {
++            int result = recomp_present_provider_present(
++                s_rgb, s_fb_width, s_fb_height,
++                !getenv("RECOMP_FB_VA") && !s_pvideo_source, frame_id);
++            if (result < 0)
++                fb_provider_fail("registered presentation provider failed");
++            return result;
++        }
+         if (gpu_present_active())
+             return gpu_present_frame(s_rgb, !getenv("RECOMP_FB_VA") && !s_pvideo_source,
+                                      frame_id);
+@@ -696,7 +713,17 @@ static int fb_show(HWND hwnd, HDC hdc, const BITMAPINFO *bi, uint64_t frame_id,
+     }
+     if (!recomp_capture_clock(&record.start_ns))
+         fb_capture_fail("cannot read the monotonic clock");
+-    if (gpu_present_active()) {
++    if (recomp_present_provider_active()) {
++        int result = recomp_present_provider_present(
++            s_rgb, s_fb_width, s_fb_height, 0, frame_id);
++        if (result < 0)
++            fb_capture_fail("registered presentation provider failed");
++        paced = result;
++        record.route = RECOMP_CAPTURE_PROVIDER_CPU;
++        record.result = result ? RECOMP_CAPTURE_PROVIDER_PACED :
++                                 RECOMP_CAPTURE_PROVIDER_UNPACED;
++        record.image = s_rgb;
++    } else if (gpu_present_active()) {
+         GpuPresentTrace trace;
+         paced = gpu_present_frame_capture(s_rgb,
+                     !getenv("RECOMP_FB_VA") && !s_pvideo_source, frame_id, &trace);
+@@ -841,8 +868,14 @@ static DWORD WINAPI fb_thread(LPVOID unused)
+ 
+     fprintf(stderr, "  [FBWIN] framebuffer window open (%ux%u)\n",
+             s_fb_width, s_fb_height);
+-    if (gpu_present_enabled())
+-        gpu_present_init(hwnd, s_fb_width, s_fb_height);
++    {
++        int provider = recomp_present_provider_initialize(
++            hwnd, s_fb_width, s_fb_height);
++        if (provider < 0)
++            fb_provider_fail("registered presentation provider did not initialize");
++        if (!provider && gpu_present_enabled())
++            gpu_present_init(hwnd, s_fb_width, s_fb_height);
++    }
+ 
+     while (InterlockedCompareExchange(&s_fb_running, 1, 1)) {
+         MSG msg;
+@@ -949,6 +982,8 @@ static DWORD WINAPI fb_thread(LPVOID unused)
+     recomp_display_awake_shutdown(&s_display_awake);
+     if (s_capture.active && !recomp_capture_close(&s_capture, "thread_stopped"))
+         fb_capture_fail("cannot close capture");
++    if (recomp_present_provider_active())
++        recomp_present_provider_shutdown();
+     gpu_present_shutdown();
+     ReleaseDC(hwnd, hdc);
+     DestroyWindow(hwnd);
+diff --git a/src/video/present_capture.h b/src/video/present_capture.h
+index 3fb3b83..e6bb9a1 100644
+--- a/src/video/present_capture.h
++++ b/src/video/present_capture.h
+@@ -22,7 +22,8 @@ enum RecompCaptureRoute {
+     RECOMP_CAPTURE_NO_ROUTE,
+     RECOMP_CAPTURE_GDI,
+     RECOMP_CAPTURE_D3D_CPU,
+-    RECOMP_CAPTURE_D3D_SHARED_REJECTED
++    RECOMP_CAPTURE_D3D_SHARED_REJECTED,
++    RECOMP_CAPTURE_PROVIDER_CPU
+ };
+ enum RecompCaptureResult {
+     RECOMP_CAPTURE_NO_INPUT,
+@@ -36,7 +37,9 @@ enum RecompCaptureResult {
+     RECOMP_CAPTURE_D3D_OCCLUDED,
+     RECOMP_CAPTURE_D3D_FAILED,
+     RECOMP_CAPTURE_D3D_OTHER_STATUS,
+-    RECOMP_CAPTURE_SHARED_REJECTED
++    RECOMP_CAPTURE_SHARED_REJECTED,
++    RECOMP_CAPTURE_PROVIDER_UNPACED,
++    RECOMP_CAPTURE_PROVIDER_PACED
+ };
+ 
+ typedef struct RecompCaptureRecord {
+@@ -215,9 +218,9 @@ static int recomp_capture_record_valid(const RecompCaptureRecord *r)
+     int has_input;
+     if (!r || r->origin < RECOMP_CAPTURE_MISSING || r->origin > RECOMP_CAPTURE_FLIP ||
+         r->route < RECOMP_CAPTURE_NO_ROUTE ||
+-        r->route > RECOMP_CAPTURE_D3D_SHARED_REJECTED ||
++        r->route > RECOMP_CAPTURE_PROVIDER_CPU ||
+         r->result < RECOMP_CAPTURE_NO_INPUT ||
+-        r->result > RECOMP_CAPTURE_SHARED_REJECTED ||
++        r->result > RECOMP_CAPTURE_PROVIDER_PACED ||
+         r->tag.stats < RECOMP_PRESENT_STATS_UNTRACKED ||
+         r->tag.stats > RECOMP_PRESENT_STATS_EXHAUSTED ||
+         r->tag.pixels < RECOMP_PRESENT_PIXELS_UNKNOWN ||
+@@ -247,7 +250,9 @@ static int recomp_capture_record_valid(const RecompCaptureRecord *r)
+                 r->result == RECOMP_CAPTURE_D3D_OK ||
+                 r->result == RECOMP_CAPTURE_D3D_OCCLUDED ||
+                 r->result == RECOMP_CAPTURE_D3D_FAILED ||
+-                r->result == RECOMP_CAPTURE_D3D_OTHER_STATUS;
++                r->result == RECOMP_CAPTURE_D3D_OTHER_STATUS ||
++                r->result == RECOMP_CAPTURE_PROVIDER_UNPACED ||
++                r->result == RECOMP_CAPTURE_PROVIDER_PACED;
+     if (has_input != (r->image != NULL) ||
+         (has_input && (!r->width || !r->height)))
+         return 0;
+@@ -262,6 +267,9 @@ static int recomp_capture_record_valid(const RecompCaptureRecord *r)
+                r->result <= RECOMP_CAPTURE_D3D_OTHER_STATUS;
+     case RECOMP_CAPTURE_D3D_SHARED_REJECTED:
+         return r->result == RECOMP_CAPTURE_SHARED_REJECTED;
++    case RECOMP_CAPTURE_PROVIDER_CPU:
++        return r->result == RECOMP_CAPTURE_PROVIDER_UNPACED ||
++               r->result == RECOMP_CAPTURE_PROVIDER_PACED;
+     default:
+         return 0;
+     }
+@@ -274,11 +282,14 @@ static int recomp_capture_record(RecompPresenterCapture *capture,
+     static const char *const stats[] = {"untracked", "disabled", "ready", "no_identity", "exhausted"};
+     static const char *const pixels[] = {"unknown", "cpu", "readback", "readback_failed",
+                                          "readback_unavailable"};
+-    static const char *const routes[] = {"none", "gdi", "d3d_cpu", "d3d_shared_rejected"};
++    static const char *const routes[] = {
++        "none", "gdi", "d3d_cpu", "d3d_shared_rejected", "provider_cpu"
++    };
+     static const char *const results[] = {
+         "no_input", "gdi_no_client", "gdi_ok", "gdi_failed", "d3d_no_surface",
+         "d3d_resize_failed", "d3d_target_failed", "d3d_ok", "d3d_occluded",
+-        "d3d_failed", "d3d_other_status", "shared_rejected"
++        "d3d_failed", "d3d_other_status", "shared_rejected",
++        "provider_unpaced", "provider_paced"
+     };
+     const char *format;
+     char image[96] = "", line[1024];
+diff --git a/src/video/present_provider.c b/src/video/present_provider.c
+new file mode 100644
+index 0000000..deeb700
+--- /dev/null
++++ b/src/video/present_provider.c
+@@ -0,0 +1,191 @@
++#if defined(_WIN32)
++#include <windows.h>
++
++#include <stddef.h>
++#include <stdint.h>
++#include <string.h>
++
++#include "present_provider.h"
++
++enum PresentProviderState {
++    PRESENT_PROVIDER_EMPTY,
++    PRESENT_PROVIDER_REGISTERED,
++    PRESENT_PROVIDER_INITIALIZING,
++    PRESENT_PROVIDER_ACTIVE,
++    PRESENT_PROVIDER_STOPPING
++};
++
++static SRWLOCK s_provider_lock = SRWLOCK_INIT;
++static CONDITION_VARIABLE s_provider_idle = CONDITION_VARIABLE_INIT;
++static RecompPresentProvider s_provider;
++static enum PresentProviderState s_provider_state;
++static unsigned s_provider_calls;
++static DWORD s_provider_thread;
++
++static int valid_provider(const RecompPresentProvider *provider)
++{
++    return provider &&
++           provider->version == RECOMP_PRESENT_PROVIDER_VERSION &&
++           provider->size >= sizeof(*provider) &&
++           provider->initialize && provider->present &&
++           provider->output_size && provider->shutdown;
++}
++
++int xbox_FramebufferWindowSetPresentProvider(
++    const RecompPresentProvider *provider)
++{
++    int accepted = 0;
++
++    AcquireSRWLockExclusive(&s_provider_lock);
++    if (s_provider_state == PRESENT_PROVIDER_EMPTY ||
++        s_provider_state == PRESENT_PROVIDER_REGISTERED) {
++        if (!provider) {
++            memset(&s_provider, 0, sizeof(s_provider));
++            s_provider_state = PRESENT_PROVIDER_EMPTY;
++            accepted = 1;
++        } else if (valid_provider(provider)) {
++            s_provider = *provider;
++            s_provider_state = PRESENT_PROVIDER_REGISTERED;
++            accepted = 1;
++        }
++    }
++    ReleaseSRWLockExclusive(&s_provider_lock);
++    return accepted;
++}
++
++int recomp_present_provider_initialize(void *window,
++                                       uint32_t width, uint32_t height)
++{
++    RecompPresentProvider provider;
++    int initialized;
++
++    AcquireSRWLockExclusive(&s_provider_lock);
++    if (s_provider_state == PRESENT_PROVIDER_EMPTY) {
++        ReleaseSRWLockExclusive(&s_provider_lock);
++        return 0;
++    }
++    if (s_provider_state != PRESENT_PROVIDER_REGISTERED ||
++        !window || !width || !height) {
++        ReleaseSRWLockExclusive(&s_provider_lock);
++        return -1;
++    }
++    provider = s_provider;
++    s_provider_state = PRESENT_PROVIDER_INITIALIZING;
++    s_provider_thread = GetCurrentThreadId();
++    ReleaseSRWLockExclusive(&s_provider_lock);
++
++    initialized = provider.initialize(
++        provider.context, window, width, height) == 1;
++    if (!initialized)
++        provider.shutdown(provider.context);
++
++    AcquireSRWLockExclusive(&s_provider_lock);
++    if (initialized) {
++        s_provider_state = PRESENT_PROVIDER_ACTIVE;
++    } else {
++        memset(&s_provider, 0, sizeof(s_provider));
++        s_provider_state = PRESENT_PROVIDER_EMPTY;
++        s_provider_thread = 0;
++    }
++    ReleaseSRWLockExclusive(&s_provider_lock);
++    return initialized ? 1 : -1;
++}
++
++static int begin_provider_call(RecompPresentProvider *provider)
++{
++    int active = 0;
++    AcquireSRWLockExclusive(&s_provider_lock);
++    if (s_provider_state == PRESENT_PROVIDER_ACTIVE) {
++        *provider = s_provider;
++        s_provider_calls++;
++        active = 1;
++    }
++    ReleaseSRWLockExclusive(&s_provider_lock);
++    return active;
++}
++
++static void end_provider_call(void)
++{
++    AcquireSRWLockExclusive(&s_provider_lock);
++    if (s_provider_calls)
++        s_provider_calls--;
++    if (!s_provider_calls)
++        WakeAllConditionVariable(&s_provider_idle);
++    ReleaseSRWLockExclusive(&s_provider_lock);
++}
++
++int recomp_present_provider_active(void)
++{
++    int active;
++    AcquireSRWLockShared(&s_provider_lock);
++    active = s_provider_state == PRESENT_PROVIDER_ACTIVE;
++    ReleaseSRWLockShared(&s_provider_lock);
++    return active;
++}
++
++int recomp_present_provider_present(const uint32_t *pixels,
++                                    uint32_t width, uint32_t height,
++                                    int allow_source, uint64_t frame_id)
++{
++    RecompPresentProvider provider;
++    int result;
++
++    if (!pixels || !width || !height ||
++        !begin_provider_call(&provider))
++        return -1;
++    if (GetCurrentThreadId() != s_provider_thread) {
++        end_provider_call();
++        return -1;
++    }
++    result = provider.present(provider.context, pixels, width, height,
++                              allow_source != 0, frame_id);
++    end_provider_call();
++    return result >= -1 && result <= 1 ? result : -1;
++}
++
++int recomp_present_provider_output_size(uint32_t *width, uint32_t *height)
++{
++    RecompPresentProvider provider;
++    uint32_t result_width = 0;
++    uint32_t result_height = 0;
++    int result;
++
++    if (!width || !height || !begin_provider_call(&provider))
++        return 0;
++    result = provider.output_size(
++        provider.context, &result_width, &result_height);
++    end_provider_call();
++    if (!result || !result_width || !result_height ||
++        result_width > 16384 || result_height > 16384)
++        return 0;
++    *width = result_width;
++    *height = result_height;
++    return 1;
++}
++
++void recomp_present_provider_shutdown(void)
++{
++    RecompPresentProvider provider;
++
++    AcquireSRWLockExclusive(&s_provider_lock);
++    if (s_provider_state != PRESENT_PROVIDER_ACTIVE ||
++        GetCurrentThreadId() != s_provider_thread) {
++        ReleaseSRWLockExclusive(&s_provider_lock);
++        return;
++    }
++    s_provider_state = PRESENT_PROVIDER_STOPPING;
++    while (s_provider_calls)
++        SleepConditionVariableSRW(
++            &s_provider_idle, &s_provider_lock, INFINITE, 0);
++    provider = s_provider;
++    ReleaseSRWLockExclusive(&s_provider_lock);
++
++    provider.shutdown(provider.context);
++
++    AcquireSRWLockExclusive(&s_provider_lock);
++    memset(&s_provider, 0, sizeof(s_provider));
++    s_provider_state = PRESENT_PROVIDER_EMPTY;
++    s_provider_thread = 0;
++    ReleaseSRWLockExclusive(&s_provider_lock);
++}
++#endif
+diff --git a/src/video/present_provider.h b/src/video/present_provider.h
+new file mode 100644
+index 0000000..13cac96
+--- /dev/null
++++ b/src/video/present_provider.h
+@@ -0,0 +1,47 @@
++#ifndef XBOX_PRESENT_PROVIDER_H
++#define XBOX_PRESENT_PROVIDER_H
++
++#if defined(_WIN32)
++#include <stddef.h>
++#include <stdint.h>
++
++#define RECOMP_PRESENT_PROVIDER_VERSION 1u
++
++typedef struct RecompPresentProvider {
++    uint32_t version;
++    size_t size;
++    void *context;
++    int (*initialize)(void *context, void *window,
++                      uint32_t width, uint32_t height);
++    int (*present)(void *context, const uint32_t *pixels,
++                   uint32_t width, uint32_t height,
++                   int allow_source, uint64_t frame_id);
++    int (*output_size)(void *context, uint32_t *width, uint32_t *height);
++    void (*shutdown)(void *context);
++} RecompPresentProvider;
++
++/*
++ * Register before the framebuffer window starts. The provider is copied, but
++ * its context remains borrowed until shutdown. Passing NULL unregisters a
++ * provider that has not initialized.
++ *
++ * initialize, present and shutdown run on the framebuffer-window thread.
++ * output_size may run concurrently on a renderer thread. present returns 1
++ * when it paced the loop, 0 when it did not, and -1 on a fatal failure.
++ * allow_source == 0 requires presentation from the supplied CPU pixels.
++ */
++int xbox_FramebufferWindowSetPresentProvider(
++    const RecompPresentProvider *provider);
++
++/* Host-service dispatch used by the framebuffer window and focused fixtures. */
++int recomp_present_provider_initialize(void *window,
++                                       uint32_t width, uint32_t height);
++int recomp_present_provider_active(void);
++int recomp_present_provider_present(const uint32_t *pixels,
++                                    uint32_t width, uint32_t height,
++                                    int allow_source, uint64_t frame_id);
++int recomp_present_provider_output_size(uint32_t *width, uint32_t *height);
++void recomp_present_provider_shutdown(void);
++#endif
++
++#endif
+diff --git a/tests/present_provider/CMakeLists.txt b/tests/present_provider/CMakeLists.txt
+new file mode 100644
+index 0000000..7a2ee44
+--- /dev/null
++++ b/tests/present_provider/CMakeLists.txt
+@@ -0,0 +1,12 @@
++cmake_minimum_required(VERSION 3.20)
++project(present_provider_test C)
++set(CMAKE_C_STANDARD 11)
++add_executable(present_provider_test
++    test_main.c
++    ../../src/video/present_provider.c)
++target_compile_definitions(present_provider_test PRIVATE
++    WIN32_LEAN_AND_MEAN NOMINMAX _CRT_SECURE_NO_WARNINGS)
++target_include_directories(present_provider_test PRIVATE ../../src/video)
++enable_testing()
++add_test(NAME present_provider_test COMMAND present_provider_test)
++set_tests_properties(present_provider_test PROPERTIES TIMEOUT 5)
+diff --git a/tests/present_provider/test_main.c b/tests/present_provider/test_main.c
+new file mode 100644
+index 0000000..5d352c6
+--- /dev/null
++++ b/tests/present_provider/test_main.c
+@@ -0,0 +1,218 @@
++#include <windows.h>
++
++#include <stdint.h>
++#include <stdio.h>
++#include <string.h>
++
++#include "present_capture.h"
++#include "present_provider.h"
++
++#define CHECK(condition, message) do { \
++    if (!(condition)) { \
++        printf("  %-63s FAIL\n", message); \
++        failures++; \
++    } else { \
++        printf("  %-63s PASS\n", message); \
++    } \
++} while (0)
++
++typedef struct TestProvider {
++    DWORD presenter_thread;
++    void *window;
++    uint32_t width;
++    uint32_t height;
++    uint64_t frame_id;
++    int initialize_calls;
++    int present_calls;
++    int output_calls;
++    int shutdown_calls;
++    int allow_source;
++    int fail_initialize;
++    HANDLE output_entered;
++    HANDLE output_release;
++} TestProvider;
++
++typedef struct OutputCall {
++    int result;
++    uint32_t width;
++    uint32_t height;
++} OutputCall;
++
++static int test_initialize(void *opaque, void *window,
++                           uint32_t width, uint32_t height)
++{
++    TestProvider *provider = opaque;
++    provider->initialize_calls++;
++    provider->presenter_thread = GetCurrentThreadId();
++    provider->window = window;
++    provider->width = width;
++    provider->height = height;
++    return !provider->fail_initialize;
++}
++
++static int test_present(void *opaque, const uint32_t *pixels,
++                        uint32_t width, uint32_t height,
++                        int allow_source, uint64_t frame_id)
++{
++    TestProvider *provider = opaque;
++    if (GetCurrentThreadId() != provider->presenter_thread ||
++        !pixels || width != provider->width || height != provider->height)
++        return -1;
++    provider->present_calls++;
++    provider->allow_source = allow_source;
++    provider->frame_id = frame_id;
++    return 1;
++}
++
++static int replacement_present(void *opaque, const uint32_t *pixels,
++                               uint32_t width, uint32_t height,
++                               int allow_source, uint64_t frame_id)
++{
++    (void)opaque;
++    (void)pixels;
++    (void)width;
++    (void)height;
++    (void)allow_source;
++    (void)frame_id;
++    return -1;
++}
++
++static int test_output_size(void *opaque, uint32_t *width, uint32_t *height)
++{
++    TestProvider *provider = opaque;
++    provider->output_calls++;
++    if (provider->output_entered)
++        SetEvent(provider->output_entered);
++    if (provider->output_release &&
++        WaitForSingleObject(provider->output_release, 1000) != WAIT_OBJECT_0)
++        return 0;
++    *width = 1280;
++    *height = 960;
++    return 1;
++}
++
++static void test_shutdown(void *opaque)
++{
++    TestProvider *provider = opaque;
++    provider->shutdown_calls++;
++}
++
++static DWORD WINAPI output_main(LPVOID opaque)
++{
++    OutputCall *call = opaque;
++    call->result = recomp_present_provider_output_size(
++        &call->width, &call->height);
++    return 0;
++}
++
++static DWORD WINAPI release_output(LPVOID event)
++{
++    Sleep(20);
++    SetEvent(event);
++    return 0;
++}
++
++int main(void)
++{
++    TestProvider state = {0};
++    TestProvider replacement = {0};
++    RecompPresentProvider provider = {
++        RECOMP_PRESENT_PROVIDER_VERSION,
++        sizeof(RecompPresentProvider),
++        &state,
++        test_initialize,
++        test_present,
++        test_output_size,
++        test_shutdown
++    };
++    RecompPresentProvider invalid = provider;
++    OutputCall output = {0};
++    HANDLE output_thread;
++    HANDLE release_thread;
++    uint32_t pixels[16] = {0};
++    RecompCaptureRecord capture = {0};
++    int failures = 0;
++
++    setvbuf(stdout, NULL, _IONBF, 0);
++    invalid.version++;
++    CHECK(!xbox_FramebufferWindowSetPresentProvider(&invalid),
++          "reject an unknown provider version");
++    invalid = provider;
++    invalid.present = NULL;
++    CHECK(!xbox_FramebufferWindowSetPresentProvider(&invalid),
++          "reject an incomplete provider");
++    CHECK(xbox_FramebufferWindowSetPresentProvider(&provider),
++          "register a complete provider before initialization");
++    provider.context = &replacement;
++    provider.present = replacement_present;
++    CHECK(recomp_present_provider_initialize((void *)(uintptr_t)0x1234, 4, 4) == 1,
++          "initialize the copied provider");
++    CHECK(state.initialize_calls == 1 &&
++          state.window == (void *)(uintptr_t)0x1234 &&
++          state.width == 4 && state.height == 4,
++          "preserve initialization context and dimensions");
++    CHECK(recomp_present_provider_active(),
++          "report an initialized provider as active");
++    CHECK(!xbox_FramebufferWindowSetPresentProvider(NULL),
++          "reject unregistering an active provider");
++    CHECK(recomp_present_provider_present(pixels, 4, 4, 1, 42) == 1 &&
++          state.present_calls == 1 && state.allow_source == 1 &&
++          state.frame_id == 42,
++          "dispatch a paced frame through the copied callback");
++
++    state.output_entered = CreateEvent(NULL, TRUE, FALSE, NULL);
++    state.output_release = CreateEvent(NULL, TRUE, FALSE, NULL);
++    output_thread = CreateThread(NULL, 0, output_main, &output, 0, NULL);
++    CHECK(state.output_entered && state.output_release && output_thread &&
++          WaitForSingleObject(state.output_entered, 1000) == WAIT_OBJECT_0,
++          "start a concurrent output-size callback");
++    release_thread = CreateThread(
++        NULL, 0, release_output, state.output_release, 0, NULL);
++    recomp_present_provider_shutdown();
++    CHECK(release_thread &&
++          WaitForSingleObject(release_thread, 1000) == WAIT_OBJECT_0 &&
++          WaitForSingleObject(output_thread, 1000) == WAIT_OBJECT_0,
++          "shutdown waits for an in-flight callback");
++    CHECK(output.result && output.width == 1280 && output.height == 960 &&
++          state.output_calls == 1,
++          "return the concurrent output dimensions");
++    CHECK(state.shutdown_calls == 1 && !recomp_present_provider_active(),
++          "shut down exactly once and clear active state");
++    if (release_thread)
++        CloseHandle(release_thread);
++    if (output_thread)
++        CloseHandle(output_thread);
++    if (state.output_release)
++        CloseHandle(state.output_release);
++    if (state.output_entered)
++        CloseHandle(state.output_entered);
++
++    memset(&state, 0, sizeof(state));
++    state.fail_initialize = 1;
++    provider.context = &state;
++    provider.present = test_present;
++    CHECK(xbox_FramebufferWindowSetPresentProvider(&provider) &&
++          recomp_present_provider_initialize(
++              (void *)(uintptr_t)0x5678, 4, 4) == -1,
++          "propagate provider initialization failure");
++    CHECK(state.initialize_calls == 1 && state.shutdown_calls == 1 &&
++          !recomp_present_provider_active(),
++          "clean a partially initialized provider exactly once");
++    CHECK(xbox_FramebufferWindowSetPresentProvider(NULL),
++          "allow an empty provider registry after failure");
++
++    capture.start_ns = 1;
++    capture.end_ns = 2;
++    capture.origin = RECOMP_CAPTURE_FALLBACK;
++    capture.route = RECOMP_CAPTURE_PROVIDER_CPU;
++    capture.result = RECOMP_CAPTURE_PROVIDER_UNPACED;
++    capture.width = 4;
++    capture.height = 4;
++    capture.image = pixels;
++    CHECK(recomp_capture_record_valid(&capture),
++          "accept captured provider CPU input");
++    capture.result = RECOMP_CAPTURE_SHARED_REJECTED;
++    CHECK(!recomp_capture_record_valid(&capture),
++          "reject a provider capture with an unrelated result");
++    return failures ? 1 : 0;
++}
+diff --git a/tests/presenter_capture/run_windows.ps1 b/tests/presenter_capture/run_windows.ps1
+index 91c249b..dd4f78a 100644
+--- a/tests/presenter_capture/run_windows.ps1
++++ b/tests/presenter_capture/run_windows.ps1
+@@ -42,6 +42,7 @@ try {
+     Invoke-Checked "cl.exe" ($compile + @(
+         (Join-Path $PSScriptRoot "presenter_capture_test.c"),
+         (Join-Path $root "src\video\display_awake.c"),
++        (Join-Path $root "src\video\present_provider.c"),
+         "/Fe:presenter_capture_test.exe", "user32.lib", "gdi32.lib"))
+     Invoke-Checked "cl.exe" ($compile + @(
+         (Join-Path $PSScriptRoot "shared_gpu_capture_test.c"),
+@@ -52,6 +53,7 @@ try {
+     Invoke-Checked "cl.exe" ($compile + @(
+         (Join-Path $PSScriptRoot "real_presenter_test.c"),
+         (Join-Path $root "src\video\display_awake.c"),
++        (Join-Path $root "src\video\present_provider.c"),
+         "/Fe:real_presenter_test.exe", "gdi32.lib") + $gpuLibs)
+     $executorSources = @((Join-Path $PSScriptRoot "executor_capture_test.c"))
+     foreach ($name in @("nv2a_pb_exec", "nv2a_census", "nv2a_combiner", "nv2a_flip_hold",
+@@ -74,6 +76,7 @@ try {
+         Invoke-Checked "cl.exe" ($compile + @(
+             $present, (Join-Path $PSScriptRoot "legacy_stubs.c"),
+             (Join-Path $root "src\video\display_awake.c"),
++            (Join-Path $root "src\video\present_provider.c"),
+             "/Fe:legacy_present_test.exe", "user32.lib", "gdi32.lib"))
+         Invoke-Checked "cl.exe" ($compile + @(
+             $shared, "/Fe:legacy_shared_test.exe") + $gpuLibs)
+diff --git a/tests/presenter_capture/test_present_capture.py b/tests/presenter_capture/test_present_capture.py
+index 7b7da50..c944304 100644
+--- a/tests/presenter_capture/test_present_capture.py
++++ b/tests/presenter_capture/test_present_capture.py
+@@ -121,6 +121,32 @@ class PresenterCaptureTests(unittest.TestCase):
+                 self.assertFalse(row["flip_link_verified"])
+                 self.assertIn(reason, row["reasons"])
+ 
++    def test_provider_cpu_submissions_are_validated_and_aligned(self):
++        for status in ("provider_unpaced", "provider_paced"):
++            with self.subTest(status=status):
++                directory = self.copy_capture()
++                def use_provider(rows):
++                    rows[0]["route"] = "provider_cpu"
++                    rows[0]["status"] = status
++                    rows[0]["detail"] = "0x00000000"
++                self.update_csv(directory / "submissions.csv", use_provider)
++                row = VERIFIER.validate(directory, self.stats)["records"][0]
++                self.assertEqual(row["route"], "provider_cpu")
++                self.assertEqual(row["status"], status)
++                self.assertTrue(row["flip_link_verified"])
++
++        for field, value in (("status", "d3d_ok"), ("detail", "0x00000001")):
++            with self.subTest(field=field):
++                directory = self.copy_capture()
++                def corrupt_provider(rows):
++                    rows[0]["route"] = "provider_cpu"
++                    rows[0]["status"] = "provider_paced"
++                    rows[0]["detail"] = "0x00000000"
++                    rows[0][field] = value
++                self.update_csv(directory / "submissions.csv", corrupt_provider)
++                with self.assertRaises(ValueError):
++                    VERIFIER.validate(directory, self.stats)
++
+     def test_statistics_are_required_and_must_be_the_same_file(self):
+         without = VERIFIER.validate(self.capture)["records"]
+         self.assertTrue(all(not row["flip_link_verified"] for row in without))
+diff --git a/tools/validate_present_capture.py b/tools/validate_present_capture.py
+index 7fe3b51..4d3e976 100644
+--- a/tools/validate_present_capture.py
++++ b/tools/validate_present_capture.py
+@@ -27,9 +27,11 @@ ROUTES = {
+         "d3d_ok", "d3d_occluded", "d3d_failed", "d3d_other_status",
+     },
+     "d3d_shared_rejected": {"shared_rejected"},
++    "provider_cpu": {"provider_unpaced", "provider_paced"},
+ }
+ WITH_IMAGE = {"gdi_ok", "gdi_failed", "d3d_ok", "d3d_occluded",
+-              "d3d_failed", "d3d_other_status"}
++              "d3d_failed", "d3d_other_status", "provider_unpaced",
++              "provider_paced"}
+ U64_MAX = (1 << 64) - 1
+ 
+ 
+@@ -220,7 +222,8 @@ def validate(directory, stats_path=None):
+                 (row["status"] == "d3d_occluded" and detail != 0x087a0001) or
+                 (row["status"] == "d3d_failed" and not detail & 0x80000000) or
+                 (row["status"] == "d3d_other_status" and
+-                 (detail in {0, 0x087a0001} or detail & 0x80000000))):
++                 (detail in {0, 0x087a0001} or detail & 0x80000000)) or
++                (row["status"] in {"provider_unpaced", "provider_paced"} and detail != 0)):
+             raise ValueError(f"inconsistent API result at sequence {sequence}")
+         width, height = numbers["width"], numbers["height"]
+         has_image = row["status"] in WITH_IMAGE
+@@ -249,7 +252,8 @@ def validate(directory, stats_path=None):
+             reasons.append("pixels_" + row["pixels"])
+         if row["format"] not in {"rgb565", "xrgb8888", "aa2x32"}:
+             reasons.append("unsupported_format")
+-        if row["status"] not in {"gdi_ok", "d3d_ok"}:
++        if row["status"] not in {
++                "gdi_ok", "d3d_ok", "provider_unpaced", "provider_paced"}:
+             reasons.append(row["status"])
+         if not has_image:
+             reasons.append("no_image")

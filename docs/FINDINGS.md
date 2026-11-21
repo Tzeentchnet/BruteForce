@@ -12,9 +12,13 @@ in [UPSTREAM.md](./UPSTREAM.md).
 ## 2026-11-20 v0.18 framework and retail acceptance
 
 The repository pins xboxrecomp release v0.18.0 at
-`37b61d589168adee3680fabd51805ee81427bf07` with 43 local patches and no
-separately selected upstream commits. The expected patched tree is
-`8938ce1b635e25832539a0bc6500b2fe2fa14565`. Patch 0030 now passes mirror
+`37b61d589168adee3680fabd51805ee81427bf07` with no separately selected
+upstream commits. The retail acceptance in this section used 43 local patches
+and tree `8938ce1b635e25832539a0bc6500b2fe2fa14565`. Default-inactive
+presentation-provider patch 0048 later advanced the current stack to 44
+patches and expected tree `23a92b43c0042297160e985b31d61308e0d15da6`;
+that addition has synthetic validation only and does not retroactively change
+the retail results below. Patch 0030 now passes mirror
 physical names unchanged to the APU resolver and uses cached
 last-translation inference for low image and stack names, which remain
 unaliased, and for all low names when aliases are unavailable. This fallback
@@ -538,17 +542,59 @@ direction and explicit user approval. The base and CPU-transformed
 pixel-pipeline backend is the first downstream exemplar milestone; current
 runtime defaults are unchanged.
 
+### Host presentation-provider seam (2026-11-21)
+
+Local framework patch 0048 adds a default-inactive presentation-provider
+boundary outside `Nv2aBackend`. A downstream host may register one copied,
+versioned `RecompPresentProvider` before framebuffer-window initialization;
+the provider context remains borrowed through shutdown. Initialization,
+presentation and shutdown execute on the framebuffer-window thread, while
+output-size queries may execute concurrently. Once initialization begins,
+registration, replacement and removal fail. Shutdown first prevents new
+calls, waits on a condition variable for in-flight callbacks, and invokes the
+provider's shutdown exactly once.
+
+Each presentation callback receives stable CPU pixels, CPU dimensions,
+`allow_source` and the publication frame ID. Pinned frames, PVIDEO and
+presenter-source capture pass `allow_source == 0`, requiring the CPU input;
+otherwise a future same-API provider may use a completed renderer source.
+The callback returns paced, unpaced or fatal. Initialization and presentation
+failures terminate explicitly instead of silently selecting GDI or D3D11.
+With no provider registered, existing GDI/D3D11 behavior is unchanged.
+Capture ledgers and their validator now recognize provider CPU submissions
+and paced/unpaced results.
+
+The standalone fixture covers invalid version/incomplete callbacks, copied
+registration data, initialization dimensions and thread ownership,
+post-start registration rejection, paced presentation and frame identity,
+concurrent output-size queries, shutdown waiting for an in-flight callback,
+exactly-once shutdown, failed-initialization cleanup, invalid dimensions and
+wrong-thread presentation. The provider CTest passes. The Windows presenter-
+capture suite reports 20/20 passed with hardware enabled; a separate WARP-
+only run passed 16 and skipped the four hardware-only cases. Both include
+valid and invalid provider capture records. Existing project presentation,
+shared-WARP and size fixtures pass.
+
+All 44 framework patches replay independently with whitespace errors treated
+as fatal to tree `23a92b43c0042297160e985b31d61308e0d15da6`;
+`python tools\toolkit.py --verify` passes. The replayed provider fixture
+builds and passes, and reversing the patches restores exact v0.18 base tree
+`d93bc9f25a901650ce0390493893da3454cca3f1`. This is lifecycle, threading,
+fallback and reproducibility evidence only. No Vulkan surface, swap chain,
+completed-image queue, retail run or performance measurement uses the seam.
+
 **Remaining hypotheses and gates:** pinned DXC has produced the static Vulkan
 base and extended shaders. The static register-combiner interpreter has a
 near-matched stationary retail result, but shared generated raw vertex HLSL
 has not been shown equivalent across SPIR-V and DXIL. Surface/texture layouts,
 checked guest snapshots, texture filter/LOD decoding and the default combiner
 constructor are extracted; scale, cross-backend cache-key and shader-input
-policy are not. A host-owned presentation service still must accept a
-completed same-API image and
-synchronization while retaining window, swap-chain, CPU, PVIDEO and
-diagnostic ownership. The exact handoff is not accepted upstream and remains
-a downstream prototype to validate, not observed behavior. Raw GPU vertex
+policy are not. The host-service provider lifecycle and forced CPU route are
+implemented, but a downstream Vulkan module still must own the Win32 surface
+and swap chain and accept a bounded completed same-API image/synchronization
+handoff while retaining CPU, PVIDEO and diagnostic ownership. That
+API-specific handoff is not accepted upstream and remains a downstream
+prototype to implement and validate. Raw GPU vertex
 programs, scaling, window clip, native presentation, reviewed target-scene
 mip parity, wider matched-retail parity and stability, Intel coverage, D3D12
 and automatic fallback remain open.
@@ -749,6 +795,11 @@ promoted into a performance claim.
   the project's runtime-only compatibility check. Its build, discovery,
   generated-source and bounded CPU/D3D11 acceptance evidence is recorded in
   the v0.18 milestone above.
+- Default-inactive patch 0048 advances the current toolkit tree to
+  `23a92b43c0042297160e985b31d61308e0d15da6` and changes framework
+  presentation and capture-tool sources. It has clean replay and synthetic
+  provider/presenter validation but no regenerated retail executable or
+  runtime result. The 0047 executable remains the latest retail-tested build.
 - Preceding v0.17 supported generation `20261113-214800-12924697` regenerates the same
   retail XBE on toolkit tree
   `3e3ae3600802d2bf4446d86fc546322d60849047` after completing the one-core
@@ -3314,11 +3365,19 @@ the report, then ages that same report past the deadline and verifies its
 exact stamp and sample count. The complete validation-enabled Vulkan fixture
 passes on the NVIDIA RTX 5070 and AMD Radeon adapters with zero validation
 errors. This proves the no-work guard and preserved completion semantics, not
-a retail speedup; no additional manual route was run. Exact texture snapshot
-copying is the next measured candidate, but it may be reduced only with an
-exact write/invalidation mechanism; approximate hashes or stale snapshots are
-not acceptable. Multi-run A/B/A remains deferred until M5, after native
-presentation makes acceptance evidence actionable.
+a retail speedup; no additional manual route was run.
+
+The subsequent exact-snapshot review found no safe elision mechanism to
+implement. `gpu_guest_copy` uses checked `ReadProcessMemory`, then verifies
+that memory layout, allocation and optional registered-bounds identities did
+not change. Direct access or reuse of a stale per-frame copy would weaken
+guard-page and concurrent-lifetime behavior. Windows write-watch also cannot
+cover the main RAM, contiguous-memory and tiled aliases because the framework
+uses shared file mappings rather than `MEM_WRITE_WATCH` `VirtualAlloc`
+regions. Approximate hashes are not exact invalidation. Snapshot elision is
+therefore deferred until the framework can provide exact write notification
+or an equivalently strong mechanism. Multi-run A/B/A remains deferred until
+M5, after native presentation makes acceptance evidence actionable.
 
 ### Material index-word census and default-off run executor
 

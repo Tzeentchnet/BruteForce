@@ -45,11 +45,15 @@ As of a read-only 2026-11-20 review, upstream release v0.18.0 is at
 after v0.17.0 and reports 1,023 tests passed, one skipped, and 6,368
 conformance vectors with no mismatches. The review was read-only; no upstream
 changes or communications were made. The project now pins that release with
-43 local patches and no separate upstream cherry-picks, producing tree
-`8938ce1b635e25832539a0bc6500b2fe2fa14565`. Clean replay, focused fixtures,
-exact retail regeneration review, and bounded one-core, audio-on CPU and
-D3D11 Basic Controls smokes pass. This accepts the local base upgrade; it is
-not a performance, listening, movement, Accurate-DSP or long-session result.
+44 local patches and no separate upstream cherry-picks, producing tree
+`23a92b43c0042297160e985b31d61308e0d15da6`. Clean replay, exact reverse
+application and focused fixtures pass. Exact retail regeneration review and
+bounded one-core, audio-on CPU and D3D11 Basic Controls smokes passed on the
+preceding 43-patch tree
+`8938ce1b635e25832539a0bc6500b2fe2fa14565`; default-inactive patch 0048
+has synthetic presentation-provider validation only. This accepts the local
+base upgrade and provider seam, not a performance, listening, movement,
+Accurate-DSP, native-presentation or long-session result.
 
 v0.18.0 absorbs the formerly selected #314, #319 and #320 commits and adds
 directly useful generic work:
@@ -2314,11 +2318,24 @@ own GPU back end, an extended interface for it, and its own pacing fixes.
     constant-writing programs keep CPU fallback. This is evidence for
     independently shaped optional state/visibility extensions, not a proposal
     to upstream the bundled seam. Presentation remains outside `Nv2aBackend`:
-    the host owns the window,
-    platform surface, swap chain, resize, VSync, CPU/PVIDEO fallback and final
-    present; the Vulkan backend produces a completed image, synchronization,
-    frame identity and mandatory guest readback. Prototype that handoff
-    downstream without putting Vulkan types in the executor contract.
+    the host owns the window, platform surface, swap chain, resize, VSync,
+    CPU/PVIDEO fallback and final present; the Vulkan backend produces a
+    completed image, synchronization, frame identity and mandatory guest
+    readback.
+    [Patch 0048](../patches/xboxrecomp/0048-present-provider.patch) now adds
+    the first generic host seam. One copied, versioned
+    `RecompPresentProvider` may be registered before framebuffer-window
+    initialization. Initialization, presentation and shutdown run on the
+    framebuffer thread; output-size queries may run concurrently.
+    Registration freezes once initialization begins, and shutdown rejects new
+    calls, waits for in-flight callbacks and executes exactly once. Each
+    presentation receives stable CPU pixels/dimensions, a CPU-required/source-
+    allowed flag and publication frame ID, then reports paced, unpaced or
+    fatal. Pinned frames, PVIDEO and presenter-source capture require the CPU
+    route. Provider errors fail closed rather than silently selecting GDI or
+    D3D11; no registered provider leaves existing behavior unchanged. The
+    actual Vulkan image/synchronization descriptor stays downstream and out
+    of the executor contract.
     Vulkan's eight fence-backed command slots, 128-operation batches,
     1,024-entry ordered asynchronous report ring, publication barrier and
     fence-retired texture destruction are backend implementation patterns,
@@ -2371,11 +2388,26 @@ own GPU back end, an extended interface for it, and its own pacing fixes.
     contact-sheet and strict-manifest review with zero unknown frames, but
     remains guest-surface correctness evidence because continuous capture
     perturbs timing and does not prove physical presentation.
+    The patch-0048 fixture additionally covers invalid version/incomplete
+    callbacks, copied registration state, framebuffer-thread ownership,
+    post-start registration rejection, stable pixels and frame identity,
+    paced/unpaced results, invalid output dimensions, wrong-thread
+    presentation, concurrent output-size queries, shutdown waiting for an
+    active callback, exactly-once shutdown and failed-initialization cleanup.
+    Its standalone CTest passes from the clean replay. The Windows presenter-
+    capture suite reports 20/20 passed with hardware enabled; a separate WARP-
+    only run passed 16 and skipped the four hardware-only cases. Both validate
+    provider CPU capture records as well as the unchanged paths. Existing
+    project presentation, shared-WARP and size fixtures pass. All 44
+    patches replay with whitespace errors fatal to tree
+    `23a92b43c0042297160e985b31d61308e0d15da6`, verify in place and reverse
+    exactly to base tree `d93bc9f25a901650ce0390493893da3454cca3f1`.
     Add independent
-    semantic fixtures for each optional state extension. A fake
-    presentation-source/host pair must cover callback threads, image and
-    synchronization lifetime, frame identity, resize epochs, native versus
-    CPU/PVIDEO routes, VSync result, device loss and shutdown. The optional
+    semantic fixtures for each optional state extension. The provider fixture
+    covers callback threads, frame identity, CPU-required routing and
+    shutdown; a future fake Vulkan source/host pair must cover image and
+    synchronization lifetime, resize epochs, native versus CPU/PVIDEO
+    selection, VSync result and device loss. The optional
     Vulkan backend ultimately needs game-data-free clear, state, texture,
     shader, visibility, readback and presentation tests across software and
     hardware devices where available.
@@ -2398,13 +2430,15 @@ own GPU back end, an extended interface for it, and its own pacing fixes.
     or live color-surface ownership. One #184 comment mentions report and
     semaphore DMA bases for another title; it is adjacent evidence, not a
     color-surface implementation. No upstream interaction was performed.
-    *Before filing:* implement and validate the downstream Vulkan exemplar,
-    split only proven generic pieces into small synthetic-test candidates,
-    refresh overlap, and request explicit approval before every upstream
-    issue, PR or comment. After the contract and host presentation handoff
-    are accepted and Vulkan passes parity, ask maintainers whether they will
-    take an optional, default-off Vulkan backend. Open that backend PR only
-    with both maintainer direction and the user's explicit approval.
+    *Before filing:* implement the off-by-default downstream Vulkan provider,
+    including a bounded image-ownership/synchronization handoff, resize,
+    VSync, loss and forced CPU-route fixtures. Validate the generic provider
+    seam with another downstream consumer or otherwise narrow its proven
+    scope; refresh overlap; and request explicit approval before every
+    upstream issue, PR or comment. After the contract and host presentation
+    handoff are accepted and Vulkan passes parity, ask maintainers whether
+    they will take an optional, default-off Vulkan backend. Open that backend
+    PR only with both maintainer direction and the user's explicit approval.
     *Status:* downstream base, visibility and CPU-transformed pixel-pipeline
     exemplar implemented and validation-clean on the two available hardware
     vendors. Exact 2D/cube/mip texture identity, compatible color aliases,
@@ -2416,9 +2450,12 @@ own GPU back end, an extended interface for it, and its own pacing fixes.
     retail probe confirms a supplied six-level BC chain reaches Vulkan but is
     not parity evidence. The formerly black manual movie/menu route now
     reaches visible Basic Controls, and one movement pair has complete
-    guest-surface review. Direct raw-stream vertex fetch, generic
-    color-DMA/lifetime resolution, wider matched parity, native presentation
-    and the upstream contribution series remain pending. The
+    guest-surface review. The default-inactive patch-0048 provider lifecycle,
+    CPU-fallback, pacing, capture and shutdown seam is implemented and
+    synthetic-tested, but no Vulkan surface, swap chain or completed-image
+    queue uses it. Direct raw-stream vertex fetch, generic color-DMA/lifetime
+    resolution, wider matched parity, native presentation and the upstream
+    contribution series remain pending. The
     first contract fixture is merged as #319. The neutral
     layout/snapshot/filter/default-combiner helpers have not been proposed
     upstream. No Vulkan backend PR exists, and no upstream interaction was

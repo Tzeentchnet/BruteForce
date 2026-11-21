@@ -141,6 +141,24 @@ static SRWLOCK s_source_lock = SRWLOCK_INIT;
 static CONDITION_VARIABLE s_source_available = CONDITION_VARIABLE_INIT;
 static SRWLOCK s_queue_lock = SRWLOCK_INIT;
 
+#ifdef BRUTEFORCE_VULKAN_TESTING
+static const char *s_test_fail_stage;
+
+static int present_test_failure(const char *stage)
+{
+    if (!s_test_fail_stage || strcmp(s_test_fail_stage, stage) != 0)
+        return 0;
+    s_test_fail_stage = NULL;
+    return 1;
+}
+#else
+static int present_test_failure(const char *stage)
+{
+    (void)stage;
+    return 0;
+}
+#endif
+
 static BruteforceRendererStartupResult present_result(
     BruteforceRendererStartupStatus status, const char *stage,
     const char *reason)
@@ -1208,9 +1226,11 @@ static int provider_present(void *context, const uint32_t *pixels,
             return swapchain_result;
         }
     }
-    acquire_result = s_present.fn.AcquireNextImageKHR(
-        s_present.device.device, s_present.swapchain, UINT64_MAX,
-        s_present.acquired, VK_NULL_HANDLE, &image_index);
+    acquire_result = present_test_failure("acquire-surface-lost")
+        ? VK_ERROR_SURFACE_LOST_KHR
+        : s_present.fn.AcquireNextImageKHR(
+            s_present.device.device, s_present.swapchain, UINT64_MAX,
+            s_present.acquired, VK_NULL_HANDLE, &image_index);
     if (acquire_result == VK_ERROR_OUT_OF_DATE_KHR) {
         swapchain_result = recreate_swapchain();
         if (swapchain_result <= 0) {
@@ -1450,6 +1470,11 @@ int bruteforce_vulkan_present_unregister(void)
 int bruteforce_vulkan_present_test_parse_options(void)
 {
     return parse_options();
+}
+
+void bruteforce_vulkan_present_test_fail(const char *stage)
+{
+    s_test_fail_stage = stage;
 }
 
 void bruteforce_vulkan_present_test_stats(

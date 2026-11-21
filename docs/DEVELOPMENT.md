@@ -82,7 +82,8 @@ quiescence. The fixture also enables the default-off native presenter,
 creates a real Win32 Vulkan surface and FIFO swap chain, verifies exact-frame
 native routing, three-slot READY-source coalescing, mandatory readback,
 forced CPU routing, source-allowed clean guest-owned CPU fallback, resize
-recreation, fitted output size, explicit provider shutdown, and invalid
+recreation, an exact borderless-fullscreen enter/restore transition, fitted
+output size, fatal surface loss, explicit provider shutdown, and invalid
 `RECOMP_VULKAN_PRESENT` rejection. Route statistics distinguish forced and
 missing-source CPU frames and coalesced, forced and stale drops. It also rejects
 invalid `RECOMP_PRESENT_VSYNC` and

@@ -918,8 +918,9 @@ Basic Controls through its 640x480 FIFO swap chain. The opening movies were
 not observed in that run or its focused retry because both disabled audio.
 An otherwise matched bounded audio-on trace opened the Bink files and
 produced changing CPU-owned frames through the native provider. Physical
-movie review, fullscreen, PVIDEO/capture integration and device loss remain
-open.
+movie/fullscreen review, PVIDEO/capture integration and real device loss
+remain open. Synthetic borderless-fullscreen enter/restore and fail-stop
+surface loss pass on both available vendors.
 No M1-M5 gate is met.
 
 The pre-presentation counter attribution is complete and promotes no gate.
@@ -934,7 +935,7 @@ preserve guard and lifetime behavior, while Windows write-watch cannot track
 the aliased file mappings. No approximate cache or stale snapshot replaces
 that contract. The missing-movie observation is now attributed to the
 audio-off title path with matched bounded traces, not a multi-run comparison.
-The next bounded task is automated fullscreen/loss coverage. No additional
+The next bounded task is final-output or capture evidence. No additional
 manual route is scheduled merely to repeat the baseline.
 
 The retail captures are correctness bring-up evidence only. The final

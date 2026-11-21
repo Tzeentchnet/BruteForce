@@ -623,9 +623,11 @@ The game-data-free hardware fixture creates a real window and swap chain,
 publishes four sources into the three-slot queue to prove READY coalescing,
 presents an exact native frame, verifies mandatory guest pixels, queues
 another source and forces CPU presentation, resizes from 320x240 to 480x320,
-checks fitted output growth and swap-chain recreation, and shuts the provider
-down explicitly. `RECOMP_VULKAN_VALIDATION=1` passes with zero reported
-errors on:
+checks fitted output growth and swap-chain recreation, performs the host's
+borderless-fullscreen style/monitor transition and restores the window, then
+injects `VK_ERROR_SURFACE_LOST_KHR` at acquisition and requires a fatal
+provider result before explicit shutdown. `RECOMP_VULKAN_VALIDATION=1`
+passes with zero reported validation errors on:
 
 - NVIDIA GeForce RTX 5070, Vulkan API 1.4.357, driver `0x9B460000`.
 - AMD Radeon(TM) Graphics, Vulkan API 1.4.315, driver `0x00800161`.
@@ -714,8 +716,8 @@ visible Basic Controls, and an audio-on trace carries changing Bink frames
 through its CPU fallback. Physical movie review remains open. Raw GPU vertex
 programs, render scaling, window clip, complete retail native presentation,
 reviewed target-scene mip parity, wider matched-retail parity and stability,
-Intel coverage, device-loss recovery, D3D12 and automatic fallback remain
-open.
+Intel coverage, real device-loss recovery, D3D12 and automatic fallback
+remain open.
 
 No measured result predicts that Vulkan or D3D12 will improve cadence. The
 dominant recorded G3 PFB flush wait is upstream of the host graphics API.

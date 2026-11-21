@@ -1348,8 +1348,11 @@ for live backend switching is outside this workstream.
    skipped the Bink files, while audio-on opened them and emitted changing
    CPU-owned frames with no WSI or validation error. The benchmark now rejects
    audio-off movie readiness. Do not require D3D11 keyed-mutex interop. Fold
-   physical movie review into a later required run. Next extend bounded
-   fullscreen/loss coverage; fullscreen behavior remains open. Do not
+   physical movie review into a later required run. The cross-vendor fixture
+   now enters and restores the exact host borderless-fullscreen bounds,
+   recreates the swap chain, and requires injected surface loss to return
+   fatal. Next add bounded final-output/capture evidence; physical fullscreen
+   review and real device loss remain open. Do not
    start the deferred M5 comparison campaign. Coordinate any upstream
    proposal with the unanswered
    presentation part of
@@ -1406,8 +1409,9 @@ for live backend switching is outside this workstream.
    downstream WSI/source-ownership module now pass the cross-vendor synthetic
    gate, and a native retail route reaches visible Basic Controls. The
    audio-on/off no-script trace resolves the missing-movie observation without
-   another manual run. Validate fullscreen/resize and CPU/PVIDEO fallback only
-   with a discriminating bounded check. Reserve a multi-run A/B/A campaign for M5,
+   another manual run. Synthetic borderless-fullscreen enter/restore and
+   fail-stop surface loss now pass on both vendors. Add bounded final-output
+   or capture evidence next; reserve a multi-run A/B/A campaign for M5,
    and only when its acceptance evidence is actionable.
    Continue covering menus,
    movies, fades, PVIDEO and CPU fallback without weakening synchronization.
@@ -1522,7 +1526,8 @@ Still open: access to a native 4K display. Optional 5.1 output is deferred.
    handshake pass validation-enabled NVIDIA and AMD fixtures. The first
    integrated native retail run reached visible Basic Controls, and the
    bounded route trace attributes movie skipping to audio-off title behavior.
-   Next use a bounded check for window/fullscreen/CPU-fallback behavior without
+   Borderless-fullscreen enter/restore and fail-stop surface loss are now
+   cross-vendor fixture-covered. Next add bounded final-output/capture evidence without
    scheduling the deferred M5 campaign. Submit no
    upstream work without approval. Implement D3D12 in F8, promote `auto` only
    after F9, and retain D3D11 and CPU as F10 requires.

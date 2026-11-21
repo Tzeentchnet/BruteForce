@@ -803,6 +803,8 @@ static int run_presentation_test(void)
     uint32_t output_height_before;
     uint32_t output_width_after;
     uint32_t output_height_after;
+    uint32_t output_width_fullscreen;
+    uint32_t output_height_fullscreen;
     uint64_t frame_id;
     uint64_t native_frames;
     uint64_t cpu_frames;
@@ -814,6 +816,9 @@ static int run_presentation_test(void)
     uint64_t stale_sources;
     uint64_t last_frame_id;
     uint64_t swapchain_generations;
+    RECT windowed_rect;
+    MONITORINFO monitor;
+    LONG_PTR windowed_style;
     unsigned i;
 
     memset(&window_class, 0, sizeof window_class);
@@ -921,6 +926,53 @@ static int run_presentation_test(void)
           stale_sources == 0 &&
           last_frame_id == frame_id,
           "keep clean CPU-written frames off the stale native source route");
+
+    monitor.cbSize = sizeof monitor;
+    CHECK(GetWindowRect(window, &windowed_rect) &&
+          GetMonitorInfoA(
+              MonitorFromWindow(window, MONITOR_DEFAULTTONEAREST), &monitor),
+          "read window and monitor bounds before fullscreen");
+    windowed_style = GetWindowLongPtrA(window, GWL_STYLE);
+    SetWindowLongPtrA(
+        window, GWL_STYLE,
+        (windowed_style & ~WS_OVERLAPPEDWINDOW) | WS_POPUP);
+    CHECK(SetWindowPos(
+              window, HWND_TOP, monitor.rcMonitor.left, monitor.rcMonitor.top,
+              monitor.rcMonitor.right - monitor.rcMonitor.left,
+              monitor.rcMonitor.bottom - monitor.rcMonitor.top,
+              SWP_FRAMECHANGED | SWP_SHOWWINDOW | SWP_NOACTIVATE),
+          "enter borderless fullscreen for Vulkan presentation");
+    pump_window_messages();
+    CHECK(recomp_present_provider_output_size(
+              &output_width_fullscreen, &output_height_fullscreen) == 1 &&
+          output_width_fullscreen > output_width_after &&
+          output_height_fullscreen > output_height_after,
+          "fit Vulkan output to the fullscreen client");
+    CHECK(recomp_present_provider_present(
+              pixels, 4, 4, 1, frame_id) == 1,
+          "recreate and present after entering borderless fullscreen");
+    bruteforce_vulkan_present_test_stats(
+        &native_frames, &cpu_frames, &cpu_forced_frames, &cpu_missing_frames,
+        &dropped_sources, &coalesced_sources, &forced_sources, &stale_sources,
+        &last_frame_id, &swapchain_generations);
+    CHECK(native_frames == 1 && cpu_frames == 3 &&
+          cpu_forced_frames == 1 && cpu_missing_frames == 2 &&
+          swapchain_generations >= 3,
+          "record CPU fallback and swap-chain recreation in fullscreen");
+    SetWindowLongPtrA(window, GWL_STYLE, windowed_style);
+    CHECK(SetWindowPos(
+              window, NULL, windowed_rect.left, windowed_rect.top,
+              windowed_rect.right - windowed_rect.left,
+              windowed_rect.bottom - windowed_rect.top,
+              SWP_FRAMECHANGED | SWP_NOZORDER | SWP_SHOWWINDOW |
+              SWP_NOACTIVATE),
+          "restore the Vulkan presentation fixture window");
+    pump_window_messages();
+
+    bruteforce_vulkan_present_test_fail("acquire-surface-lost");
+    CHECK(recomp_present_provider_present(
+              pixels, 4, 4, 1, frame_id) == -1,
+          "surface loss stops native presentation explicitly");
     CHECK(bruteforce_vulkan_test_validation_errors() == 0,
           "Vulkan presentation reported no validation errors");
 

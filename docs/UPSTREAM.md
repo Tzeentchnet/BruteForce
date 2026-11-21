@@ -2441,11 +2441,12 @@ own GPU back end, an extended interface for it, and its own pacing fixes.
     or live color-surface ownership. One #184 comment mentions report and
     semaphore DMA bases for another title; it is adjacent evidence, not a
     color-surface implementation. No upstream interaction was performed.
-    *Before filing:* validate the downstream provider's fullscreen,
-    PVIDEO/capture and loss cases. One integrated native retail route reaches
-    visible Basic Controls, and matched bounded traces attribute movie
-    skipping to the audio-off title path, but those remaining cases are not
-    complete.
+    *Before filing:* validate the downstream provider's final-output,
+    PVIDEO/capture and real device-loss cases. The cross-vendor fixture covers
+    the host borderless-fullscreen transition and fail-stop surface loss. One
+    integrated native retail route reaches visible Basic Controls, and
+    matched bounded traces attribute movie skipping to the audio-off title
+    path, but those remaining cases are not complete.
     Validate the generic provider seam with another downstream consumer or
     otherwise narrow its proven scope; refresh overlap; and request explicit
     approval before every
@@ -2465,11 +2466,13 @@ own GPU back end, an extended interface for it, and its own pacing fixes.
     not parity evidence. The formerly black manual menu route now reaches
     visible Basic Controls. Two direct audio-off observations skipped movies;
     a bounded audio-on native trace opened both Bink files and produced
-    changing CPU-owned frames. One movement pair has complete guest-surface review.
+    changing CPU-owned frames. One movement pair has complete guest-surface
+    review.
     The default-inactive patch-0048 provider lifecycle,
     CPU-fallback, pacing, capture and shutdown seam is implemented and
     synthetic-tested. Its downstream Vulkan surface, swap chain and bounded
-    completed-image consumer are validation-clean on both available vendors.
+    completed-image consumer are validation-clean on both available vendors,
+    including borderless-fullscreen enter/restore and fail-stop surface loss.
     Direct raw-stream vertex fetch, generic color-DMA/lifetime resolution,
     wider matched parity, complete retail native presentation and the upstream
     contribution series remain pending. The

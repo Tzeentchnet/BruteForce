@@ -44,7 +44,8 @@ This is an experimental Windows release for the North American retail game:
   48.193 movement flips/s, while Vulkan reported 23.164 and 17.469. Inputs
   matched within 78 ms, but the frames remain unreviewed and one pair is not
   A/B/A or distinct-world-frame evidence. The native path is validation-clean
-  in its NVIDIA and AMD hardware fixture, and one operator-confirmed retail
+  in its NVIDIA and AMD hardware fixture, including borderless-fullscreen
+  enter/restore and fail-stop surface loss. One operator-confirmed retail
   run reached visible Basic Controls through a 640x480 FIFO swap chain with
   validation enabled. Both movie observations had disabled audio; a bounded
   no-script audio-on trace subsequently opened both Bink logo files and kept

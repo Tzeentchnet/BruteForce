@@ -93,7 +93,8 @@ set(BRUTEFORCE_GPU_SOURCES src/gpu/combiner_state.c src/gpu/d3d11_backend.c
     src/gpu/shader_cache.c src/gpu/surface_layout.c src/gpu/texture_layout.c
     src/gpu/vsh_hlsl.c src/gpu/texture_decode.c src/gpu/texture_filter.c
     src/gpu/texture_sampler.c
-    src/gpu/vulkan_backend.c "${BRUTEFORCE_VULKAN_SHADERS}")
+    src/gpu/vulkan_backend.c src/gpu/vulkan_present.c
+    "${BRUTEFORCE_VULKAN_SHADERS}")
 add_executable(bruteforce src/main.c src/recomp_manual.c src/crash_diagnostics.c
     src/perf_counters.c src/profile.c src/gpu/null_backend.c
     ${BRUTEFORCE_GPU_SOURCES} ${RECOMP_SOURCES})
@@ -293,7 +294,7 @@ target_link_libraries(bruteforce_texture_layout_test PRIVATE xboxrecomp)
 
 add_executable(bruteforce_vulkan_test EXCLUDE_FROM_ALL
     tests/vulkan_test.c src/gpu/combiner_state.c src/gpu/guest_snapshot.c
-    src/gpu/vulkan_backend.c src/perf_counters.c
+    src/gpu/vulkan_backend.c src/gpu/vulkan_present.c src/perf_counters.c
     src/gpu/renderer_startup.c src/gpu/surface_layout.c src/gpu/texture_filter.c
     src/gpu/texture_layout.c
     "${BRUTEFORCE_VULKAN_SHADERS}")

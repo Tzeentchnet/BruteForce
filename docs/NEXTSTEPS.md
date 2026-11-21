@@ -310,8 +310,11 @@ implemented, but this is not a broad parity or performance claim. See
   in-flight callbacks, and provider failures stop instead of silently falling
   back. Its provider and presenter-capture fixtures pass, including paced and
   unpaced results, forced CPU input, failed initialization and concurrent
-  shutdown. This is M2 infrastructure only: no Vulkan surface, swap chain or
-  completed-image queue exists yet.
+  shutdown. The default-off downstream WSI consumer now adds a real Win32
+  Vulkan surface and swap chain, a three-slot completed-image queue, exact
+  frame IDs, resize, fitted blit, VSync and CPU fallback. Its NVIDIA and AMD
+  hardware fixtures pass with validation; no retail native-presentation or
+  performance result is claimed.
 - The previous stationary campaign measured about 3.2 rendered frames per
   second on the CPU and 30.4 on D3D11 with GPU vertex programs, three runs
   each. The hold is visually static, so these are **rendered**, not distinct,
@@ -1311,10 +1314,10 @@ for live backend switching is outside this workstream.
    Basic Controls and capture a near-matched frame without validation or
    renderer errors. Clean CPU/PVIDEO surface writes now survive readback, and
    reviewed movement captures retain the same tutorial scene and scripted
-   camera route on D3D11 and Vulkan. Direct raw-stream fetch, scaling, native
-   presentation and wider parity remain F7 scope.
-6. **Prototype host-owned Vulkan presentation (provider seam complete; Vulkan
-   module pending).** Local framework patch 0048 adds a versioned, copied
+   camera route on D3D11 and Vulkan. Direct raw-stream fetch, render scaling,
+   retail native-presentation coverage and wider parity remain F7 scope.
+6. **Prototype host-owned Vulkan presentation (synthetic milestone
+   complete).** Local framework patch 0048 adds a versioned, copied
    `RecompPresentProvider` registration that is default-inactive and separate
    from `Nv2aBackend`. Its `initialize`, `present` and `shutdown` callbacks
    run on the framebuffer-window thread; `output_size` may run concurrently.
@@ -1324,11 +1327,17 @@ for live backend switching is outside this workstream.
    once. Pinned frames, PVIDEO and presenter-source capture continue to force
    CPU input. Existing GDI/D3D11 behavior is unchanged without a registered
    provider, while provider failures stop instead of silently falling back.
-   The next step is the off-by-default Brute Force Vulkan provider: it owns
-   the Win32 Vulkan surface, swap chain, acquire/resize/VSync/final present
-   and a bounded completed-image/synchronization queue while the backend
-   retains mandatory guest readback. Do not require D3D11 keyed-mutex
-   interop. Coordinate any upstream proposal with the unanswered
+   The off-by-default Brute Force Vulkan consumer now owns the Win32 surface,
+   swap chain, acquire/resize/VSync/final fitted blit and CPU upload fallback.
+   The renderer supplies exact-frame completed images through a three-slot
+   FREE/WRITING/READY/PRESENTING queue, coalesces only READY images, shares
+   one externally synchronized graphics queue, and retains mandatory guest
+   readback. Validation-enabled NVIDIA and AMD fixtures cover native routing,
+   coalescing, forced CPU input, resize and explicit provider-before-device
+   shutdown. Do not require D3D11 keyed-mutex interop. Next validate one
+   integrated retail native route and window/fullscreen behavior without
+   starting the deferred M5 comparison campaign. Coordinate any upstream
+   proposal with the unanswered
    presentation part of
    [sp00nznet/xboxrecomp#312](https://github.com/sp00nznet/xboxrecomp/issues/312).
 7. **Reach Vulkan parity and PR readiness (in progress).** Precise visibility
@@ -1377,10 +1386,11 @@ for live backend switching is outside this workstream.
    identities preserve guard and lifetime behavior, while Windows write-watch
    cannot cover the framework's aliased file mappings. Defer
    direct raw-stream fetch unless the unattributed framework gather cost is
-   independently shown to justify it. Patch 0048's provider seam is complete;
-   implement the actual Vulkan WSI/provider module next. Reserve a multi-run
-   A/B/A campaign for M5 after native presentation, and only when its
-   acceptance evidence is actionable.
+   independently shown to justify it. Patch 0048's provider seam and the
+   downstream WSI/source-ownership module now pass the cross-vendor synthetic
+   gate. Validate the integrated retail native route, fullscreen/resize and
+   CPU/PVIDEO fallback next. Reserve a multi-run A/B/A campaign for M5, and
+   only when its acceptance evidence is actionable.
    Continue covering menus,
    movies, fades, PVIDEO and CPU fallback without weakening synchronization.
    The mip fixture is complete; repeat its retail comparison only with
@@ -1487,9 +1497,11 @@ Still open: access to a native 4K display. Optional 5.1 output is deferred.
    snapshot elision has no safe implementation without exact write
    invalidation and is deferred. Do not prioritize direct raw-stream fetch
    from the measured 0.56% backend vertex-copy cost alone. The default-
-   inactive host presentation-provider seam is implemented in patch 0048;
-   next implement its off-by-default Vulkan WSI module and bounded completed-
-   image ownership handshake. Submit no
+   inactive host presentation-provider seam is implemented in patch 0048,
+   and its downstream Vulkan WSI module and bounded completed-image ownership
+   handshake pass validation-enabled NVIDIA and AMD fixtures. Next validate
+   an integrated retail native route and window/fullscreen/CPU-fallback
+   behavior without scheduling the deferred M5 campaign. Submit no
    upstream work without approval. Implement D3D12 in F8, promote `auto` only
    after F9, and retain D3D11 and CPU as F10 requires.
 3. Complete A1 and the single-view E1-E2 scope, then A2-A4 as the reference

@@ -8,6 +8,9 @@
 #include "nv2a_backend.h"
 #include "xbox_memory_layout.h"
 #include "gpu/vulkan_backend.h"
+#include "gpu/vulkan_present.h"
+#include "video/gpu_present.h"
+#include "video/present_provider.h"
 
 typedef void (*recomp_func_t)(void);
 recomp_func_t recomp_lookup(uint32_t va) { (void)va; return NULL; }
@@ -759,11 +762,165 @@ static int run_async_visibility_test(void)
     return 1;
 }
 
+static LRESULT CALLBACK vulkan_present_window_proc(
+    HWND window, UINT message, WPARAM wparam, LPARAM lparam)
+{
+    return DefWindowProcA(window, message, wparam, lparam);
+}
+
+static int resize_client(HWND window, uint32_t width, uint32_t height)
+{
+    RECT rect = { 0, 0, (LONG)width, (LONG)height };
+    DWORD style = (DWORD)GetWindowLongPtrA(window, GWL_STYLE);
+    DWORD ex_style = (DWORD)GetWindowLongPtrA(window, GWL_EXSTYLE);
+    if (!AdjustWindowRectEx(&rect, style, FALSE, ex_style))
+        return 0;
+    return SetWindowPos(
+        window, NULL, 0, 0, rect.right - rect.left, rect.bottom - rect.top,
+        SWP_NOMOVE | SWP_NOZORDER | SWP_NOACTIVATE);
+}
+
+static void pump_window_messages(void)
+{
+    MSG message;
+    while (PeekMessageA(&message, NULL, 0, 0, PM_REMOVE)) {
+        TranslateMessage(&message);
+        DispatchMessageA(&message);
+    }
+}
+
+static int run_presentation_test(void)
+{
+    static const char class_name[] = "BruteForceVulkanPresentFixture";
+    const uint32_t color_va = XBOX_CONTIG_BASE + 0x68000;
+    WNDCLASSA window_class;
+    HWND window;
+    Nv2aSurface surface;
+    Nv2aRenderState state = default_state();
+    uint32_t *pixels =
+        (uint32_t *)((uintptr_t)color_va + xbox_GetMemoryOffset());
+    uint32_t output_width_before;
+    uint32_t output_height_before;
+    uint32_t output_width_after;
+    uint32_t output_height_after;
+    uint64_t frame_id;
+    uint64_t native_frames;
+    uint64_t cpu_frames;
+    uint64_t dropped_sources;
+    uint64_t last_frame_id;
+    uint64_t swapchain_generations;
+    unsigned i;
+
+    memset(&window_class, 0, sizeof window_class);
+    window_class.lpfnWndProc = vulkan_present_window_proc;
+    window_class.hInstance = GetModuleHandleA(NULL);
+    window_class.lpszClassName = class_name;
+    CHECK(RegisterClassA(&window_class) != 0,
+          "register Vulkan presentation fixture window");
+    window = CreateWindowExA(
+        0, class_name, "Vulkan presentation fixture", WS_OVERLAPPEDWINDOW,
+        CW_USEDEFAULT, CW_USEDEFAULT, 320, 240,
+        NULL, NULL, window_class.hInstance, NULL);
+    CHECK(window != NULL, "create Vulkan presentation fixture window");
+    CHECK(resize_client(window, 320, 240),
+          "size Vulkan presentation fixture client");
+    ShowWindow(window, SW_SHOWNOACTIVATE);
+    UpdateWindow(window);
+    pump_window_messages();
+
+    CHECK(recomp_present_provider_initialize(window, 4, 4) == 1,
+          "initialize Vulkan presentation provider");
+    CHECK(recomp_present_provider_active(),
+          "Vulkan presentation provider is active");
+
+    memset(&surface, 0, sizeof surface);
+    surface.color_va = color_va;
+    surface.width = 4;
+    surface.height = 4;
+    surface.pitch = 16;
+    surface.bytes_per_pixel = 4;
+    surface.aa_sx = surface.aa_sy = 1;
+    frame_id = xbox_FramebufferWindowNextFrameId();
+    bruteforce_vulkan_test_clear(&surface, &state, 0xF0, 0xFF336699, 0);
+    CHECK(bruteforce_vulkan_test_flip_readback(color_va),
+          "publish a completed Vulkan presentation source");
+    for (i = 0; i < 3; ++i)
+        CHECK(bruteforce_vulkan_test_flip_readback(color_va),
+              "coalesce a bounded ready Vulkan presentation source");
+    for (i = 0; i < 16; ++i)
+        CHECK(pixels[i] == 0xFF336699,
+              "native source publication preserves mandatory readback");
+    CHECK(recomp_present_provider_present(
+              pixels, 4, 4, 1, frame_id) == 1,
+          "present an exact-frame native Vulkan source");
+    bruteforce_vulkan_present_test_stats(
+        &native_frames, &cpu_frames, &dropped_sources, &last_frame_id,
+        &swapchain_generations);
+    CHECK(native_frames == 1 && cpu_frames == 0 && dropped_sources == 1 &&
+          last_frame_id == frame_id && swapchain_generations == 1,
+          "record exact native routing and bounded ready-source coalescing");
+    CHECK(recomp_present_provider_output_size(
+              &output_width_before, &output_height_before) == 1,
+          "query the fitted Vulkan presentation size");
+
+    bruteforce_vulkan_test_clear(&surface, &state, 0xF0, 0xFF112233, 0);
+    CHECK(bruteforce_vulkan_test_flip_readback(color_va),
+          "queue a Vulkan source for forced CPU presentation");
+    CHECK(resize_client(window, 480, 320),
+          "resize Vulkan presentation fixture client");
+    pump_window_messages();
+    CHECK(recomp_present_provider_output_size(
+              &output_width_after, &output_height_after) == 1 &&
+          output_width_after > output_width_before &&
+          output_height_after > output_height_before,
+          "update fitted output size after window resize");
+    CHECK(recomp_present_provider_present(
+              pixels, 4, 4, 0, frame_id) == 1,
+          "force CPU presentation while discarding a queued native source");
+    bruteforce_vulkan_present_test_stats(
+        &native_frames, &cpu_frames, &dropped_sources, &last_frame_id,
+        &swapchain_generations);
+    CHECK(native_frames == 1 && cpu_frames == 1 &&
+          dropped_sources >= 1 && last_frame_id == frame_id &&
+          swapchain_generations >= 2,
+          "record CPU fallback, source discard, and swap-chain recreation");
+    CHECK(bruteforce_vulkan_test_validation_errors() == 0,
+          "Vulkan presentation reported no validation errors");
+
+    recomp_present_provider_shutdown();
+    CHECK(!recomp_present_provider_active(),
+          "shut down Vulkan presentation before backend destruction");
+    DestroyWindow(window);
+    UnregisterClassA(class_name, window_class.hInstance);
+    return 1;
+}
+
 static int run_tests(const char *xbe_path)
 {
     BruteforceRendererStartupResult result;
     if (!initialize_memory(xbe_path))
         return 0;
+    CHECK(_putenv_s("RECOMP_PRESENT_VSYNC", "invalid") == 0,
+          "set invalid Vulkan presentation pacing option");
+    CHECK(!bruteforce_vulkan_present_test_parse_options(),
+          "reject invalid Vulkan presentation pacing option");
+    CHECK(_putenv_s("RECOMP_PRESENT_VSYNC", "") == 0,
+          "clear invalid Vulkan presentation pacing option");
+    CHECK(_putenv_s("RECOMP_PRESENT_FILTER", "invalid") == 0,
+          "set invalid Vulkan presentation filter option");
+    CHECK(!bruteforce_vulkan_present_test_parse_options(),
+          "reject invalid Vulkan presentation filter option");
+    CHECK(_putenv_s("RECOMP_PRESENT_FILTER", "") == 0,
+          "clear invalid Vulkan presentation filter option");
+    CHECK(_putenv_s("RECOMP_VULKAN_PRESENT", "invalid") == 0,
+          "set invalid Vulkan presentation option");
+    result = bruteforce_vulkan_install(NULL);
+    CHECK(result.status == BRUTEFORCE_RENDERER_STARTUP_INVALID_CONFIGURATION,
+          "invalid Vulkan presentation option fails before startup");
+    CHECK(!bruteforce_vulkan_test_installed(),
+          "invalid Vulkan presentation option does not register");
+    CHECK(_putenv_s("RECOMP_VULKAN_PRESENT", "") == 0,
+          "clear invalid Vulkan presentation option");
     CHECK(_putenv_s("RECOMP_GPU_MIPS", "invalid") == 0,
           "set invalid mip option");
     result = bruteforce_vulkan_install(NULL);
@@ -799,6 +956,12 @@ static int run_tests(const char *xbe_path)
           "enable Vulkan mip sampling");
     CHECK(_putenv_s("RECOMP_GPU_VSH_VERIFY", "1") == 0,
           "enable Vulkan vertex-program verification");
+    CHECK(_putenv_s("RECOMP_VULKAN_PRESENT", "1") == 0,
+          "enable Vulkan presentation provider");
+    CHECK(_putenv_s("RECOMP_PRESENT_VSYNC", "1") == 0,
+          "enable FIFO Vulkan presentation");
+    CHECK(_putenv_s("RECOMP_PRESENT_FILTER", "point") == 0,
+          "enable point-filtered Vulkan presentation");
     result = bruteforce_vulkan_install(NULL);
     if (result.status == BRUTEFORCE_RENDERER_STARTUP_UNAVAILABLE) {
         fprintf(stderr, "SKIP: Vulkan unavailable at %s: %s\n",
@@ -809,10 +972,17 @@ static int run_tests(const char *xbe_path)
     CHECK(result.status == BRUTEFORCE_RENDERER_STARTUP_SUCCESS, result.reason);
     CHECK(bruteforce_vulkan_test_installed(), "successful startup registers");
     CHECK(run_render_test(), "run Vulkan rendering fixture");
+    CHECK(run_presentation_test(), "run Vulkan presentation fixture");
     CHECK(bruteforce_vulkan_test_validation_errors() == 0,
           "Vulkan validation reported no errors");
     bruteforce_vulkan_shutdown();
     CHECK(!bruteforce_vulkan_test_installed(), "shutdown removes registration");
+    CHECK(_putenv_s("RECOMP_VULKAN_PRESENT", "") == 0,
+          "disable Vulkan presentation provider");
+    CHECK(_putenv_s("RECOMP_PRESENT_VSYNC", "") == 0,
+          "clear Vulkan presentation pacing option");
+    CHECK(_putenv_s("RECOMP_PRESENT_FILTER", "") == 0,
+          "clear Vulkan presentation filter option");
     CHECK(_putenv_s("RECOMP_GPU_VSH_VERIFY", "") == 0,
           "clear Vulkan vertex-program verification");
     CHECK(_putenv_s("RECOMP_GPU_ZPASS", "async") == 0,

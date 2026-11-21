@@ -3,8 +3,8 @@
  *
  * This implements the official Nv2aBackend contract, CPU-transformed
  * Nv2aBackendExt batches, gathered-input GPU vertex-program batches, and
- * mandatory readback. Presentation remains owned by xboxrecomp and consumes
- * the guest-memory image produced by readback.
+ * mandatory readback. The default route publishes guest memory through
+ * xboxrecomp; an optional host provider also consumes completed Vulkan images.
  */
 #ifndef WIN32_LEAN_AND_MEAN
 #define WIN32_LEAN_AND_MEAN
@@ -12,6 +12,7 @@
 #ifndef NOMINMAX
 #define NOMINMAX
 #endif
+#define VK_USE_PLATFORM_WIN32_KHR
 #define VK_NO_PROTOTYPES
 #include <windows.h>
 #include <vulkan/vulkan.h>
@@ -34,7 +35,9 @@
 #include "texture_filter.h"
 #include "texture_layout.h"
 #include "vulkan_backend.h"
+#include "vulkan_present.h"
 #include "vulkan_shaders.h"
+#include "video/gpu_present.h"
 
 #define VULKAN_COMMAND_SLOTS 8
 #define VULKAN_MAX_SURFACES 64
@@ -66,6 +69,7 @@ typedef struct VulkanFunctions {
     PFN_vkGetPhysicalDeviceQueueFamilyProperties GetPhysicalDeviceQueueFamilyProperties;
     PFN_vkGetPhysicalDeviceMemoryProperties GetPhysicalDeviceMemoryProperties;
     PFN_vkGetPhysicalDeviceFormatProperties GetPhysicalDeviceFormatProperties;
+    PFN_vkEnumerateDeviceExtensionProperties EnumerateDeviceExtensionProperties;
     PFN_vkCreateDevice CreateDevice;
     PFN_vkGetDeviceProcAddr GetDeviceProcAddr;
     PFN_vkDestroyDevice DestroyDevice;
@@ -465,6 +469,8 @@ typedef struct VulkanState {
     int zpass_enabled;
     int zpass_async;
     int texture_mips;
+    int native_present;
+    int present_registered;
     int installed;
     int validation;
     volatile LONG device_thread;
@@ -658,6 +664,8 @@ static BruteforceRendererStartupResult load_instance_functions(void)
     LOAD_INSTANCE(GetPhysicalDeviceQueueFamilyProperties, GetPhysicalDeviceQueueFamilyProperties);
     LOAD_INSTANCE(GetPhysicalDeviceMemoryProperties, GetPhysicalDeviceMemoryProperties);
     LOAD_INSTANCE(GetPhysicalDeviceFormatProperties, GetPhysicalDeviceFormatProperties);
+    LOAD_INSTANCE(EnumerateDeviceExtensionProperties,
+                  EnumerateDeviceExtensionProperties);
     LOAD_INSTANCE(CreateDevice, CreateDevice);
     LOAD_INSTANCE(GetDeviceProcAddr, GetDeviceProcAddr);
     if (s_vk.validation) {
@@ -1151,6 +1159,7 @@ static void assign_recorded_reports(uint64_t submission_serial)
 static void submit_commands(VulkanCommandSlot *slot, int wait)
 {
     VkSubmitInfo submit = { VK_STRUCTURE_TYPE_SUBMIT_INFO };
+    VkResult result;
     if (!slot || !slot->recording)
         return;
     vk_require(s_vk.fn.EndCommandBuffer(slot->command), "ending a command buffer");
@@ -1158,8 +1167,10 @@ static void submit_commands(VulkanCommandSlot *slot, int wait)
                "resetting a submission fence");
     submit.commandBufferCount = 1;
     submit.pCommandBuffers = &slot->command;
-    vk_require(s_vk.fn.QueueSubmit(s_vk.queue, 1, &submit, slot->fence),
-               "submitting GPU work");
+    bruteforce_vulkan_present_queue_lock();
+    result = s_vk.fn.QueueSubmit(s_vk.queue, 1, &submit, slot->fence);
+    bruteforce_vulkan_present_queue_unlock();
+    vk_require(result, "submitting GPU work");
     s_vk.submissions++;
     if (slot->operation_count > s_vk.max_batch_operations)
         s_vk.max_batch_operations = slot->operation_count;
@@ -4220,11 +4231,12 @@ static uint32_t vulkan_zpass_count(void)
                                          : (uint32_t)s_vk.zpass_total;
 }
 
-static int vulkan_readback(uint32_t color_va)
+static int vulkan_readback_internal(uint32_t color_va, int publish_source)
 {
     VulkanSurface *surface = find_surface(color_va);
     VulkanCommandSlot *slot;
     VulkanBuffer *readback;
+    BruteforceVulkanPresentSource *present_source = NULL;
     VkBufferImageCopy copy;
     size_t row;
     size_t guest_row;
@@ -4241,9 +4253,35 @@ static int vulkan_readback(uint32_t color_va)
     sync_result = sync_surface_guest(surface, NULL, 1, 0);
     if (!sync_result)
         return 0;
+    if (publish_source && s_vk.present_registered)
+        present_source = bruteforce_vulkan_present_begin_source(
+            surface->layout.width, surface->layout.height,
+            xbox_FramebufferWindowNextFrameId());
     if (!surface->gpu_dirty) {
-        flush_recording();
-        wait_for_submission(s_vk.last_submission_serial);
+        if (present_source) {
+            slot = begin_commands();
+            image_barrier(slot->command, &surface->image,
+                          VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+                          VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT,
+                          VK_PIPELINE_STAGE_TRANSFER_BIT,
+                          VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT,
+                          VK_ACCESS_TRANSFER_READ_BIT);
+            bruteforce_vulkan_present_record_source(
+                present_source, slot->command, surface->image.image);
+            image_barrier(slot->command, &surface->image,
+                          VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
+                          VK_PIPELINE_STAGE_TRANSFER_BIT,
+                          VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT,
+                          VK_ACCESS_TRANSFER_READ_BIT,
+                          VK_ACCESS_COLOR_ATTACHMENT_READ_BIT |
+                          VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT);
+            slot->operation_count++;
+            submit_commands(slot, 1);
+            bruteforce_vulkan_present_finish_source(present_source);
+        } else {
+            flush_recording();
+            wait_for_submission(s_vk.last_submission_serial);
+        }
         vulkan_perf_finish_call(
             perf_start, &s_vk.perf.readback_ticks,
             &s_vk.perf.readback_calls);
@@ -4271,6 +4309,9 @@ static int vulkan_readback(uint32_t color_va)
     s_vk.fn.CmdCopyImageToBuffer(slot->command, surface->image.image,
                                  VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
                                  readback->buffer, 1, &copy);
+    if (present_source)
+        bruteforce_vulkan_present_record_source(
+            present_source, slot->command, surface->image.image);
     image_barrier(slot->command, &surface->image,
                   VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
                   VK_PIPELINE_STAGE_TRANSFER_BIT,
@@ -4280,6 +4321,8 @@ static int vulkan_readback(uint32_t color_va)
                   VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT);
     slot->operation_count++;
     submit_commands(slot, 1);
+    if (present_source)
+        bruteforce_vulkan_present_finish_source(present_source);
     if (!readable_guest_range(color_va, surface->layout.span_bytes, 1)) {
         fprintf(stderr, "[GPU-Vulkan] guest color surface %08X is not writable\n", color_va);
         abort();
@@ -4327,10 +4370,15 @@ static int vulkan_readback(uint32_t color_va)
     return 1;
 }
 
+static int vulkan_readback(uint32_t color_va)
+{
+    return vulkan_readback_internal(color_va, 0);
+}
+
 static int vulkan_flip_readback(uint32_t color_va)
 {
     int tracked = find_surface(color_va) != NULL;
-    int result = vulkan_readback(color_va);
+    int result = vulkan_readback_internal(color_va, 1);
     if (tracked && !result) {
         fprintf(stderr, "[GPU-Vulkan] cannot make tracked color surface %08X guest-visible;"
                         " stopping before presentation\n", color_va);
@@ -4482,9 +4530,19 @@ static void destroy_state(void)
 {
     unsigned i;
     int idle = 0;
+    if (s_vk.present_registered) {
+        if (!bruteforce_vulkan_present_unregister()) {
+            fprintf(stderr, "[GPU-Vulkan] presentation provider is still active;"
+                            " refusing to destroy its Vulkan device\n");
+            abort();
+        }
+        s_vk.present_registered = 0;
+    }
     if (s_vk.device && s_vk.fn.DeviceWaitIdle) {
         flush_recording();
+        bruteforce_vulkan_present_queue_lock();
         idle = s_vk.fn.DeviceWaitIdle(s_vk.device) == VK_SUCCESS;
+        bruteforce_vulkan_present_queue_unlock();
         if (idle && s_vk.last_submission_serial >
                     s_vk.completed_submission_serial)
             retire_through(s_vk.last_submission_serial);
@@ -4604,6 +4662,29 @@ static int has_instance_extension(const char *name)
     return found;
 }
 
+static int has_device_extension(VkPhysicalDevice device, const char *name)
+{
+    VkExtensionProperties *extensions;
+    uint32_t count = 0;
+    uint32_t i;
+    int found = 0;
+    if (s_vk.fn.EnumerateDeviceExtensionProperties(
+            device, NULL, &count, NULL) != VK_SUCCESS || !count)
+        return 0;
+    extensions = calloc(count, sizeof *extensions);
+    if (!extensions)
+        return 0;
+    if (s_vk.fn.EnumerateDeviceExtensionProperties(
+            device, NULL, &count, extensions) == VK_SUCCESS)
+        for (i = 0; i < count; ++i)
+            if (strcmp(extensions[i].extensionName, name) == 0) {
+                found = 1;
+                break;
+            }
+    free(extensions);
+    return found;
+}
+
 static int device_queue_family(VkPhysicalDevice device, uint32_t *family)
 {
     VkQueueFamilyProperties *properties;
@@ -4669,7 +4750,14 @@ static int device_suitable(VkPhysicalDevice device, uint32_t *queue_family,
         VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2
     };
     VkFormatProperties color;
+    VkFormatFeatureFlags color_features =
+        VK_FORMAT_FEATURE_COLOR_ATTACHMENT_BIT |
+        VK_FORMAT_FEATURE_TRANSFER_SRC_BIT |
+        VK_FORMAT_FEATURE_TRANSFER_DST_BIT |
+        VK_FORMAT_FEATURE_SAMPLED_IMAGE_BIT;
     int has_queue;
+    if (s_vk.native_present)
+        color_features |= VK_FORMAT_FEATURE_BLIT_SRC_BIT;
     features.pNext = &features13;
     s_vk.fn.GetPhysicalDeviceProperties(device, properties);
     s_vk.fn.GetPhysicalDeviceFeatures2(device, &features);
@@ -4693,11 +4781,11 @@ static int device_suitable(VkPhysicalDevice device, uint32_t *queue_family,
         snprintf(reason, reason_size, "precise occlusion queries are unavailable");
     else if (!has_queue)
         snprintf(reason, reason_size, "no graphics queue is available");
+    else if (s_vk.native_present &&
+             !has_device_extension(device, VK_KHR_SWAPCHAIN_EXTENSION_NAME))
+        snprintf(reason, reason_size, "VK_KHR_swapchain is unavailable");
     else if (!format_supported(device, VK_FORMAT_B8G8R8A8_UNORM,
-                               VK_FORMAT_FEATURE_COLOR_ATTACHMENT_BIT |
-                               VK_FORMAT_FEATURE_TRANSFER_SRC_BIT |
-                               VK_FORMAT_FEATURE_TRANSFER_DST_BIT |
-                               VK_FORMAT_FEATURE_SAMPLED_IMAGE_BIT))
+                               color_features))
         snprintf(reason, reason_size, "B8G8R8A8 features are 0x%08X",
                  color.optimalTilingFeatures);
     else if (!choose_depth_formats(device, depth16, depth_stencil))
@@ -4957,7 +5045,9 @@ static VkResult upload_startup_image(VulkanImage *image,
         return result;
     submit.commandBufferCount = 1;
     submit.pCommandBuffers = &slot->command;
+    bruteforce_vulkan_present_queue_lock();
     result = s_vk.fn.QueueSubmit(s_vk.queue, 1, &submit, slot->fence);
+    bruteforce_vulkan_present_queue_unlock();
     if (result != VK_SUCCESS)
         return result;
     s_vk.submissions++;
@@ -5024,7 +5114,8 @@ BruteforceRendererStartupResult bruteforce_vulkan_install(void *context)
     const char *zpass = getenv("RECOMP_GPU_ZPASS");
     const char *vsh_verify = getenv("RECOMP_GPU_VSH_VERIFY");
     const char *layers[1];
-    const char *extensions[1];
+    const char *extensions[3];
+    const char *device_extensions[1];
     VkApplicationInfo application = { VK_STRUCTURE_TYPE_APPLICATION_INFO };
     VkDebugUtilsMessengerCreateInfoEXT debug = {
         VK_STRUCTURE_TYPE_DEBUG_UTILS_MESSENGER_CREATE_INFO_EXT
@@ -5043,6 +5134,7 @@ BruteforceRendererStartupResult bruteforce_vulkan_install(void *context)
     uint32_t device_count = 0;
     uint32_t chosen = UINT32_MAX;
     uint32_t chosen_family = UINT32_MAX;
+    uint32_t extension_count = 0;
     int requested;
     int best_score = -1;
     float priority = 1.0f;
@@ -5056,6 +5148,7 @@ BruteforceRendererStartupResult bruteforce_vulkan_install(void *context)
     memset(&s_vk, 0, sizeof s_vk);
     if (!parse_bool_option("RECOMP_VULKAN_VALIDATION", 0, &s_vk.validation, &result) ||
         !parse_bool_option("RECOMP_GPU_MIPS", 0, &s_vk.texture_mips, &result) ||
+        !parse_bool_option("RECOMP_VULKAN_PRESENT", 0, &s_vk.native_present, &result) ||
         !parse_device_option(&requested_device, &requested, &result))
         return result;
     s_vk.zpass_async = zpass && strcmp(zpass, "async") == 0;
@@ -5091,6 +5184,16 @@ BruteforceRendererStartupResult bruteforce_vulkan_install(void *context)
                                 " VK_LAYER_KHRONOS_validation and VK_EXT_debug_utils");
         goto failed;
     }
+    if (s_vk.native_present &&
+        (!has_instance_extension(VK_KHR_SURFACE_EXTENSION_NAME) ||
+         !has_instance_extension(VK_KHR_WIN32_SURFACE_EXTENSION_NAME))) {
+        result = startup_result(
+            BRUTEFORCE_RENDERER_STARTUP_INITIALIZATION_FAILED,
+            "presentation-provider", VK_SUCCESS,
+            "RECOMP_VULKAN_PRESENT=1 requires VK_KHR_surface"
+            " and VK_KHR_win32_surface");
+        goto failed;
+    }
     application.pApplicationName = "Brute Force";
     application.applicationVersion = VK_MAKE_API_VERSION(0, 0, 1, 0);
     application.pEngineName = "xboxrecomp";
@@ -5099,11 +5202,9 @@ BruteforceRendererStartupResult bruteforce_vulkan_install(void *context)
     instance.pApplicationInfo = &application;
     if (s_vk.validation) {
         layers[0] = validation_layer;
-        extensions[0] = debug_extension;
         instance.enabledLayerCount = 1;
         instance.ppEnabledLayerNames = layers;
-        instance.enabledExtensionCount = 1;
-        instance.ppEnabledExtensionNames = extensions;
+        extensions[extension_count++] = debug_extension;
         debug.messageSeverity = VK_DEBUG_UTILS_MESSAGE_SEVERITY_WARNING_BIT_EXT |
                                 VK_DEBUG_UTILS_MESSAGE_SEVERITY_ERROR_BIT_EXT;
         debug.messageType = VK_DEBUG_UTILS_MESSAGE_TYPE_GENERAL_BIT_EXT |
@@ -5112,6 +5213,12 @@ BruteforceRendererStartupResult bruteforce_vulkan_install(void *context)
         debug.pfnUserCallback = validation_message;
         instance.pNext = &debug;
     }
+    if (s_vk.native_present) {
+        extensions[extension_count++] = VK_KHR_SURFACE_EXTENSION_NAME;
+        extensions[extension_count++] = VK_KHR_WIN32_SURFACE_EXTENSION_NAME;
+    }
+    instance.enabledExtensionCount = extension_count;
+    instance.ppEnabledExtensionNames = extensions;
     vk_result = test_failure("instance") ? VK_ERROR_INITIALIZATION_FAILED :
                 s_vk.fn.CreateInstance(&instance, NULL, &s_vk.instance);
     if (vk_result != VK_SUCCESS) {
@@ -5212,6 +5319,11 @@ BruteforceRendererStartupResult bruteforce_vulkan_install(void *context)
     device.pEnabledFeatures = &enabled_features;
     device.queueCreateInfoCount = 1;
     device.pQueueCreateInfos = &queue;
+    if (s_vk.native_present) {
+        device_extensions[0] = VK_KHR_SWAPCHAIN_EXTENSION_NAME;
+        device.enabledExtensionCount = 1;
+        device.ppEnabledExtensionNames = device_extensions;
+    }
     vk_result = test_failure("device") ? VK_ERROR_INITIALIZATION_FAILED :
                 s_vk.fn.CreateDevice(s_vk.physical_device, &device, NULL, &s_vk.device);
     if (vk_result != VK_SUCCESS) {
@@ -5231,13 +5343,29 @@ BruteforceRendererStartupResult bruteforce_vulkan_install(void *context)
     result = create_white_texture();
     if (result.status != BRUTEFORCE_RENDERER_STARTUP_SUCCESS)
         goto failed;
+    if (s_vk.native_present) {
+        BruteforceVulkanPresentDevice present_device;
+        memset(&present_device, 0, sizeof present_device);
+        present_device.instance = s_vk.instance;
+        present_device.physical_device = s_vk.physical_device;
+        present_device.device = s_vk.device;
+        present_device.queue = s_vk.queue;
+        present_device.queue_family = s_vk.queue_family;
+        present_device.memory = s_vk.memory;
+        present_device.get_instance_proc_addr = s_vk.fn.GetInstanceProcAddr;
+        present_device.get_device_proc_addr = s_vk.fn.GetDeviceProcAddr;
+        result = bruteforce_vulkan_present_register(&present_device);
+        if (result.status != BRUTEFORCE_RENDERER_STARTUP_SUCCESS)
+            goto failed;
+        s_vk.present_registered = 1;
+    }
     nv2a_backend_ext_register(&s_backend_ext);
     nv2a_backend_register(&s_backend);
     s_vk.installed = 1;
     fprintf(stderr, "[GPU] Vulkan backend registered (RECOMP_GPU=vulkan)\n");
     fprintf(stderr, "[GPU-Vulkan] device=\"%s\" vendor=0x%04X device=0x%04X"
                     " api=%u.%u.%u driver=0x%08X queue=%u DXC=%s"
-                    " validation=%s mips=%s\n",
+                    " validation=%s mips=%s presentation=%s\n",
             s_vk.properties.deviceName, s_vk.properties.vendorID,
             s_vk.properties.deviceID,
             VK_API_VERSION_MAJOR(s_vk.properties.apiVersion),
@@ -5245,7 +5373,8 @@ BruteforceRendererStartupResult bruteforce_vulkan_install(void *context)
             VK_API_VERSION_PATCH(s_vk.properties.apiVersion),
             s_vk.properties.driverVersion, s_vk.queue_family,
             BRUTEFORCE_VULKAN_DXC_ID, s_vk.validation ? "on" : "off",
-            s_vk.texture_mips ? "on" : "off");
+            s_vk.texture_mips ? "on" : "off",
+            s_vk.native_present ? "native" : "cpu");
     if (s_vk.texture_mips)
         fprintf(stderr, "[GPU-MIPS] Vulkan guest mip chains enabled;"
                         " linear textures and render-target aliases remain"
@@ -5317,6 +5446,11 @@ int bruteforce_vulkan_test_vsh_readback(Nv2aXVsOut *output,
 int bruteforce_vulkan_test_readback(uint32_t color_va)
 {
     return vulkan_readback(color_va);
+}
+
+int bruteforce_vulkan_test_flip_readback(uint32_t color_va)
+{
+    return vulkan_flip_readback(color_va);
 }
 
 int bruteforce_vulkan_test_texture_aliases_surface(const Nv2aTexture *texture)

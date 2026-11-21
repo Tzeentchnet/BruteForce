@@ -896,7 +896,7 @@ the ordered implementation tasks are
 Current D3D11 measurements remain the baseline until Vulkan reaches matched
 retail rendering and native-presentation parity.
 
-Current status is partial M1 with M2 infrastructure started. M0 has transactional startup/fake-fallback
+Current status is partial M1 with a synthetic M2 prototype. M0 has transactional startup/fake-fallback
 coverage, the accepted #319 baseline, and renderer-neutral surface/texture
 layouts, checked snapshots and filter/LOD decoding, but official optional
 extensions are not complete. M1 has NVIDIA/AMD validation-clean base and
@@ -905,12 +905,16 @@ CPU-transformed extended draws, precise visibility, register combiners, exact
 one state-matched NVIDIA retail tutorial capture, gathered-input GPU vertex
 programs, clean CPU/PVIDEO surface preservation and one completely reviewed
 D3D11/Vulkan movement pair. It does not have direct raw-stream vertex fetch,
-scale, native presentation, broad menu/movie/fade coverage or the complete
-ordering matrix. M2 now has a default-inactive, versioned host presentation-
-provider seam with explicit framebuffer-thread lifecycle, concurrent output-
-size queries, CPU-required routing, frame identity, pacing results, fail-stop
-errors and shutdown waiting. The actual Vulkan surface, swap chain and
-completed-image/synchronization handoff are absent. No M1-M5 gate is met.
+scale, retail native-presentation coverage, broad menu/movie/fade coverage
+or the complete ordering matrix. M2 now has a default-inactive, versioned
+host presentation-provider seam with explicit framebuffer-thread lifecycle,
+concurrent output-size queries, CPU-required routing, frame identity, pacing
+results, fail-stop errors and shutdown waiting. Its downstream Vulkan
+consumer adds a real Win32 surface and swap chain, three-slot completed-image
+handoff, queue synchronization, resize, fitted blit, VSync and CPU fallback.
+Validation-enabled NVIDIA and AMD fixtures cover the synthetic route, but
+retail, fullscreen, PVIDEO/capture integration and device loss remain open.
+No M1-M5 gate is met.
 
 The pre-presentation counter attribution is complete and promotes no gate.
 The backend now avoids asynchronous visibility polls when the oldest report
@@ -922,9 +926,9 @@ Exact texture-snapshot elision was reviewed and deferred because checked
 `ReadProcessMemory` plus post-copy layout/allocation/bounds identities
 preserve guard and lifetime behavior, while Windows write-watch cannot track
 the aliased file mappings. No approximate cache or stale snapshot replaces
-that contract. The next bounded task is the off-by-default Vulkan provider
-and its image-ownership handshake. No additional manual route is scheduled
-merely to repeat the baseline.
+that contract. The next bounded task is one integrated retail native-
+presentation validation, not a multi-run comparison. No additional manual
+route is scheduled merely to repeat the baseline.
 
 The retail captures are correctness bring-up evidence only. The final
 combiner attempts ended at their 300-second watchdogs before the stationary

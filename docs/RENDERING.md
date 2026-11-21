@@ -31,6 +31,7 @@ resources; it does not replace the game engine with a native PC renderer.
     |                    GPU depth/stencil                           |    presenter
     |                       |-- optional shared colour snapshot -----+
     |-- Vulkan backend -> GPU colour --mandatory readback------------+
+    |                    |-- optional completed-image queue --> Vulkan presenter
     |                    GPU depth/stencil
     `-- null probe: no rasterization; visibility reported as visible
 
@@ -38,9 +39,11 @@ resources; it does not replace the game engine with a native PC renderer.
 ```
 
 The normal framebuffer handoff produces a CPU-side snapshot, optionally
-composes video, and sends it to the window presenter. The shared GPU path is an optional scale-1 presentation optimization and the
-required high-resolution handoff for scaled D3D11 modes; it is not a
-replacement for guest readback.
+composes video, and sends it to the window presenter. The default-off Vulkan
+provider can consume an exact-frame completed image, but CPU-required routes
+still use that snapshot. The shared GPU path is an optional scale-1
+presentation optimization and the required high-resolution handoff for
+scaled D3D11 modes; it is not a replacement for guest readback.
 The CPU renderer is a useful comparison path, not proof of original-hardware
 correctness. The null backend is a measurement probe and does not render a
 correct image.
@@ -495,18 +498,30 @@ first rejects new calls, waits for in-flight callbacks, then invokes the
 provider exactly once. With no provider registered, the existing GDI and
 D3D11 paths are unchanged.
 
-The actual Vulkan provider remains the next downstream implementation. The
-host service creates the window and Win32 Vulkan surface; the backend selects
-compatible rendering devices and queues, produces a completed image, supplies
-explicit synchronization and frame identity, and retains mandatory guest
-readback. The host Vulkan module owns swap-chain creation, resize,
-acquisition, final copy or composite, VSync and presentation. A bounded
-source queue and explicit ownership handshake must prevent the renderer from
-overwriting an image still owned by the presenter. D3D12 follows the same
-ownership split with a host D3D12 module.
+The default-off downstream Vulkan provider now implements that split behind
+`RECOMP_VULKAN_PRESENT=1`. The host service creates the window while the
+provider owns its Win32 Vulkan surface, swap chain, acquisition, resize,
+aspect-fitted final blit, VSync mode and presentation. The backend and
+provider share the selected instance, device, graphics queue and queue
+family; one lock supplies Vulkan's required external queue synchronization.
+The backend copies the finished color image during flip readback and still
+completes mandatory guest readback before framebuffer publication.
 
-The provider lifecycle/CPU-fallback seam is implemented, but the exact Vulkan
-image/synchronization descriptor is not an accepted upstream interface. Open
+Three device-local source images form the bounded handoff. The renderer may
+claim FREE or oldest READY storage, but never WRITING or PRESENTING storage;
+reusing READY storage records an explicit coalesced source. A source becomes
+READY only after the existing submission fence completes. The provider takes
+only an exact publication-frame ID, and otherwise uploads the stable CPU
+pixels. Pinned frames, PVIDEO and presenter-source capture force that CPU
+route and discard eligible queued sources. Resize or
+`VK_ERROR_OUT_OF_DATE_KHR` recreates the swap chain; device/surface failures
+remain fatal. D3D12 follows the same ownership split with a future host
+D3D12 module.
+
+The provider lifecycle/CPU-fallback seam and its downstream Vulkan
+image/synchronization implementation are complete for the synthetic
+NVIDIA/AMD fixture, but that API-specific descriptor is not an accepted
+upstream interface. Open
 [sp00nznet/xboxrecomp#312](https://github.com/sp00nznet/xboxrecomp/issues/312)
 asks about adjacent downstream host hooks and has no maintainer answer for
 presentation. Keep the API-specific handoff downstream with fake
@@ -515,9 +530,8 @@ the smallest renderer-neutral seam that maintainers approve.
 
 Making Vulkan depend on importing into the current D3D11 keyed-mutex
 presenter would turn cross-API interop into a default hardware requirement
-and is not the target architecture. The current D3D11 shared path remains
-intact while the host-owned Vulkan path is developed behind an off-by-default
-switch.
+and is not the target architecture. The current D3D11 shared path remains intact, and omitting the default-off
+Vulkan switch leaves instance and device presentation requirements disabled.
 
 The API primitives may differ, but their externally visible ordering may
 not:
@@ -549,7 +563,9 @@ CPU-transformed pixel-pipeline and gathered-input GPU-VSH subset. Stage 5 is in 
 CPU-presented retail path now reaches a near-matched Basic Controls state with
 exact 2D/cube/mip texture reuse, register combiners, compatible color aliases
 and precise visibility. Its default-inactive host presentation-provider seam
-is implemented and synthetic-tested; the actual Vulkan WSI module is not.
+and the downstream Vulkan WSI module are implemented and synthetic-tested.
+The WSI fixture uses real NVIDIA and AMD surfaces and swap chains with
+validation enabled, but no retail native-presentation run is recorded.
 Stages 2-3 continue as full parity reveals proven generic seams; stages 6-9
 remain open.
 
@@ -582,9 +598,11 @@ remain open.
    Vulkan interpreter removes it from the sampled NV2A hot list and materially
    improves unreviewed flip cadence. Patch 0048 now supplies the separate
    provider lifecycle, threading, CPU-fallback, capture and pacing seam with
-   no registered-provider behavior change. Implement and test the Vulkan WSI
-   provider, completed-image ownership/synchronization handoff, scaling,
-   window clip and native host presentation next.
+   no registered-provider behavior change. The default-off WSI provider now
+   covers a three-slot completed-image ownership handoff, exact frame IDs,
+   forced CPU fallback, aspect-fit scaling, resize and VSync on validation-
+   enabled NVIDIA and AMD fixtures. Validate the integrated retail native
+   route and window/fullscreen behavior next; window clip remains open.
    The first no-capture D3D11/Vulkan sequence was invalidated by a recurring
    pre-movie guest-worker poll on run 3. A default-off framework zero-delay
    backoff now passes its focused fixture and three no-retry D3D11 startup
@@ -1309,9 +1327,12 @@ replace matched gameplay or original-hardware validation.
   exact 2D/cube texture cache/rewrite tracking, four texture stages, register
   combiners, compatible color render-target aliases, precise visibility and
   default-off supplied mip chains, and an integrated retail draw/flip/readback
-  capture through the existing CPU presenter. It still has no native Vulkan
-  swap chain, scaled/native-resolution handoff, direct raw guest-stream vertex
-  fetch or window clip. Surface layout changes after creation fail rather
+  capture through the existing CPU presenter. Its default-off native path now
+  has a real Win32 Vulkan surface and swap chain, bounded source ownership,
+  fitted scaling, resize, VSync and CPU fallback in synthetic cross-vendor
+  tests. It still lacks a retail native-presentation run, a
+  native-resolution render-surface handoff, direct raw guest-stream vertex
+  fetch and window clip. Surface layout changes after creation fail rather
   than migrate. In one matched Basic Controls capture, 134 of
   307,200 pixels
   (0.0436%) exceed 8/255 versus D3D11; mean channel error is 0.374562 and the
@@ -1346,9 +1367,11 @@ replace matched gameplay or original-hardware validation.
   was reviewed and deferred: current checked copies preserve guard-page,
   mapping and allocation-lifetime behavior, while Windows write-watch cannot
   track the aliased file mappings. The default-inactive framework provider
-  seam now passes lifecycle/concurrency and presenter-capture fixtures, but
-  no Vulkan surface or swap chain uses it yet. The actual Vulkan WSI provider
-  and bounded image-ownership handshake are next.
+  seam passes lifecycle/concurrency and presenter-capture fixtures. Its
+  downstream WSI consumer passes exact-frame native routing, READY-source
+  coalescing, forced CPU fallback, resize and explicit shutdown with Vulkan
+  validation enabled on NVIDIA and AMD. Integrated retail presentation,
+  fullscreen/window behavior and device-loss coverage remain next.
 - One native xemu Basic Controls scene is matched: the packed-stencil option
   reduces the large whole-frame brightness difference, while its unsupported
   ownership cases and title-wide behavior keep G4 open. Sun-facing, fade and

@@ -427,6 +427,26 @@ python tools\build.py run --experimental-tutorial
 Remove-Item Env:\RECOMP_GPU
 ```
 
+Vulkan continues to use the framework CPU presenter by default. To exercise
+the experimental host-owned Vulkan presentation path, enable it explicitly:
+
+```powershell
+$env:RECOMP_GPU = "vulkan"
+$env:RECOMP_VULKAN_PRESENT = "1"
+python tools\build.py run --experimental-tutorial
+Remove-Item Env:\RECOMP_VULKAN_PRESENT
+Remove-Item Env:\RECOMP_GPU
+```
+
+The native path owns its Win32 Vulkan surface and swap chain, preserves the
+picture aspect ratio, and uses `RECOMP_PRESENT_FILTER=point` for nearest
+scaling or `linear` by default. `RECOMP_PRESENT_VSYNC=0` prefers mailbox,
+then immediate presentation; the default `1` uses FIFO. Pinned frames,
+PVIDEO, and presenter-source capture still upload the supplied CPU pixels.
+Invalid option values, missing surface/swap-chain support, and presentation
+failures stop explicitly rather than falling back to D3D11 or GDI. The
+launcher does not expose this experimental switch yet.
+
 The Vulkan runtime dynamically loads the system `vulkan-1.dll`; an end-user
 Vulkan SDK is not required. It automatically prefers discrete, integrated,
 virtual, then CPU devices. Set `RECOMP_VULKAN_DEVICE=<decimal-index>` to
@@ -434,6 +454,9 @@ require a physical-device enumeration index. An invalid or unsuitable
 explicit index fails closed. A suitable device must provide Vulkan 1.3
 dynamic rendering, geometry shaders, shader clip distances, precise
 occlusion queries and the required color/depth formats.
+Native presentation additionally requires `VK_KHR_surface`,
+`VK_KHR_win32_surface`, `VK_KHR_swapchain`, and source/destination blit
+support; these requirements do not affect the default CPU-presented route.
 `RECOMP_VULKAN_VALIDATION=1` enables Vulkan
 validation, but requires `VK_LAYER_KHRONOS_validation` and
 `VK_EXT_debug_utils` to be installed; the project does not bundle the
@@ -446,11 +469,16 @@ texture stages, level-zero 2D/cube textures by default and supplied mip chains
 behind `RECOMP_GPU_MIPS=1`, the full general/final register-combiner
 interpreter, precise visibility queries, RGB565 guest conversion, bounded
 command submission, exact snapshot-checked texture caching, compatible
-full/self/subregion color render-target aliases, and mandatory guest readback
-through the existing CPU presenter. Non-aliased
+full/self/subregion color render-target aliases, and mandatory guest readback.
+The default-off native presenter copies completed flip images through a
+three-slot ownership queue while retaining that readback. Non-aliased
 `LIN_D24S8` stages explicitly sample white, matching the CPU reference's
-unsupported-format behavior. Validation-enabled fixtures pass on NVIDIA and
-AMD. Vulkan has reached and captured the retail Basic Controls state; the
+unsupported-format behavior. Validation-enabled rendering and native-presentation fixtures pass on NVIDIA
+and AMD. The native fixture covers exact frame identity, bounded READY-image
+coalescing, forced CPU fallback, resize, and explicit provider shutdown. This
+is synthetic validation, not a retail native-presentation or performance
+result. Vulkan has reached and captured the retail Basic Controls state
+through the CPU-presented route; the
 matched frame has 134 of 307,200 pixels over 8/255 versus D3D11. A reviewed
 component overlay places all 134 in animated world content visible outside
 the opaque tutorial panel. Three opaque panel regions have zero pixels over

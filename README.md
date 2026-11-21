@@ -24,10 +24,13 @@ This is an experimental Windows release for the North American retail game:
   register combiners, cube maps, default-off supplied mip chains, exact
   texture caching, compatible color render-target aliases, precise visibility,
   depth/stencil, bounded submission, RGB565 conversion, and mandatory guest
-  readback through the existing CPU presenter. Eligible vertex-program batches
-  now run through a static Vulkan interpreter from gathered float inputs;
-  raw guest-stream fetch remains on the framework CPU path. At the captured Basic Controls
-  state, 134 of 307,200 pixels exceed 8/255 versus the matched D3D11 frame.
+  readback. An additional default-off host-owned Vulkan presentation path now
+  has a bounded completed-image queue, Win32 surface and swap chain, resize,
+  aspect-fit blit, VSync selection, and required CPU fallback. Eligible
+  vertex-program batches now run through a static Vulkan interpreter from
+  gathered float inputs; raw guest-stream fetch remains on the framework CPU
+  path. At the captured Basic Controls state, 134 of 307,200 pixels exceed
+  8/255 versus the matched D3D11 frame.
   Review places those sparse pixels in animated world content visible around
   the tutorial panel; three opaque panel regions have no pixels over 8/255.
   NVIDIA and AMD fixtures cover the interpreter, whole-triangle non-finite
@@ -40,9 +43,10 @@ This is an experimental Windows release for the North American retail game:
   only one manual run per renderer: D3D11 reported 26.409 stationary and
   48.193 movement flips/s, while Vulkan reported 23.164 and 17.469. Inputs
   matched within 78 ms, but the frames remain unreviewed and one pair is not
-  A/B/A or distinct-world-frame evidence. Native Vulkan presentation,
-  movement-gap attribution, direct raw-stream fetch, broader scene parity,
-  and accepted performance evidence remain open.
+  A/B/A or distinct-world-frame evidence. The native path is validation-clean
+  in its NVIDIA and AMD hardware fixture, but retail native-presentation
+  coverage, movement-gap attribution, direct raw-stream fetch, broader scene
+  parity, and accepted performance evidence remain open.
 - A Vulkan-first default with D3D12 startup fallback remains the gated design
   direction. D3D12 and production `auto` selection are not implemented, and
   D3D11 remains selectable through both parity gates.

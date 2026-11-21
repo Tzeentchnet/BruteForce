@@ -557,7 +557,7 @@ provider's shutdown exactly once.
 Each presentation callback receives stable CPU pixels, CPU dimensions,
 `allow_source` and the publication frame ID. Pinned frames, PVIDEO and
 presenter-source capture pass `allow_source == 0`, requiring the CPU input;
-otherwise a future same-API provider may use a completed renderer source.
+otherwise a same-API provider may use a completed renderer source.
 The callback returns paced, unpaced or fatal. Initialization and presentation
 failures terminate explicitly instead of silently selecting GDI or D3D11.
 With no provider registered, existing GDI/D3D11 behavior is unchanged.
@@ -580,8 +580,56 @@ as fatal to tree `23a92b43c0042297160e985b31d61308e0d15da6`;
 `python tools\toolkit.py --verify` passes. The replayed provider fixture
 builds and passes, and reversing the patches restores exact v0.18 base tree
 `d93bc9f25a901650ce0390493893da3454cca3f1`. This is lifecycle, threading,
-fallback and reproducibility evidence only. No Vulkan surface, swap chain,
-completed-image queue, retail run or performance measurement uses the seam.
+fallback and reproducibility evidence only; the later downstream WSI
+validation below is separate from the framework patch.
+
+### Default-off Vulkan WSI and completed-image ownership (2026-11-21)
+
+`RECOMP_VULKAN_PRESENT=1` now conditionally enables the Win32 surface instance
+extensions and device swap-chain extension, then registers the framework
+provider only after full Vulkan backend initialization. With the switch
+unset, the additional presentation capabilities are not required and the
+existing CPU-presented route is unchanged. Invalid boolean values fail before
+Vulkan startup. The selected instance, physical device, logical device,
+graphics queue and queue family are shared with the provider; backend submits,
+provider submits/presents and device-idle waits use one external queue lock.
+
+Flip readback predicts the framework publication ID and copies the finished
+B8G8R8A8 surface to one of three device-local source images in the same
+command buffer as mandatory guest readback. FREE images may be claimed,
+oldest READY images may be coalesced, and WRITING or PRESENTING images are
+never overwritten. The source becomes READY only after the existing fence
+wait completes. The provider accepts only an exact frame ID. A missing match
+uses the stable CPU pixels, while `allow_source == 0` also drops eligible
+READY images before CPU upload. This preserves pinned-frame, PVIDEO and
+presenter-capture ownership instead of using native presentation as a reason
+to skip the readback or CPU route.
+
+The provider owns the Win32 Vulkan surface, FIFO/mailbox/immediate selection,
+swap-chain images and per-image completion semaphores, resize recreation,
+black letterbox/pillarbox clear, point/linear fitted blit and final present.
+Minimized zero-area windows return unpaced; out-of-date swap chains recreate.
+Unrecoverable acquire, submit, present, surface or device failures remain
+fatal. Backend teardown refuses to destroy an active provider's device, and
+the fixture dispatches provider shutdown explicitly before backend shutdown.
+
+The game-data-free hardware fixture creates a real window and swap chain,
+publishes four sources into the three-slot queue to prove READY coalescing,
+presents an exact native frame, verifies mandatory guest pixels, queues
+another source and forces CPU presentation, resizes from 320x240 to 480x320,
+checks fitted output growth and swap-chain recreation, and shuts the provider
+down explicitly. `RECOMP_VULKAN_VALIDATION=1` passes with zero reported
+errors on:
+
+- NVIDIA GeForce RTX 5070, Vulkan API 1.4.357, driver `0x9B460000`.
+- AMD Radeon(TM) Graphics, Vulkan API 1.4.315, driver `0x00800161`.
+
+These are synthetic ownership, WSI and cross-vendor validation results. No
+retail executable used native Vulkan presentation, no physical scanout or
+PVIDEO movie was reviewed, and no performance result follows from them.
+`tools/bench.py` now records `RECOMP_VULKAN_PRESENT` among matched runtime
+options so a later campaign cannot mix CPU-presented and native-presented
+runs.
 
 **Remaining hypotheses and gates:** pinned DXC has produced the static Vulkan
 base and extended shaders. The static register-combiner interpreter has a
@@ -590,14 +638,12 @@ has not been shown equivalent across SPIR-V and DXIL. Surface/texture layouts,
 checked guest snapshots, texture filter/LOD decoding and the default combiner
 constructor are extracted; scale, cross-backend cache-key and shader-input
 policy are not. The host-service provider lifecycle and forced CPU route are
-implemented, but a downstream Vulkan module still must own the Win32 surface
-and swap chain and accept a bounded completed same-API image/synchronization
-handoff while retaining CPU, PVIDEO and diagnostic ownership. That
-API-specific handoff is not accepted upstream and remains a downstream
-prototype to implement and validate. Raw GPU vertex
-programs, scaling, window clip, native presentation, reviewed target-scene
-mip parity, wider matched-retail parity and stability, Intel coverage, D3D12
-and automatic fallback remain open.
+implemented, and the downstream Vulkan module owns the Win32 surface/swap
+chain and bounded completed-image handoff in synthetic tests. That
+API-specific handoff is not accepted upstream. Raw GPU vertex programs,
+render scaling, window clip, retail native presentation, reviewed
+target-scene mip parity, wider matched-retail parity and stability, Intel
+coverage, device-loss recovery, D3D12 and automatic fallback remain open.
 
 No measured result predicts that Vulkan or D3D12 will improve cadence. The
 dominant recorded G3 PFB flush wait is upstream of the host graphics API.

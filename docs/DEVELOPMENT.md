@@ -78,12 +78,19 @@ poll followed by exact aged completion,
 invalid mip-option rejection, level-zero render-target mip fallback, forced
 2D lower-level selection and rewrite invalidation, positive-X cube lower-level
 selection, short-pitch rejection, and shutdown after callback-thread
-quiescence. The
+quiescence. The fixture also enables the default-off native presenter,
+creates a real Win32 Vulkan surface and FIFO swap chain, verifies exact-frame
+native routing, three-slot READY-source coalescing, mandatory readback,
+forced CPU routing, resize recreation, fitted output size, explicit provider
+shutdown, and invalid `RECOMP_VULKAN_PRESENT` rejection. It also rejects
+invalid `RECOMP_PRESENT_VSYNC` and
+`RECOMP_PRESENT_FILTER` values through the provider's production parser. The
 pipeline failure case exercises rollback from the actual graphics-pipeline
 creation path. Device suitability includes geometry shaders and shader clip
 distances for the GPU-VSH path. The texture-layout fixture covers linear, swizzled,
 block-compressed, paletted, mip, cube and rejected declarations. These tests
-do not establish native presentation, broader retail parity, or performance.
+establish the game-data-free WSI ownership boundary, not retail native
+presentation, broader retail parity, or performance.
 
 After changing the xboxrecomp base, selected commits, or local framework
 patches, verify the reproducible checkout and run its recompiler suite:

@@ -408,6 +408,101 @@ remain required before comparing Vulkan with D3D11 or reporting distinct
 world cadence. PFB, semaphore, visibility, flip and readback synchronization
 were not skipped or satisfied early.
 
+### Vulkan guest-surface ownership and reviewed movement (2026-11-20/21)
+
+The first manual-readiness Vulkan attempt on the gathered-GPU-VSH build
+rendered a black window, recorded only two flips and zero draws, and ended on
+the 360-second watchdog before readiness. A retry had the same visible
+black/zero-draw symptom and was stopped. This was not a Vulkan device loss or
+dead guest process. An early GPU clear had created and retained a black
+tracked image; later CPU/PVIDEO movie writes changed the guest surface, but
+the mandatory flip readback copied the stale GPU image over those writes.
+The legacy timed route could continue sending controller input without a
+visible state and therefore concealed this ownership bug.
+
+The Vulkan backend now retains a guest snapshot and allocation identity for
+each color surface. A full GPU color clear is mirrored into guest memory and
+establishes a coherent clean state. If guest bytes change while the GPU image
+is clean, readback preserves them and defers an upload; the next partial clear
+or draw uploads those pixels first. Partial clears and draws mark the GPU
+image dirty. If guest bytes also change while GPU work is dirty, the backend
+reports a conflict and preserves the completed GPU frame rather than silently
+publishing or uploading either stale side. Successful readback refreshes the
+snapshot and returns the surface to a coherent state. Checked copies and
+identity validation fail explicitly.
+
+The synthetic fixture proves three cases on both the NVIDIA GeForce RTX 5070
+and AMD Radeon integrated adapter with validation enabled and zero validation
+errors: a CPU-written tracked surface survives readback, a later partial
+clear starts from those CPU pixels, and a conflicting guest write during
+dirty GPU work is reported and overwritten by the GPU result. A mirrored
+full clear also still submits and waits before readback returns. The rebuilt
+37,823,488-byte retail executable used for the matched movement collection
+has SHA-256
+`8446de9e7be7834dd465369320bc4baeaf2520a1a6748ae0fb6ef376d24bf9eb`.
+The operator confirmed that Vulkan visibly reached the Basic Controls popup;
+the opening/manual route no longer remained black.
+
+One continuous-capture movement run per renderer then used that exact
+generation and executable, four raster threads, one guest core, audio off,
+supplied mips, ordered asynchronous visibility, no profiling, no adaptive
+panel presses and the same 15-event input script. Review covered all 2,209
+saved flips on 15 labeled contact sheets. Both runs show the same tutorial
+start area and alternating-camera route with character, HUD, terrain,
+foliage and structures present; none shows the Basic Controls panel, a
+cinematic, letterbox, fade, solid interval or missing world geometry.
+Seventeen controller-relative pairs from 20-60 seconds and a second set
+aligned within plus or minus two seconds show the same scene structure.
+Raw pixel differences remain large because lighting and animation advance at
+renderer-dependent cadence, so neither equal-time nor reviewer-aligned pairs
+are accepted pixel-parity metrics.
+
+Strict local manifests cover the complete consecutive movement ranges with
+the reviewed HUD-free ROI `[160,120,480,180]`. Vulkan has 918 classified
+captures and 917 reviewed world changes, or 23.021 changes/s with a 12.135
+1% low. D3D11 has 1,274 classified captures and 1,273 reviewed world changes,
+or 32.026 changes/s with a 15.307 1% low. Both have zero unknown frames.
+The source is synchronous renderer guest-surface output keyed to flip IDs,
+not OS-compositor output or physical scanout. Continuous BMP capture also
+perturbed scheduling and produced 922 Vulkan files versus 1,287 D3D11 files
+over the nominal route. These figures establish reviewed movement scene
+continuity and guest-surface cadence only; they are not a performance
+comparison.
+
+One ownership caveat remains. The successful Vulkan run accumulated conflicts
+on tracked surface `0x80000000`. A bounded diagnostic rebuild (SHA-256
+`e529a755ba411a267b5e805d21f73a7b6d7f440ba3d2de0e77fbd3f3d1658d66`)
+identified it as a 512x512, 2,048-byte-pitch, 1 MiB surface. Conflicts began
+just before the tutorial world at flip 8,222. The changed span advanced from
+149,914 bytes in `[657,250734]` through the entire allocation by flip 8,227;
+the ordinary 640x480 target at that point resolved to `0x802B0000`. Earlier
+page-guard evidence resolved accesses in the same
+`0x80000000..0x800FFFFF` range to `nv2a_pb_staged_walk`, and the executor
+already documents that `NV097_SET_SURFACE_COLOR_OFFSET` is relative to the
+ignored `NV097_SET_CONTEXT_DMA_COLOR` object. The expanding full-range
+pattern is therefore consistent with circular staged-pushbuffer reuse of a
+stale or wrongly resolved surface range, not a localized framebuffer update.
+The exact writer was not intercepted in this run, so that attribution remains
+a supported hypothesis rather than a proved call-site trace.
+
+The diagnostic legacy route completed one stationary interval at 13.531
+flips/s and had 164 conflicts by flip 8,400. That one scripted, instrumented
+run is not performance evidence. The final synchronized 37,826,048-byte
+build has SHA-256
+`1dd3bc9499d14a260a1650f086e6cf40ae71da70708b5cffd36eb67c73a2b939`.
+It completed a no-retry scripted smoke, reached the tutorial world at 92.42
+seconds, completed the stationary interval at 14.100 flips/s, and reproduced
+the same full-range conflict beginning 161 flips before the world marker.
+This is validation of progress and synchronization, not a comparable
+performance run. The current GPU-wins conflict policy remains conservative
+until DMA-object resolution and live surface lifetimes can distinguish
+command memory from a real CPU-written render target. A read-only 2026-11-21
+refresh of all 500 upstream pull requests, all listed issues and tracking
+index sp00nznet/xboxrecomp#184 found no color-DMA/surface-lifetime
+implementation to select. One index comment mentions report and semaphore
+DMA bases for another title; it does not resolve color surfaces. No upstream
+interaction was performed.
+
 **Observed upstream state:** a read-only search of all 500 available
 sp00nznet/xboxrecomp pull-request records and tracking index
 [sp00nznet/xboxrecomp#184](https://github.com/sp00nznet/xboxrecomp/pull/184)

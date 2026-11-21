@@ -131,15 +131,32 @@ static int run_render_test(void)
     surface.bytes_per_pixel = 4;
     surface.aa_sx = surface.aa_sy = 1;
     memset(pixels, 0, 64);
+    bruteforce_vulkan_test_submission_stats(
+        NULL, &submissions_before, NULL);
     bruteforce_vulkan_test_clear(&surface, &state, 0xF0, 0xFF336699, 0);
     CHECK(bruteforce_vulkan_test_readback(color_va), "read back clear");
+    bruteforce_vulkan_test_submission_stats(
+        NULL, &submissions_after, NULL);
+    CHECK(submissions_after - submissions_before == 1,
+          "mirrored full-clear readback still waits for submitted GPU work");
     for (i = 0; i < 16; ++i)
         CHECK(pixels[i] == 0xFF336699, "full color clear matches");
 
+    for (i = 0; i < 16; ++i)
+        pixels[i] = 0xFF112233;
+    CHECK(bruteforce_vulkan_test_readback(color_va),
+          "preserve a CPU-written tracked color surface");
+    for (i = 0; i < 16; ++i)
+        CHECK(pixels[i] == 0xFF112233,
+              "CPU-written tracked color surface remains guest-visible");
+
     bruteforce_vulkan_test_clear(&surface, &state, 0x40, 0xFF0000CC, 0);
+    for (i = 0; i < 16; ++i)
+        pixels[i] = 0xFF445566;
     CHECK(bruteforce_vulkan_test_readback(color_va), "read back partial clear");
     for (i = 0; i < 16; ++i)
-        CHECK(pixels[i] == 0xFF3366CC, "partial blue clear preserves other channels");
+        CHECK(pixels[i] == 0xFF1122CC,
+              "GPU frame wins a conflicting guest surface write");
     memset(&alias_texture, 0, sizeof alias_texture);
     alias_texture.offset = color_va;
     alias_texture.width = alias_texture.height = 4;

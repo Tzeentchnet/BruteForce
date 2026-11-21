@@ -51,6 +51,20 @@ D3D11 remains the measured GPU baseline until matched correctness and
 presentation gates pass, and no graphics API is presumed to improve the
 guest-side PFB flush wait.
 
+The ownership build subsequently restored the visible Vulkan movie/manual
+route and completed one same-executable movement capture per renderer. Strict
+review classifies 917 Vulkan and 1,273 D3D11 world changes with no unknown
+frames and confirms the same tutorial scene and fixed camera route. Their
+23.021 and 32.026 changes/s, and 12.135 and 15.307 1% lows, are synchronous
+guest-surface capture results. They are excluded from performance comparison:
+continuous BMP writes changed timing, the capture counts differ, there is only
+one run per renderer, and neither source proves compositor presentation.
+The next throughput diagnostic must disable continuous capture and alternate
+at least three D3D11 and Vulkan runs on the same generation, executable,
+scene, script, guest-CPU setting, thread count and options. That diagnostic
+can guide the direct-raw-fetch decision but cannot satisfy M5 before native
+presentation and the remaining parity gates.
+
 Before the runtime-only Phase 4 fix, integrated v0.17 Release generation
 `20261111-084222-7bdb6e56`'s codegen-identical executable completed one CPU
 and one D3D11 scripted movement bring-up without retries. The post-deadlock
@@ -845,9 +859,11 @@ layouts, checked snapshots and filter/LOD decoding, but official optional
 extensions are not complete. M1 has NVIDIA/AMD validation-clean base and
 CPU-transformed extended draws, precise visibility, register combiners, exact
 2D/cube/mip texture rewrites, compatible full/self/subregion color aliases,
-and one state-matched NVIDIA retail tutorial capture. It does not have raw GPU
-vertex programs, scale, native presentation, broader matched scenes or the
-complete ordering matrix. No M1-M5 gate is met.
+one state-matched NVIDIA retail tutorial capture, gathered-input GPU vertex
+programs, clean CPU/PVIDEO surface preservation and one completely reviewed
+D3D11/Vulkan movement pair. It does not have direct raw-stream vertex fetch,
+scale, native presentation, broad menu/movie/fade coverage or the complete
+ordering matrix. No M1-M5 gate is met.
 
 The retail captures are correctness bring-up evidence only. The final
 combiner attempts ended at their 300-second watchdogs before the stationary
@@ -946,6 +962,13 @@ comparison path early.
   remain a host service, with the backend supplying completed images and
   synchronization while the host retains its window, swap chain,
   CPU/PVIDEO fallbacks, frame identity, resize epochs and captures.
+- **Guest/GPU ownership.** Vulkan now preserves clean CPU/PVIDEO writes and
+  reports dirty conflicts, but a retained 1 MiB surface at `0x80000000`
+  overlaps the known staged-pushbuffer range. The executor does not resolve
+  `NV097_SET_CONTEXT_DMA_COLOR`, and the exact writer was not intercepted.
+  Keep mandatory readback and GPU-wins conflict handling until generic
+  DMA-object resolution and live surface lifetimes distinguish command memory
+  from a real CPU-written target.
 - **Synchronization.** PGRAPH software-method traps, flip holds, and the
   semaphore hook all run on the NV2A thread. The backend must not block that
   thread on the GPU while a trap is pending. A queued segment also cannot

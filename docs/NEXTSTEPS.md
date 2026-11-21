@@ -63,8 +63,7 @@ missing on-screen movies and capture are not correctness or performance
 evidence: the script deliberately skipped the movies and never reached the
 target scene.
 
-The current 37,823,488-byte gathered-GPU-VSH diagnostic executable has
-SHA-256
+The first 37,823,488-byte gathered-GPU-VSH diagnostic executable has SHA-256
 `108c787713c52007fe67e7c90ed33db77e4e6443cca11c075db0be5baec314cc`.
 Its static SPIR-V NV2A interpreter, non-finite triangle filter and compute
 verification readback pass with zero Vulkan validation errors on the NVIDIA
@@ -77,6 +76,43 @@ world frames or A/B/A. A sparse retail verifier logged its first three checks
 with zero differences and no later mismatch through 1,745,525 accepted
 program batches. The throughput blocker is cleared for continued correctness
 work; matched scene review still precedes renderer comparisons.
+
+The follow-up ownership build has SHA-256
+`8446de9e7be7834dd465369320bc4baeaf2520a1a6748ae0fb6ef376d24bf9eb`.
+It preserves CPU/PVIDEO writes made to clean Vulkan surfaces, uploads them
+before later partial clears or draws, and reports dirty guest/GPU conflicts
+while retaining the completed GPU frame. NVIDIA and AMD validation fixtures
+cover clean preservation, partial-clear resynchronization and GPU-wins
+conflicts. The operator confirmed that the formerly black manual route now
+reaches the visible Basic Controls popup.
+
+Matched-build continuous movement captures have also completed: all 918
+classified Vulkan captures contain 917 reviewed world changes (23.021/s,
+12.135 1% low), and all 1,274 classified D3D11 captures contain 1,273
+(32.026/s, 15.307 1% low), with zero unknown frames. Fifteen contact sheets
+cover every classified capture and show the same tutorial scene and fixed
+camera route without panels, cinematics, fades or missing geometry. These are
+reviewed guest-surface correctness/cadence results, not compositor proof or
+performance evidence; continuous BMP capture perturbed both timing and input
+delivery.
+
+The remaining ownership diagnostic is bounded but unresolved. Surface
+`0x80000000` is a retained 512x512, 1 MiB target whose changed guest span
+advances through the full allocation immediately before the tutorial world,
+while the active output resolves to `0x802B0000`. This matches the known
+staged-pushbuffer overlap and the executor's ignored
+`NV097_SET_CONTEXT_DMA_COLOR` base, but the exact writer was not intercepted.
+Keep GPU-wins conflicts and mandatory readback. The next renderer-performance
+step is a same-generation no-capture D3D11/Vulkan A/B/A diagnostic with at
+least three runs per renderer; it must not reuse the continuous-capture rates
+or be promoted to the post-presentation M5 result.
+
+The final synchronized 37,826,048-byte executable has SHA-256
+`1dd3bc9499d14a260a1650f086e6cf40ae71da70708b5cffd36eb67c73a2b939`.
+Its no-retry scripted Vulkan smoke reached the tutorial world at 92.42 seconds
+and completed one stationary interval at 14.100 flips/s. The run reproduced
+the pre-world full-range conflict and is a validation smoke, not performance
+evidence.
 
 The preceding v0.17 toolkit used selected #314/#319/#320 commits and 43
 local patches, with tree `3e3ae3600802d2bf4446d86fc546322d60849047`.
@@ -1232,8 +1268,10 @@ for live backend switching is outside this workstream.
    filtering, clamps and bias; aliases remain level zero. NVIDIA and AMD
    synthetic validation passes. Validation-enabled NVIDIA retail runs reach
    Basic Controls and capture a near-matched frame without validation or
-   renderer errors. Direct raw-stream fetch, scaling, native presentation and
-   wider parity remain F7 scope.
+   renderer errors. Clean CPU/PVIDEO surface writes now survive readback, and
+   reviewed movement captures retain the same tutorial scene and scripted
+   camera route on D3D11 and Vulkan. Direct raw-stream fetch, scaling, native
+   presentation and wider parity remain F7 scope.
 6. **Prototype host-owned Vulkan presentation (pending).** `Nv2aBackend` produces and
    reads back surfaces; it never owns or pumps the window. The host service
    owns the platform Vulkan surface, swap chain, resize, VSync, final present,
@@ -1253,9 +1291,18 @@ for live backend switching is outside this workstream.
    gathered Vulkan interpreter and compute verifier are implemented and
    cross-vendor-clean; one unreviewed route improves gameplay cadence to
    26-39 flips/s and removes the interpreter from the sampled hot list.
-   Review matched movement output and verifier coverage before deciding
-   whether direct raw-stream fetch is needed. Cover movement, menus, movies,
-   fades, PVIDEO and CPU fallback without weakening synchronization.
+   The first matched movement pair is now fully reviewed: 2,192 classified
+   captures contain continuous world changes and the same scene structure,
+   with no unknown frames, panel, cinematic, fade or missing geometry. The
+   guest-surface source and continuous-capture perturbation make this
+   correctness evidence rather than performance or physical-presentation
+   proof. The manual Vulkan route now shows the opening and reaches Basic
+   Controls after clean guest-surface writes stopped being overwritten.
+   Investigate the remaining `0x80000000` staged-memory conflict through the
+   generic color-DMA/lifetime gap; do not change the conservative GPU-wins
+   policy. Run a no-capture same-build A/B/A diagnostic before deciding
+   whether direct raw-stream fetch is needed. Continue covering menus,
+   movies, fades, PVIDEO and CPU fallback without weakening synchronization.
    The mip fixture is complete; repeat its retail comparison only with
    reviewed target-scene readiness because the first legacy attempt entered
    Join Deathmatch.
@@ -1351,8 +1398,10 @@ Still open: access to a native 4K display. Optional 5.1 output is deferred.
    compatible color-target aliases, precise visibility and CPU-transformed
    register-combiner path are complete. The retained stationary
    over-threshold differences are reviewed as exposed world animation. The
-   gathered GPU-VSH path now clears the immediate gameplay-throughput blocker;
-   next validate matched movement and sparse verification output, decide
+   gathered GPU-VSH path now clears the immediate gameplay-throughput blocker,
+   the manual movie/menu route is visible, and the first matched movement pair
+   has complete guest-surface review. Preserve the unresolved color-DMA
+   conflict policy, collect a no-capture D3D11/Vulkan A/B/A diagnostic, decide
    whether direct raw-stream fetch is needed, then implement the host-owned
    native presentation handoff. Submit no
    upstream work without approval. Implement D3D12 in F8, promote `auto` only

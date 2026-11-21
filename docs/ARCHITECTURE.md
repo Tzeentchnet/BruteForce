@@ -66,7 +66,13 @@ and compatible full/self/subregion color-target aliases reach a near-matched
 retail Basic Controls capture. Eligible untransformed vertex-program batches
 now use a static SPIR-V interpreter with gathered float inputs and an opt-in
 compute readback verifier; direct raw guest-stream fetch, native presentation
-and broader state/scene parity remain open. The window can otherwise use D3D11
+and broader state/scene parity remain open. Vulkan color surfaces also retain
+a guest shadow: clean CPU/PVIDEO changes survive readback and are uploaded
+before later GPU work, while dirty conflicts are reported and preserve the
+GPU frame. This restores the visible manual movie/menu route. A retained
+`0x80000000` surface still overlaps staged pushbuffer traffic because the
+executor does not resolve the color-DMA object base; exact lifetime ownership
+remains open. The window can otherwise use D3D11
 presentation, including an experimental shared-GPU path that retains guest
 readback. USB support is optional. This describes the present recompilation
 environment, not the original Xbox's complete engine design. See
@@ -139,7 +145,9 @@ logical guest pixels. Full GPU colour clears are mirrored into the guest
 surface. If title code, including the linked Bink decoder, later changes that
 surface, the backend uploads the logical image before the first GPU draw or
 at flip, scaling it into the physical target before shared presentation.
-This is distinct from PVIDEO overlay composition. The opt-in D3D11
+Vulkan now applies the same clean-owner rule without scaling; dirty
+guest/GPU conflicts preserve and publish the GPU result rather than merging
+unknown owners. This is distinct from PVIDEO overlay composition. The opt-in D3D11
 combiner-shader cache stores derived bytecode locally, not game resources;
 per-flip readback remains mandatory.
 

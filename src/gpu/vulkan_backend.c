@@ -2,9 +2,9 @@
  * Vulkan 1.3 bring-up backend (RECOMP_GPU=vulkan).
  *
  * This implements the official Nv2aBackend contract, CPU-transformed
- * Nv2aBackendExt batches, and mandatory readback. Raw vertex-program batches
- * still fall back through the framework's CPU transform. Presentation remains
- * owned by xboxrecomp and consumes the guest-memory image produced by readback.
+ * Nv2aBackendExt batches, gathered-input GPU vertex-program batches, and
+ * mandatory readback. Presentation remains owned by xboxrecomp and consumes
+ * the guest-memory image produced by readback.
  */
 #ifndef WIN32_LEAN_AND_MEAN
 #define WIN32_LEAN_AND_MEAN
@@ -243,6 +243,12 @@ typedef struct VulkanSurface {
     GpuSurfaceLayout layout;
     VulkanImage image;
     VulkanImage sample_copy;
+    uint8_t *guest_shadow;
+    size_t guest_shadow_bytes;
+    GuestSpanIdentity guest_identity;
+    uint64_t guest_check_flip;
+    int gpu_dirty;
+    int guest_pending_upload;
 } VulkanSurface;
 
 typedef struct VulkanDepth {
@@ -404,6 +410,10 @@ typedef struct VulkanState {
     int texture_index[VULKAN_TEXTURE_BUCKETS];
     VulkanSampler samplers[VULKAN_MAX_SAMPLERS];
     unsigned sampler_count;
+    uint8_t *surface_probe;
+    size_t surface_probe_capacity;
+    uint32_t *surface_decode;
+    size_t surface_decode_capacity;
     uint8_t *texture_probe;
     size_t texture_probe_capacity;
     size_t texture_snapshot_bytes;
@@ -416,6 +426,9 @@ typedef struct VulkanState {
     uint64_t texture_rewrites;
     uint64_t texture_evictions;
     uint64_t texture_lookup_probes;
+    uint64_t guest_surface_uploads;
+    uint64_t guest_surface_preserves;
+    uint64_t guest_surface_conflicts;
     VulkanPipeline pipelines[VULKAN_MAX_PIPELINES];
     unsigned pipeline_count;
     uint64_t clears;
@@ -1393,14 +1406,213 @@ static VulkanSurface *find_texture_surface_alias(const Nv2aTexture *texture,
     return NULL;
 }
 
+static VkPipelineStageFlags image_layout_stage(VkImageLayout layout);
+static VkAccessFlags image_layout_access(VkImageLayout layout);
+
+static int ensure_surface_probe(size_t bytes)
+{
+    uint8_t *probe;
+
+    if (bytes <= s_vk.surface_probe_capacity)
+        return 1;
+    probe = realloc(s_vk.surface_probe, bytes);
+    if (!probe)
+        return 0;
+    s_vk.surface_probe = probe;
+    s_vk.surface_probe_capacity = bytes;
+    return 1;
+}
+
+static int ensure_surface_decode(size_t texels)
+{
+    uint32_t *decoded;
+
+    if (texels <= s_vk.surface_decode_capacity)
+        return 1;
+    if (texels > SIZE_MAX / sizeof *decoded)
+        return 0;
+    decoded = realloc(s_vk.surface_decode, texels * sizeof *decoded);
+    if (!decoded)
+        return 0;
+    s_vk.surface_decode = decoded;
+    s_vk.surface_decode_capacity = texels;
+    return 1;
+}
+
+static int same_surface_guest_identity(const GuestSpanIdentity *a,
+                                       const GuestSpanIdentity *b)
+{
+    return a->layout == b->layout &&
+           a->allocation == b->allocation &&
+           a->bounds == b->bounds;
+}
+
+static int snapshot_surface_guest(VulkanSurface *surface,
+                                  GuestSpanIdentity *identity)
+{
+    GuestCopyResult result;
+
+    if (!ensure_surface_probe(surface->layout.span_bytes))
+        return 0;
+    result = gpu_guest_copy(surface->va, surface->layout.span_bytes,
+                            s_vk.surface_probe,
+                            GUEST_BOUNDS_TRACK_IF_REGISTERED, identity);
+    if (result != GUEST_COPY_OK) {
+        fprintf(stderr, "[GPU-Vulkan] cannot snapshot guest color surface"
+                        " %08X (result %d)\n", surface->va, (int)result);
+        return 0;
+    }
+    return 1;
+}
+
+static void remember_surface_guest(VulkanSurface *surface,
+                                   const GuestSpanIdentity *identity)
+{
+    memcpy(surface->guest_shadow, s_vk.surface_probe,
+           surface->guest_shadow_bytes);
+    surface->guest_identity = *identity;
+    surface->guest_check_flip = s_vk.flips;
+}
+
+static int decode_surface_guest(VulkanSurface *surface)
+{
+    size_t texels = (size_t)surface->layout.width * surface->layout.height;
+    uint32_t y;
+
+    if (!ensure_surface_decode(texels))
+        return 0;
+    for (y = 0; y < surface->layout.height; ++y) {
+        const uint8_t *source =
+            surface->guest_shadow + (size_t)y * surface->layout.pitch;
+        uint32_t *destination =
+            s_vk.surface_decode + (size_t)y * surface->layout.width;
+        uint32_t x;
+        if (surface->layout.bytes_per_pixel == 4) {
+            memcpy(destination, source,
+                   (size_t)surface->layout.width * sizeof *destination);
+            continue;
+        }
+        for (x = 0; x < surface->layout.width; ++x) {
+            uint16_t pixel;
+            uint32_t r, g, b;
+            memcpy(&pixel, source + (size_t)x * 2, sizeof pixel);
+            r = (pixel >> 11) & 0x1Fu;
+            g = (pixel >> 5) & 0x3Fu;
+            b = pixel & 0x1Fu;
+            r = (r << 3) | (r >> 2);
+            g = (g << 2) | (g >> 4);
+            b = (b << 3) | (b >> 2);
+            destination[x] = 0xFF000000u | (r << 16) | (g << 8) | b;
+        }
+    }
+    return 1;
+}
+
+static int upload_surface_guest(VulkanSurface *surface,
+                                VulkanCommandSlot *slot)
+{
+    size_t texels = (size_t)surface->layout.width * surface->layout.height;
+    VkImageLayout old_layout = surface->image.layout;
+
+    if (!decode_surface_guest(surface))
+        return 0;
+    if (old_layout != VK_IMAGE_LAYOUT_UNDEFINED)
+        image_barrier(slot->command, &surface->image,
+                      VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+                      image_layout_stage(old_layout),
+                      VK_PIPELINE_STAGE_TRANSFER_BIT,
+                      image_layout_access(old_layout),
+                      VK_ACCESS_TRANSFER_WRITE_BIT);
+    upload_to_image(slot, &surface->image, s_vk.surface_decode,
+                    texels * sizeof *s_vk.surface_decode);
+    image_barrier(slot->command, &surface->image,
+                  VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
+                  VK_PIPELINE_STAGE_TRANSFER_BIT,
+                  VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT,
+                  VK_ACCESS_TRANSFER_WRITE_BIT,
+                  VK_ACCESS_COLOR_ATTACHMENT_READ_BIT |
+                  VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT);
+    surface->guest_pending_upload = 0;
+    s_vk.guest_surface_uploads++;
+    return 1;
+}
+
+static int sync_surface_guest(VulkanSurface *surface,
+                              VulkanCommandSlot *slot, int force,
+                              int upload)
+{
+    GuestSpanIdentity identity;
+    int identity_changed;
+    int bytes_changed;
+    int changed;
+
+    if (!force && surface->guest_check_flip == s_vk.flips) {
+        if (upload && surface->guest_pending_upload &&
+            !upload_surface_guest(surface, slot))
+            return 0;
+        return 1;
+    }
+    if (!snapshot_surface_guest(surface, &identity))
+        return 0;
+    identity_changed =
+        !same_surface_guest_identity(&surface->guest_identity, &identity);
+    bytes_changed =
+        memcmp(surface->guest_shadow, s_vk.surface_probe,
+               surface->guest_shadow_bytes) != 0;
+    changed = identity_changed || bytes_changed;
+    surface->guest_check_flip = s_vk.flips;
+    if (changed) {
+        if (surface->gpu_dirty) {
+            static unsigned reports;
+            size_t first = SIZE_MAX;
+            size_t last = 0;
+            size_t count = 0;
+            size_t i;
+
+            if (identity_changed) {
+                fprintf(stderr, "[GPU-Vulkan] guest allocation identity changed"
+                                " for dirty color surface %08X\n", surface->va);
+                return 0;
+            }
+            for (i = 0; i < surface->guest_shadow_bytes; ++i) {
+                if (surface->guest_shadow[i] == s_vk.surface_probe[i])
+                    continue;
+                if (first == SIZE_MAX)
+                    first = i;
+                last = i;
+                count++;
+            }
+            s_vk.guest_surface_conflicts++;
+            if (reports++ < 16) {
+                fprintf(stderr, "[GPU-Vulkan] guest writes raced GPU color work"
+                                " on surface %08X at flip %llu; changed %zu bytes"
+                                " in [%zu,%zu] of %zu (%ux%u pitch %u bpp %u);"
+                                " preserving the GPU frame%s\n",
+                        surface->va, (unsigned long long)s_vk.flips, count,
+                        first == SIZE_MAX ? 0 : first,
+                        first == SIZE_MAX ? 0 : last,
+                        surface->guest_shadow_bytes,
+                        surface->layout.width, surface->layout.height,
+                        surface->layout.pitch, surface->layout.bytes_per_pixel,
+                        reports == 16 ? " (further reports suppressed)" : "");
+            }
+            return 2;
+        }
+        remember_surface_guest(surface, &identity);
+        surface->guest_pending_upload = 1;
+        s_vk.guest_surface_preserves++;
+    }
+    if (upload && surface->guest_pending_upload &&
+        !upload_surface_guest(surface, slot))
+        return 0;
+    return 1;
+}
+
 static VulkanSurface *get_surface(const Nv2aSurface *input, VulkanCommandSlot *slot)
 {
     GpuSurfaceLayout layout;
     VulkanSurface *surface = find_surface(input ? input->color_va : 0);
-    uint8_t *snapshot;
-    size_t packed_row;
-    size_t packed_size;
-    uint32_t y;
+    GuestSpanIdentity identity;
 
     if (!input || !input->color_va || !gpu_surface_layout(input, &layout) ||
         input->pitch % layout.bytes_per_pixel != 0 ||
@@ -1418,70 +1630,41 @@ static VulkanSurface *get_surface(const Nv2aSurface *input, VulkanCommandSlot *s
                     input->color_va);
             abort();
         }
+        if (!sync_surface_guest(surface, slot, 0, 1)) {
+            fprintf(stderr, "[GPU-Vulkan] cannot synchronize guest color"
+                            " surface %08X\n", input->color_va);
+            abort();
+        }
         return surface;
     }
     if (s_vk.surface_count == VULKAN_MAX_SURFACES) {
         fprintf(stderr, "[GPU-Vulkan] color surface limit reached\n");
         abort();
     }
-    packed_row = (size_t)layout.width * sizeof(uint32_t);
-    if (layout.height > SIZE_MAX / packed_row) {
-        fprintf(stderr, "[GPU-Vulkan] color surface size overflow\n");
-        abort();
-    }
-    packed_size = packed_row * layout.height;
-    if (!readable_guest_range(input->color_va, layout.span_bytes, 0)) {
-        fprintf(stderr, "[GPU-Vulkan] color surface %08X is not readable\n", input->color_va);
-        abort();
-    }
-    snapshot = malloc(packed_size);
-    if (!snapshot) {
-        fprintf(stderr, "[GPU-Vulkan] cannot allocate color surface snapshot\n");
-        abort();
-    }
-    for (y = 0; y < layout.height; ++y) {
-        const uint8_t *source = GUEST(input->color_va) + (size_t)y * layout.pitch;
-        uint32_t *destination = (uint32_t *)(snapshot + (size_t)y * packed_row);
-        uint32_t x;
-        if (layout.bytes_per_pixel == 4) {
-            memcpy(destination, source, packed_row);
-            continue;
-        }
-        for (x = 0; x < layout.width; ++x) {
-            uint16_t pixel;
-            uint32_t r, g, b;
-            memcpy(&pixel, source + (size_t)x * 2, sizeof pixel);
-            r = (pixel >> 11) & 0x1Fu;
-            g = (pixel >> 5) & 0x3Fu;
-            b = pixel & 0x1Fu;
-            r = (r << 3) | (r >> 2);
-            g = (g << 2) | (g >> 4);
-            b = (b << 3) | (b >> 2);
-            destination[x] = 0xFF000000u | (r << 16) | (g << 8) | b;
-        }
-    }
     surface = &s_vk.surfaces[s_vk.surface_count++];
     memset(surface, 0, sizeof *surface);
     surface->va = input->color_va;
     surface->layout = layout;
+    surface->guest_shadow_bytes = layout.span_bytes;
+    surface->guest_shadow = malloc(surface->guest_shadow_bytes);
+    if (!surface->guest_shadow ||
+        !snapshot_surface_guest(surface, &identity)) {
+        fprintf(stderr, "[GPU-Vulkan] cannot allocate or initialize color"
+                        " surface snapshot\n");
+        abort();
+    }
+    remember_surface_guest(surface, &identity);
     if (!create_image(layout.width, layout.height, VK_FORMAT_B8G8R8A8_UNORM,
                       VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT |
                       VK_IMAGE_USAGE_TRANSFER_SRC_BIT |
                       VK_IMAGE_USAGE_TRANSFER_DST_BIT |
                       VK_IMAGE_USAGE_SAMPLED_BIT,
                       VK_IMAGE_ASPECT_COLOR_BIT, &surface->image)) {
-        free(snapshot);
         runtime_failure("creating a color surface", VK_ERROR_OUT_OF_DEVICE_MEMORY);
     }
-    upload_to_image(slot, &surface->image, snapshot, packed_size);
-    image_barrier(slot->command, &surface->image,
-                  VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
-                  VK_PIPELINE_STAGE_TRANSFER_BIT,
-                  VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT,
-                  VK_ACCESS_TRANSFER_WRITE_BIT,
-                  VK_ACCESS_COLOR_ATTACHMENT_READ_BIT |
-                  VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT);
-    free(snapshot);
+    if (!upload_surface_guest(surface, slot))
+        runtime_failure("uploading a guest color surface",
+                        VK_ERROR_OUT_OF_HOST_MEMORY);
     return surface;
 }
 
@@ -2025,6 +2208,46 @@ static void unpack_color(uint32_t argb, float color[4])
     color[3] = ((argb >> 24) & 0xFFu) / 255.0f;
 }
 
+static int mirror_full_surface_clear(VulkanSurface *surface, uint32_t argb)
+{
+    GuestSpanIdentity identity;
+    size_t row = (size_t)surface->layout.width *
+                 surface->layout.bytes_per_pixel;
+    uint32_t y;
+
+    if (!readable_guest_range(surface->va, surface->layout.span_bytes, 1))
+        return 0;
+    for (y = 0; y < surface->layout.height; ++y) {
+        uint8_t *shadow =
+            surface->guest_shadow + (size_t)y * surface->layout.pitch;
+        uint32_t x;
+        if (surface->layout.bytes_per_pixel == 4) {
+            uint32_t *pixels = (uint32_t *)shadow;
+            for (x = 0; x < surface->layout.width; ++x)
+                pixels[x] = argb;
+        } else {
+            uint16_t *pixels = (uint16_t *)shadow;
+            uint16_t color = (uint16_t)(((argb >> 8) & 0xF800u) |
+                                        ((argb >> 5) & 0x07E0u) |
+                                        ((argb >> 3) & 0x001Fu));
+            for (x = 0; x < surface->layout.width; ++x)
+                pixels[x] = color;
+        }
+        if (!guarded_guest_write(
+                GUEST(surface->va) + (size_t)y * surface->layout.pitch,
+                shadow, row))
+            return 0;
+    }
+    if (!snapshot_surface_guest(surface, &identity) ||
+        memcmp(surface->guest_shadow, s_vk.surface_probe,
+               surface->guest_shadow_bytes) != 0)
+        return 0;
+    remember_surface_guest(surface, &identity);
+    surface->guest_pending_upload = 0;
+    surface->gpu_dirty = 0;
+    return 1;
+}
+
 static void vulkan_clear(const Nv2aSurface *input, const Nv2aRenderState *state,
                          uint32_t flags, uint32_t argb, uint32_t zstencil)
 {
@@ -2036,11 +2259,17 @@ static void vulkan_clear(const Nv2aSurface *input, const Nv2aRenderState *state,
     VkClearRect clear_rect;
     uint32_t attachment_count = 0;
     VkColorComponentFlags mask = 0;
+    int full_color_clear;
 
     if (!rectangle.extent.width || !rectangle.extent.height) {
         finish_commands(slot);
         return;
     }
+    full_color_clear =
+        (flags & 0xF0u) == 0xF0u &&
+        rectangle.offset.x == 0 && rectangle.offset.y == 0 &&
+        rectangle.extent.width == surface->layout.width &&
+        rectangle.extent.height == surface->layout.height;
     begin_rendering(slot->command, surface, depth);
     memset(attachments, 0, sizeof attachments);
     memset(&clear_rect, 0, sizeof clear_rect);
@@ -2096,6 +2325,17 @@ static void vulkan_clear(const Nv2aSurface *input, const Nv2aRenderState *state,
         s_vk.fn.CmdClearAttachments(slot->command, attachment_count,
                                     attachments, 1, &clear_rect);
     s_vk.fn.CmdEndRendering(slot->command);
+    if (flags & 0xF0u) {
+        if (full_color_clear) {
+            if (!mirror_full_surface_clear(surface, argb)) {
+                fprintf(stderr, "[GPU-Vulkan] cannot mirror full color clear"
+                                " for surface %08X\n", surface->va);
+                abort();
+            }
+        } else {
+            surface->gpu_dirty = 1;
+        }
+    }
     finish_commands(slot);
     s_vk.clears++;
 }
@@ -3300,6 +3540,7 @@ static void vulkan_draw(const Nv2aSurface *input, const Nv2aBatch *batch)
     s_vk.fn.CmdEndRendering(slot->command);
     finish_commands(slot);
     vulkan_perf_finish(perf_start, &s_vk.perf.command_ticks);
+    surface->gpu_dirty = 1;
     s_vk.draws++;
     vulkan_perf_finish_call(
         draw_start, &s_vk.perf.draw_ticks, &s_vk.perf.draw_calls);
@@ -3472,6 +3713,7 @@ static void vulkan_xdraw(const Nv2aSurface *input, const Nv2aXBatch *batch)
     s_vk.fn.CmdEndRendering(slot->command);
     finish_commands(slot);
     vulkan_perf_finish(perf_start, &s_vk.perf.command_ticks);
+    surface->gpu_dirty = 1;
     s_vk.draws++;
     vulkan_perf_finish_call(
         draw_start, &s_vk.perf.draw_ticks, &s_vk.perf.draw_calls);
@@ -3683,6 +3925,7 @@ static int vulkan_xdraw_vsh(const Nv2aSurface *input,
     s_vk.fn.CmdEndRendering(slot->command);
     finish_commands(slot);
     vulkan_perf_finish(perf_start, &s_vk.perf.command_ticks);
+    surface->gpu_dirty = 1;
     s_vk.draws++;
     vulkan_perf_finish_call(
         draw_start, &s_vk.perf.draw_ticks, &s_vk.perf.draw_calls);
@@ -3979,10 +4222,23 @@ static int vulkan_readback(uint32_t color_va)
     uint16_t *converted = NULL;
     uint32_t y;
     uint64_t perf_start;
+    GuestSpanIdentity identity;
+    int sync_result;
 
     if (!surface)
         return 0;
     perf_start = vulkan_perf_begin();
+    sync_result = sync_surface_guest(surface, NULL, 1, 0);
+    if (!sync_result)
+        return 0;
+    if (!surface->gpu_dirty) {
+        flush_recording();
+        wait_for_submission(s_vk.last_submission_serial);
+        vulkan_perf_finish_call(
+            perf_start, &s_vk.perf.readback_ticks,
+            &s_vk.perf.readback_calls);
+        return 1;
+    }
     row = (size_t)surface->layout.width * sizeof(uint32_t);
     guest_row = (size_t)surface->layout.width * surface->layout.bytes_per_pixel;
     if (surface->layout.height > SIZE_MAX / row)
@@ -4047,6 +4303,11 @@ static int vulkan_readback(uint32_t color_va)
         }
     }
     free(converted);
+    if (!snapshot_surface_guest(surface, &identity))
+        return 0;
+    remember_surface_guest(surface, &identity);
+    surface->guest_pending_upload = 0;
+    surface->gpu_dirty = 0;
     s_vk.readbacks++;
     if (perf_start)
         s_vk.perf.readback_bytes += surface->layout.span_bytes;
@@ -4139,7 +4400,9 @@ static void vulkan_flip(void)
         interval_ms = now - s_vk.diagnostic_last_ms;
         interval_flips = s_vk.flips - s_vk.diagnostic_last_flip;
         fprintf(stderr, "[GPU-Vulkan] %llu flips, %llu draws, %llu clears,"
-                        " %llu readbacks, %u surfaces, %u pipelines, %u textures,"
+                        " %llu readbacks, %llu guest uploads,"
+                        " %llu guest preserves, %llu guest conflicts,"
+                        " %u surfaces, %u pipelines, %u textures,"
                         " %llu cache hits, %llu lookup probes, %llu uploads,"
                         " %llu mip uploads,"
                         " %llu visibility queries, %llu visibility reads,"
@@ -4152,6 +4415,9 @@ static void vulkan_flip(void)
                 (unsigned long long)s_vk.draws,
                 (unsigned long long)s_vk.clears,
                 (unsigned long long)s_vk.readbacks,
+                (unsigned long long)s_vk.guest_surface_uploads,
+                (unsigned long long)s_vk.guest_surface_preserves,
+                (unsigned long long)s_vk.guest_surface_conflicts,
                 s_vk.surface_count, s_vk.pipeline_count, s_vk.texture_count,
                 (unsigned long long)s_vk.texture_hits,
                 (unsigned long long)s_vk.texture_lookup_probes,
@@ -4230,8 +4496,10 @@ static void destroy_state(void)
                 s_vk.device, s_vk.vsh_verify_pipeline, NULL);
         for (i = 0; i < s_vk.surface_count; ++i)
             destroy_image(&s_vk.surfaces[i].sample_copy);
-        for (i = 0; i < s_vk.surface_count; ++i)
+        for (i = 0; i < s_vk.surface_count; ++i) {
             destroy_image(&s_vk.surfaces[i].image);
+            free(s_vk.surfaces[i].guest_shadow);
+        }
         for (i = 0; i < s_vk.depth_count; ++i)
             destroy_image(&s_vk.depths[i].image);
         if (s_vk.white_sampler)
@@ -4263,6 +4531,8 @@ static void destroy_state(void)
         if (s_vk.fn.DestroyDevice)
             s_vk.fn.DestroyDevice(s_vk.device, NULL);
     }
+    free(s_vk.surface_probe);
+    free(s_vk.surface_decode);
     free(s_vk.texture_probe);
     free(s_vk.vsh_verify.data);
     free(s_vk.texture_decode);

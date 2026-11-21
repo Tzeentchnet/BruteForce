@@ -2275,8 +2275,17 @@ own GPU back end, an extended interface for it, and its own pacing fixes.
     existing optional `draw_vsh` contract was sufficient for a Vulkan static
     interpreter over gathered float inputs: post-change profiling removes the
     interpreter from the NV2A hot list and lowers NV2A busy time from 84.55%
-    to 45.34%. Direct raw-stream fetch, wider matched parity and host-native
-    presentation remain unproved.
+    to 45.34%. A separate manual-route failure exposed a generic ownership
+    gap: a stale tracked Vulkan clear overwrote later CPU/PVIDEO movie writes
+    during mandatory readback. The downstream backend now preserves clean
+    guest changes, uploads them before later GPU work, and reports dirty
+    conflicts. One retained 512x512 surface at `0x80000000` still conflicts
+    while its full 1 MiB guest range is progressively rewritten. Earlier
+    guard evidence places staged pushbuffer accesses in the same range, and
+    the executor documents but does not implement
+    `NV097_SET_CONTEXT_DMA_COLOR` base resolution. Direct raw-stream fetch,
+    resolved color-DMA/lifetime ownership, wider matched parity and
+    host-native presentation remain unproved.
     *Change:* develop Vulkan downstream as the conformance exemplar while
     shaping every generic dependency for upstream independently:
     version/capabilities, durable failure, texture stages and combiners,
@@ -2301,6 +2310,11 @@ own GPU back end, an extended interface for it, and its own pacing fixes.
     not new framework callbacks. Preserve them as a future optional-backend
     candidate; propose a framework abstraction only if another backend proves
     the same ownership boundary.
+    Treat color-DMA resolution and guest-write notification as generic
+    framework prerequisites rather than encoding Brute Force addresses in the
+    Vulkan backend. The current GPU-wins dirty-conflict rule is deliberately
+    conservative; do not turn staged-ring overlap into a general guest-wins
+    policy without live object and surface lifetimes.
     *Tests:* #319 remains the callback-contract authority. Project fixtures
     now cover explicit no-fallback selection, fake Vulkan-to-D3D12 startup
     fallback, invalid-configuration stop, both-candidates-fail behavior,
@@ -2331,6 +2345,14 @@ own GPU back end, an extended interface for it, and its own pacing fixes.
     accepted gathered batches. One unreviewed route improved from earlier
     8.960-11.240 gameplay intervals to 26.391 stationary and 38.862 movement
     flips/s; these are not distinct world frames or A/B/A evidence.
+    The ownership fixture additionally covers clean CPU-written tracked
+    surfaces, upload before a later partial clear, and reported GPU-wins
+    behavior for a dirty guest/GPU conflict. A guest-coherent full clear still
+    submits and waits before readback returns. Validation-enabled NVIDIA and
+    AMD runs pass. One same-build movement capture per renderer has complete
+    contact-sheet and strict-manifest review with zero unknown frames, but
+    remains guest-surface correctness evidence because continuous capture
+    perturbs timing and does not prove physical presentation.
     Add independent
     semantic fixtures for each optional state extension. A fake
     presentation-source/host pair must cover callback threads, image and
@@ -2339,7 +2361,7 @@ own GPU back end, an extended interface for it, and its own pacing fixes.
     Vulkan backend ultimately needs game-data-free clear, state, texture,
     shader, visibility, readback and presentation tests across software and
     hardware devices where available.
-    *Overlap:* refreshed read-only on 2026-11-20 across all 500 available
+    *Overlap:* refreshed read-only on 2026-11-21 across all 500 available
     upstream pull-request records, tracking index
     [#184](https://github.com/sp00nznet/xboxrecomp/pull/184), #306, merged
     #319 and open host-hook discussion
@@ -2350,7 +2372,10 @@ own GPU back end, an extended interface for it, and its own pacing fixes.
     direction but has no maintainer response. Merged #285 supplies the
     pre-snapshot synchronization callback; extend it rather than create a
     competing readback boundary. No official Vulkan or D3D12 backend PR was
-    found, and no upstream interaction was performed.
+    found. No PR or listed issue implements color-DMA surface-base resolution
+    or live color-surface ownership. One #184 comment mentions report and
+    semaphore DMA bases for another title; it is adjacent evidence, not a
+    color-surface implementation. No upstream interaction was performed.
     *Before filing:* implement and validate the downstream Vulkan exemplar,
     split only proven generic pieces into small synthetic-test candidates,
     refresh overlap, and request explicit approval before every upstream
@@ -2365,8 +2390,11 @@ own GPU back end, an extended interface for it, and its own pacing fixes.
     gathered GPU-VSH semantics are proven locally for the covered fixtures
     and sampled retail batches. One wrong-route
     retail probe confirms a supplied six-level BC chain reaches Vulkan but is
-    not parity evidence. Direct raw-stream vertex fetch, wider matched parity,
-    native presentation and the upstream contribution series remain pending. The
+    not parity evidence. The formerly black manual movie/menu route now
+    reaches visible Basic Controls, and one movement pair has complete
+    guest-surface review. Direct raw-stream vertex fetch, generic
+    color-DMA/lifetime resolution, wider matched parity, native presentation
+    and the upstream contribution series remain pending. The
     first contract fixture is merged as #319. The neutral
     layout/snapshot/filter/default-combiner helpers have not been proposed
     upstream. No Vulkan backend PR exists, and no upstream interaction was

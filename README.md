@@ -31,7 +31,12 @@ This is an experimental Windows release for the North American retail game:
   Review places those sparse pixels in animated world content visible around
   the tutorial panel; three opaque panel regions have no pixels over 8/255.
   NVIDIA and AMD fixtures cover the interpreter, whole-triangle non-finite
-  rejection, and verification readback. One unreviewed legacy-route diagnostic
+  rejection, verification readback, CPU/PVIDEO surface preservation and
+  dirty-conflict handling. The formerly black manual opening now reaches
+  visible Basic Controls. Complete guest-surface review of one matched
+  movement pair shows the same tutorial scene and scripted camera route with
+  zero unknown frames; continuous capture prevents treating its rates as a
+  performance comparison. One unreviewed legacy-route diagnostic
   reported 26.391 stationary and 38.862 movement flips/s, up from the earlier
   roughly 9-11 gameplay flips/s, but this is not distinct-world-frame or A/B/A
   evidence. Native Vulkan presentation, direct raw-stream fetch, broader scene

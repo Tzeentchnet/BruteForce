@@ -453,6 +453,16 @@ the opaque tutorial panel. Three opaque panel regions have zero pixels over
 threshold discrepancy for one stationary UI state, not exact numeric,
 movement, movie, fade or wider-scene parity.
 
+Tracked Vulkan color surfaces retain a guest shadow and allocation identity.
+If CPU code or PVIDEO changes a clean surface, readback preserves those bytes
+and the next partial clear or draw uploads them first. This keeps opening
+movie/menu output visible instead of replacing it with an earlier black GPU
+clear. A guest change while GPU work is dirty is a reported conflict; the
+completed GPU frame wins. Periodic diagnostics include guest uploads,
+preserves and conflicts. A conflict is not permission to disable readback:
+the retail `0x80000000` range also overlaps staged pushbuffer traffic, and the
+executor does not yet resolve the programmed color-DMA object base.
+
 The Vulkan GPU-VSH path uses one statically compiled interpreter rather than
 runtime per-program compilation. The framework supplies exactly the float
 inputs each program reads, and programs that write constants retain the CPU
@@ -822,6 +832,14 @@ recorded after the synchronous dump, and continuous capture affects timing.
 Legacy numbered dumps do not carry flip IDs. Review the scene, HUD exclusions,
 alignment and presented-image source using the manifest documented in
 `tools\bench_world.py`; unlabeled changes are not world-frame FPS.
+The reviewed D3D11/Vulkan movement pair demonstrates the intended workflow:
+contact sheets covered every consecutive capture, the HUD-free
+`[160,120,480,180]` ROI was validated, timestamps were copied from
+`frames.csv`, and `--analyze-world` accepted zero unknown frames. The
+manifest still states that its source is guest-surface output, not compositor
+or physical-display capture. Do not compare the resulting rates as
+performance; continuous BMP capture changes timing and can delay controller
+dispatch.
 The fixed movement script moves the character only before measurement, presses
 Y to skip the HUD tutorial-choice panel, then starts the measured window after
 that choice has settled. The measured 40-second segment alternates camera

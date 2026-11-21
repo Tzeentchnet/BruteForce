@@ -53,7 +53,10 @@ visibility through mandatory guest readback and the existing CPU presenter.
 Eligible untransformed vertex-program batches also run in a static SPIR-V
 interpreter from gathered float inputs, with a compute readback verifier.
 The default-off mip switch also exposes supplied 2D/cube chains. Its captured
-Basic Controls frame is near the matched D3D11 output, but it is not the
+Basic Controls frame is near the matched D3D11 output, and reviewed movement
+guest-surface captures now retain the same tutorial scene and camera route.
+CPU/PVIDEO writes made before GPU ownership are preserved, so the manual
+opening route reaches visible movies and menus. Vulkan is still not the
 default or a native-presentation path, and broader parity/stability gates
 remain open. D3D12 and production `auto` selection remain unimplemented, and
 D3D11 remains the launcher and graphical `build.py` default until the
@@ -346,6 +349,36 @@ GPU-owned depth-alias implementation. These paths have synthetic full-alias,
 self-alias, subregion, cube-face and packed-depth-fallback coverage. Mipmaps
 remain level-zero-only for aliases; ordinary swizzled, P8 and BC textures can
 expose supplied levels under `RECOMP_GPU_MIPS=1`.
+
+### Vulkan guest-surface ownership
+
+Vulkan tracks a guest-memory shadow, allocation identity and GPU-dirty state
+for each color surface. Initial creation snapshots guest pixels and uploads
+them. A full color clear mirrors its logical value into guest memory and
+leaves both copies coherent. A partial clear or draw marks the GPU copy dirty.
+If guest bytes change while the GPU copy is clean, the guest copy is
+authoritative: readback preserves it, and the next GPU use uploads it before
+recording the partial clear or draw. This retains CPU/PVIDEO and linked Bink
+output instead of overwriting it with an earlier Vulkan clear.
+
+If guest bytes change while the GPU copy is dirty, neither side can be merged
+safely. The backend reports the surface, flip, changed-byte span and layout,
+then preserves and reads back the completed GPU frame. It does not upload the
+conflicting guest bytes or pretend that work completed on both owners.
+Successful readback refreshes the shadow and clears the dirty state. The
+hardware fixture covers clean guest preservation, upload before a partial
+clear, GPU-wins conflict behavior, and the required submission wait when a
+mirrored full clear makes the guest pixels already coherent.
+
+This policy is conservative, not a complete arbitrary-access protocol. In
+retail gameplay a retained 512x512 surface at `0x80000000` conflicts while
+the active 640x480 output is at `0x802B0000`; changed bytes advance through
+the entire 1 MiB range. Prior guard evidence places staged pushbuffer accesses
+in that same range, and the executor still ignores the base named by
+`NV097_SET_CONTEXT_DMA_COLOR`. Staged ring reuse is the supported explanation,
+but the exact writer was not intercepted. Do not convert that pattern into a
+guest-wins rule or skip readback. Generic DMA-object resolution plus live
+surface lifetime tracking is the framework-level prerequisite.
 
 ### Extended combiners, GPU vertex programs, and visibility
 
@@ -1048,6 +1081,15 @@ statistics. A tracked surface that cannot be made guest-visible now stops
 with a fatal diagnostic rather than completing a success-shaped flip.
 Failure or cache exhaustion for a required depth-stencil, blend or sampler
 state also stops before the draw instead of substituting D3D defaults.
+
+Vulkan performs the same mandatory guest-visible handoff but first reconciles
+its per-surface shadow. Clean guest changes are retained and uploaded before
+later GPU work; dirty guest/GPU conflicts are reported and the completed GPU
+frame wins. Full clears mirror their logical pixels into guest memory so an
+early clear cannot later erase CPU/PVIDEO movie output merely because a
+tracked image exists. This fixes the observed black manual opening route but
+does not prove OS-compositor presentation or solve the executor's ignored
+color-DMA object base.
 
 The default-off `RECOMP_GPU_SKIP_CLEAN_READBACK=1` elides that copy only for
 an unscaled, native-sized 32-bit surface whose guest bytes are already known

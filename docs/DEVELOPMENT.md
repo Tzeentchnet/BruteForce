@@ -63,6 +63,9 @@ output, a two-stage register combiner, the default
 texture-zero-times-diffuse combiner, cube-face selection, the explicit
 non-aliased packed-depth fallback, exact texture reuse and source/palette
 rewrites, depth/RGB565 readback, compatible full/self/subregion color aliases,
+clean CPU-written tracked-surface preservation, upload before a later partial
+clear, reported GPU-wins handling for a dirty guest/GPU conflict, and the
+submission wait retained by a guest-coherent full clear,
 precise visibility on base and extended draws including AA normalization,
 invalid mip-option rejection, level-zero render-target mip fallback, forced
 2D lower-level selection and rewrite invalidation, positive-X cube lower-level

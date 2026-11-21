@@ -789,6 +789,22 @@ static void pump_window_messages(void)
     }
 }
 
+static int check_presented_output(uint32_t expected)
+{
+    const uint32_t *pixels;
+    uint32_t width;
+    uint32_t height;
+    CHECK(bruteforce_vulkan_present_test_output(
+              &pixels, &width, &height),
+          "read the composed Vulkan swap-chain output");
+    CHECK(pixels[(size_t)(height / 2) * width + width / 2] == expected,
+          "preserve the source color at the fitted output center");
+    CHECK(pixels[0] == 0xFF000000 &&
+          pixels[(size_t)(height - 1) * width + width - 1] == 0xFF000000,
+          "clear the fitted output bars to opaque black");
+    return 1;
+}
+
 static int run_presentation_test(void)
 {
     static const char class_name[] = "BruteForceVulkanPresentFixture";
@@ -863,6 +879,8 @@ static int run_presentation_test(void)
     CHECK(recomp_present_provider_present(
               pixels, 4, 4, 1, frame_id) == 1,
           "present an exact-frame native Vulkan source");
+    CHECK(check_presented_output(0xFF336699),
+          "verify the composed native Vulkan output");
     bruteforce_vulkan_present_test_stats(
         &native_frames, &cpu_frames, &cpu_forced_frames, &cpu_missing_frames,
         &dropped_sources, &coalesced_sources, &forced_sources, &stale_sources,
@@ -892,6 +910,8 @@ static int run_presentation_test(void)
     CHECK(recomp_present_provider_present(
               pixels, 4, 4, 0, frame_id) == 1,
           "force CPU presentation while discarding a queued native source");
+    CHECK(check_presented_output(0xFF112233),
+          "verify the composed forced-CPU Vulkan output");
     bruteforce_vulkan_present_test_stats(
         &native_frames, &cpu_frames, &cpu_forced_frames, &cpu_missing_frames,
         &dropped_sources, &coalesced_sources, &forced_sources, &stale_sources,
@@ -915,6 +935,8 @@ static int run_presentation_test(void)
     CHECK(recomp_present_provider_present(
               pixels, 4, 4, 1, frame_id) == 1,
           "use CPU fallback when no current native source is eligible");
+    CHECK(check_presented_output(0xFF445566),
+          "verify the composed source-allowed CPU output");
     bruteforce_vulkan_present_test_stats(
         &native_frames, &cpu_frames, &cpu_forced_frames, &cpu_missing_frames,
         &dropped_sources, &coalesced_sources, &forced_sources, &stale_sources,
@@ -951,6 +973,8 @@ static int run_presentation_test(void)
     CHECK(recomp_present_provider_present(
               pixels, 4, 4, 1, frame_id) == 1,
           "recreate and present after entering borderless fullscreen");
+    CHECK(check_presented_output(0xFF445566),
+          "verify the composed fullscreen Vulkan output");
     bruteforce_vulkan_present_test_stats(
         &native_frames, &cpu_frames, &cpu_forced_frames, &cpu_missing_frames,
         &dropped_sources, &coalesced_sources, &forced_sources, &stale_sources,

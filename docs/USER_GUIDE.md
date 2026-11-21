@@ -476,7 +476,8 @@ three-slot ownership queue while retaining that readback. Non-aliased
 unsupported-format behavior. Validation-enabled rendering and native-presentation fixtures pass on NVIDIA
 and AMD. The native fixture covers exact frame identity, bounded READY-image
 coalescing, forced CPU fallback, resize, borderless-fullscreen enter/restore,
-fatal surface loss, and explicit provider shutdown. This
+fatal surface loss, final composed-image center/bar pixels, and explicit
+provider shutdown. This
 fixture evidence is synthetic and not a performance result. One operator-
 confirmed validation-enabled retail run reached visible Basic Controls
 through a 640x480 FIFO swap chain. Opening movies were not observed in that

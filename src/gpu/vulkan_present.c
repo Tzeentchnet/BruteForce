@@ -69,6 +69,7 @@ typedef struct VulkanPresentFunctions {
     PFN_vkCmdClearColorImage CmdClearColorImage;
     PFN_vkCmdBlitImage CmdBlitImage;
     PFN_vkCmdCopyImage CmdCopyImage;
+    PFN_vkCmdCopyImageToBuffer CmdCopyImageToBuffer;
     PFN_vkCmdCopyBufferToImage CmdCopyBufferToImage;
 } VulkanPresentFunctions;
 
@@ -115,6 +116,11 @@ typedef struct VulkanPresentState {
     VkFence fence;
     VulkanPresentBuffer cpu_upload;
     VulkanPresentImage cpu_image;
+#ifdef BRUTEFORCE_VULKAN_TESTING
+    VulkanPresentBuffer test_output;
+    uint32_t test_output_width;
+    uint32_t test_output_height;
+#endif
     BruteforceVulkanPresentSource sources[VULKAN_PRESENT_SOURCE_COUNT];
     uint32_t logical_width;
     uint32_t logical_height;
@@ -293,8 +299,8 @@ static void destroy_buffer(VulkanPresentBuffer *buffer)
     memset(buffer, 0, sizeof *buffer);
 }
 
-static int create_upload_buffer(VkDeviceSize size,
-                                VulkanPresentBuffer *buffer)
+static int create_host_buffer(VkDeviceSize size, VkBufferUsageFlags usage,
+                              VulkanPresentBuffer *buffer)
 {
     VkBufferCreateInfo info = { VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO };
     VkMemoryRequirements requirements;
@@ -306,12 +312,12 @@ static int create_upload_buffer(VkDeviceSize size,
 
     memset(buffer, 0, sizeof *buffer);
     info.size = size;
-    info.usage = VK_BUFFER_USAGE_TRANSFER_SRC_BIT;
+    info.usage = usage;
     info.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
     result = s_present.fn.CreateBuffer(
         s_present.device.device, &info, NULL, &buffer->buffer);
     if (result != VK_SUCCESS) {
-        present_error("creating the CPU presentation upload buffer", result);
+        present_error("creating a host-visible presentation buffer", result);
         return 0;
     }
     s_present.fn.GetBufferMemoryRequirements(
@@ -320,7 +326,7 @@ static int create_upload_buffer(VkDeviceSize size,
                      VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT |
                      VK_MEMORY_PROPERTY_HOST_COHERENT_BIT, &type)) {
         fprintf(stderr, "[GPU-Vulkan-WSI] no coherent host-visible memory"
-                        " for CPU presentation fallback\n");
+                        " for a presentation buffer\n");
         destroy_buffer(buffer);
         return 0;
     }
@@ -329,21 +335,21 @@ static int create_upload_buffer(VkDeviceSize size,
     result = s_present.fn.AllocateMemory(
         s_present.device.device, &allocation, NULL, &buffer->memory);
     if (result != VK_SUCCESS) {
-        present_error("allocating the CPU presentation upload buffer", result);
+        present_error("allocating a host-visible presentation buffer", result);
         destroy_buffer(buffer);
         return 0;
     }
     result = s_present.fn.BindBufferMemory(
         s_present.device.device, buffer->buffer, buffer->memory, 0);
     if (result != VK_SUCCESS) {
-        present_error("binding the CPU presentation upload buffer", result);
+        present_error("binding a host-visible presentation buffer", result);
         destroy_buffer(buffer);
         return 0;
     }
     result = s_present.fn.MapMemory(
         s_present.device.device, buffer->memory, 0, size, 0, &buffer->mapped);
     if (result != VK_SUCCESS) {
-        present_error("mapping the CPU presentation upload buffer", result);
+        present_error("mapping a host-visible presentation buffer", result);
         destroy_buffer(buffer);
         return 0;
     }
@@ -463,6 +469,7 @@ static int load_functions(void)
     LOAD_DEVICE(CmdClearColorImage, CmdClearColorImage);
     LOAD_DEVICE(CmdBlitImage, CmdBlitImage);
     LOAD_DEVICE(CmdCopyImage, CmdCopyImage);
+    LOAD_DEVICE(CmdCopyImageToBuffer, CmdCopyImageToBuffer);
     LOAD_DEVICE(CmdCopyBufferToImage, CmdCopyBufferToImage);
 #undef LOAD_DEVICE
 #undef LOAD_INSTANCE
@@ -622,6 +629,13 @@ static int recreate_swapchain(void)
                         " transfer destinations\n");
         return -1;
     }
+#ifdef BRUTEFORCE_VULKAN_TESTING
+    if (!(capabilities.supportedUsageFlags & VK_IMAGE_USAGE_TRANSFER_SRC_BIT)) {
+        fprintf(stderr, "[GPU-Vulkan-WSI] swap-chain images do not support"
+                        " fixture readback\n");
+        return -1;
+    }
+#endif
     if (!choose_surface_format(&format) ||
         !choose_present_mode(&present_mode))
         return -1;
@@ -666,6 +680,9 @@ static int recreate_swapchain(void)
     info.imageExtent = requested;
     info.imageArrayLayers = 1;
     info.imageUsage = VK_IMAGE_USAGE_TRANSFER_DST_BIT;
+#ifdef BRUTEFORCE_VULKAN_TESTING
+    info.imageUsage |= VK_IMAGE_USAGE_TRANSFER_SRC_BIT;
+#endif
     info.imageSharingMode = VK_SHARING_MODE_EXCLUSIVE;
     info.preTransform = capabilities.currentTransform;
     info.compositeAlpha = composite;
@@ -774,9 +791,34 @@ static int ensure_cpu_source(uint32_t width, uint32_t height)
     destroy_image(&s_present.cpu_image);
     destroy_buffer(&s_present.cpu_upload);
     bytes = (VkDeviceSize)bytes64;
-    return create_upload_buffer(bytes, &s_present.cpu_upload) &&
+    return create_host_buffer(
+               bytes, VK_BUFFER_USAGE_TRANSFER_SRC_BIT,
+               &s_present.cpu_upload) &&
            create_image(width, height, &s_present.cpu_image);
 }
+
+#ifdef BRUTEFORCE_VULKAN_TESTING
+static int ensure_test_output(uint32_t width, uint32_t height)
+{
+    uint64_t bytes64 = (uint64_t)width * height * sizeof(uint32_t);
+    if (!width || !height || bytes64 > SIZE_MAX)
+        return 0;
+    if (s_present.test_output.buffer &&
+        s_present.test_output.size >= bytes64) {
+        s_present.test_output_width = width;
+        s_present.test_output_height = height;
+        return 1;
+    }
+    destroy_buffer(&s_present.test_output);
+    if (!create_host_buffer(
+            (VkDeviceSize)bytes64, VK_BUFFER_USAGE_TRANSFER_DST_BIT,
+            &s_present.test_output))
+        return 0;
+    s_present.test_output_width = width;
+    s_present.test_output_height = height;
+    return 1;
+}
+#endif
 
 static void destroy_sources(void)
 {
@@ -992,6 +1034,11 @@ static void destroy_provider_resources(void)
     destroy_sources();
     destroy_image(&s_present.cpu_image);
     destroy_buffer(&s_present.cpu_upload);
+#ifdef BRUTEFORCE_VULKAN_TESTING
+    destroy_buffer(&s_present.test_output);
+    s_present.test_output_width = 0;
+    s_present.test_output_height = 0;
+#endif
     destroy_swapchain();
     if (s_present.fence)
         s_present.fn.DestroyFence(
@@ -1196,6 +1243,12 @@ static int provider_present(void *context, const uint32_t *pixels,
     VkSubmitInfo submit = { VK_STRUCTURE_TYPE_SUBMIT_INFO };
     VkPresentInfoKHR present = { VK_STRUCTURE_TYPE_PRESENT_INFO_KHR };
     VkPipelineStageFlags wait_stage = VK_PIPELINE_STAGE_TRANSFER_BIT;
+#ifdef BRUTEFORCE_VULKAN_TESTING
+    VkBufferImageCopy output_copy;
+    VkBufferMemoryBarrier output_barrier = {
+        VK_STRUCTURE_TYPE_BUFFER_MEMORY_BARRIER
+    };
+#endif
     VkImage source_image;
     uint32_t source_width;
     uint32_t source_height;
@@ -1226,6 +1279,13 @@ static int provider_present(void *context, const uint32_t *pixels,
             return swapchain_result;
         }
     }
+#ifdef BRUTEFORCE_VULKAN_TESTING
+    if (!ensure_test_output(
+            s_present.extent.width, s_present.extent.height)) {
+        release_source(source);
+        return -1;
+    }
+#endif
     acquire_result = present_test_failure("acquire-surface-lost")
         ? VK_ERROR_SURFACE_LOST_KHR
         : s_present.fn.AcquireNextImageKHR(
@@ -1290,6 +1350,44 @@ static int provider_present(void *context, const uint32_t *pixels,
         VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, &black, 1, &range);
     fitted_blit(s_present.command, source_image, source_width,
                 source_height, s_present.swap_images[image_index]);
+#ifdef BRUTEFORCE_VULKAN_TESTING
+    image_barrier(
+        s_present.command, s_present.swap_images[image_index],
+        VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+        VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+        VK_PIPELINE_STAGE_TRANSFER_BIT,
+        VK_PIPELINE_STAGE_TRANSFER_BIT,
+        VK_ACCESS_TRANSFER_WRITE_BIT,
+        VK_ACCESS_TRANSFER_READ_BIT);
+    memset(&output_copy, 0, sizeof output_copy);
+    output_copy.imageSubresource.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+    output_copy.imageSubresource.layerCount = 1;
+    output_copy.imageExtent.width = s_present.extent.width;
+    output_copy.imageExtent.height = s_present.extent.height;
+    output_copy.imageExtent.depth = 1;
+    s_present.fn.CmdCopyImageToBuffer(
+        s_present.command, s_present.swap_images[image_index],
+        VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+        s_present.test_output.buffer, 1, &output_copy);
+    output_barrier.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+    output_barrier.dstAccessMask = VK_ACCESS_HOST_READ_BIT;
+    output_barrier.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+    output_barrier.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+    output_barrier.buffer = s_present.test_output.buffer;
+    output_barrier.size = VK_WHOLE_SIZE;
+    s_present.fn.CmdPipelineBarrier(
+        s_present.command,
+        VK_PIPELINE_STAGE_TRANSFER_BIT,
+        VK_PIPELINE_STAGE_HOST_BIT, 0,
+        0, NULL, 1, &output_barrier, 0, NULL);
+    image_barrier(
+        s_present.command, s_present.swap_images[image_index],
+        VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+        VK_IMAGE_LAYOUT_PRESENT_SRC_KHR,
+        VK_PIPELINE_STAGE_TRANSFER_BIT,
+        VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT,
+        VK_ACCESS_TRANSFER_READ_BIT, 0);
+#else
     image_barrier(
         s_present.command, s_present.swap_images[image_index],
         VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
@@ -1297,6 +1395,7 @@ static int provider_present(void *context, const uint32_t *pixels,
         VK_PIPELINE_STAGE_TRANSFER_BIT,
         VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT,
         VK_ACCESS_TRANSFER_WRITE_BIT, 0);
+#endif
     s_present.swap_layouts[image_index] = VK_IMAGE_LAYOUT_PRESENT_SRC_KHR;
     if (s_present.fn.EndCommandBuffer(s_present.command) != VK_SUCCESS ||
         s_present.fn.ResetFences(
@@ -1475,6 +1574,20 @@ int bruteforce_vulkan_present_test_parse_options(void)
 void bruteforce_vulkan_present_test_fail(const char *stage)
 {
     s_test_fail_stage = stage;
+}
+
+int bruteforce_vulkan_present_test_output(
+    const uint32_t **pixels, uint32_t *width, uint32_t *height)
+{
+    if (!pixels || !width || !height ||
+        !s_present.test_output.mapped ||
+        !s_present.test_output_width ||
+        !s_present.test_output_height)
+        return 0;
+    *pixels = s_present.test_output.mapped;
+    *width = s_present.test_output_width;
+    *height = s_present.test_output_height;
+    return 1;
 }
 
 void bruteforce_vulkan_present_test_stats(

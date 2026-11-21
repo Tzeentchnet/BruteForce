@@ -935,8 +935,12 @@ preserve guard and lifetime behavior, while Windows write-watch cannot track
 the aliased file mappings. No approximate cache or stale snapshot replaces
 that contract. The missing-movie observation is now attributed to the
 audio-off title path with matched bounded traces, not a multi-run comparison.
-The next bounded task is final-output or capture evidence. No additional
-manual route is scheduled merely to repeat the baseline.
+Test-only readback now verifies the final composed Vulkan swap-chain image
+for native, forced-CPU, source-allowed CPU and fullscreen routes, including
+the fitted opaque-black bars, on both available vendors. This is final-image
+composition evidence, not physical compositor scanout. Continue with
+synthetic renderer-state parity; no additional manual route is scheduled
+merely to repeat the baseline.
 
 The retail captures are correctness bring-up evidence only. The final
 combiner attempts ended at their 300-second watchdogs before the stationary

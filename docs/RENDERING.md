@@ -620,7 +620,10 @@ remain open.
    forced CPU fallback, aspect-fit scaling, resize and VSync on validation-
    enabled NVIDIA and AMD fixtures. The same fixtures enter and restore the
    host's borderless-fullscreen monitor bounds, recreate the swap chain, and
-   require an injected surface loss to return fatal. The integrated retail route reaches
+   require an injected surface loss to return fatal. Fixture-only swap-chain
+   readback verifies exact source color at the fitted center and opaque-black
+   outer bars for native, forced-CPU, source-allowed CPU and fullscreen
+   routes. The integrated retail route reaches
    visible Basic Controls. Bounded no-script evidence now shows that
    audio-off skips the title's movies while audio-on opens both Bink files and
    sends changing CPU-owned frames through the provider. Fold physical movie
@@ -1354,8 +1357,9 @@ replace matched gameplay or original-hardware validation.
   capture through the existing CPU presenter. Its default-off native path now
   has a real Win32 Vulkan surface and swap chain, bounded source ownership,
   fitted scaling, resize, borderless-fullscreen enter/restore, VSync, CPU
-  fallback and fatal surface loss in synthetic cross-vendor tests. One retail
-  native run reached visible Basic Controls. Two audio-off
+  fallback, fatal surface loss and final composed-image pixels in synthetic
+  cross-vendor tests. One retail native run reached visible Basic Controls.
+  Two audio-off
   observations skipped the opening movies; a bounded audio-on trace opened
   both Bink files and produced changing CPU-owned native-route frames. It
   still lacks physical movie review, a native-resolution render-surface

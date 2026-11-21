@@ -2411,9 +2411,13 @@ own GPU back end, an extended interface for it, and its own pacing fixes.
     transfers exact-frame completed images through a three-slot
     FREE/WRITING/READY/PRESENTING queue while retaining mandatory guest
     readback. Its hardware fixture covers READY coalescing, native routing,
-    forced CPU input, resize, fitted output, VSync pacing and explicit
-    provider-before-device shutdown with zero validation errors on NVIDIA
-    RTX 5070 and AMD Radeon integrated adapters. Add independent
+    forced CPU input, resize, fitted output, VSync pacing, final composed-image
+    readback and explicit provider-before-device shutdown with zero validation
+    errors on NVIDIA RTX 5070 and AMD Radeon integrated adapters. The test-only
+    readback checks exact center colours for native, forced-CPU,
+    source-allowed CPU and fullscreen routes plus opaque-black fitted bars; it
+    proves the composed Vulkan image rather than physical compositor scanout.
+    Add independent
     semantic fixtures for each optional state extension. The provider fixture
     covers callback threads, frame identity, CPU-required routing and
     shutdown; the real downstream Vulkan pair covers image lifetime, resize,
@@ -2441,12 +2445,13 @@ own GPU back end, an extended interface for it, and its own pacing fixes.
     or live color-surface ownership. One #184 comment mentions report and
     semaphore DMA bases for another title; it is adjacent evidence, not a
     color-surface implementation. No upstream interaction was performed.
-    *Before filing:* validate the downstream provider's final-output,
-    PVIDEO/capture and real device-loss cases. The cross-vendor fixture covers
-    the host borderless-fullscreen transition and fail-stop surface loss. One
-    integrated native retail route reaches visible Basic Controls, and
-    matched bounded traces attribute movie skipping to the audio-off title
-    path, but those remaining cases are not complete.
+    *Before filing:* validate the downstream provider's PVIDEO/capture,
+    physical-scanout and real device-loss cases. The cross-vendor fixture
+    covers final composed-image readback, the host borderless-fullscreen
+    transition and fail-stop surface loss. One integrated native retail route
+    reaches visible Basic Controls, and matched bounded traces attribute movie
+    skipping to the audio-off title path, but those remaining cases are not
+    complete.
     Validate the generic provider seam with another downstream consumer or
     otherwise narrow its proven scope; refresh overlap; and request explicit
     approval before every
@@ -2472,7 +2477,9 @@ own GPU back end, an extended interface for it, and its own pacing fixes.
     CPU-fallback, pacing, capture and shutdown seam is implemented and
     synthetic-tested. Its downstream Vulkan surface, swap chain and bounded
     completed-image consumer are validation-clean on both available vendors,
-    including borderless-fullscreen enter/restore and fail-stop surface loss.
+    including exact test-only final-image checks, borderless-fullscreen
+    enter/restore and fail-stop surface loss. Physical compositor scanout is
+    not claimed.
     Direct raw-stream vertex fetch, generic color-DMA/lifetime resolution,
     wider matched parity, complete retail native presentation and the upstream
     contribution series remain pending. The

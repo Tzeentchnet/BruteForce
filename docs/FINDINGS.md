@@ -626,8 +626,13 @@ another source and forces CPU presentation, resizes from 320x240 to 480x320,
 checks fitted output growth and swap-chain recreation, performs the host's
 borderless-fullscreen style/monitor transition and restores the window, then
 injects `VK_ERROR_SURFACE_LOST_KHR` at acquisition and requires a fatal
-provider result before explicit shutdown. `RECOMP_VULKAN_VALIDATION=1`
-passes with zero reported validation errors on:
+provider result before explicit shutdown. A fixture-only transfer-source
+usage and host-visible readback verify the composed swap-chain image after
+native, forced-CPU, source-allowed CPU and fullscreen presentations: the
+fitted center retains the exact source color and both sampled outer corners
+are opaque black. This checks the final Vulkan image, not physical compositor
+scanout. `RECOMP_VULKAN_VALIDATION=1` passes with zero reported validation
+errors on:
 
 - NVIDIA GeForce RTX 5070, Vulkan API 1.4.357, driver `0x9B460000`.
 - AMD Radeon(TM) Graphics, Vulkan API 1.4.315, driver `0x00800161`.

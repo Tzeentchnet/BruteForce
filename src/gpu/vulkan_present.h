@@ -51,6 +51,8 @@ void bruteforce_vulkan_present_queue_unlock(void);
 #ifdef BRUTEFORCE_VULKAN_TESTING
 int bruteforce_vulkan_present_test_parse_options(void);
 void bruteforce_vulkan_present_test_fail(const char *stage);
+int bruteforce_vulkan_present_test_output(
+    const uint32_t **pixels, uint32_t *width, uint32_t *height);
 void bruteforce_vulkan_present_test_stats(
     uint64_t *native_frames, uint64_t *cpu_frames,
     uint64_t *cpu_forced_frames, uint64_t *cpu_missing_frames,

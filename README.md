@@ -45,7 +45,8 @@ This is an experimental Windows release for the North American retail game:
   matched within 78 ms, but the frames remain unreviewed and one pair is not
   A/B/A or distinct-world-frame evidence. The native path is validation-clean
   in its NVIDIA and AMD hardware fixture, including borderless-fullscreen
-  enter/restore and fail-stop surface loss. One operator-confirmed retail
+  enter/restore, fail-stop surface loss, and exact composed-image checks for
+  native and CPU routes. One operator-confirmed retail
   run reached visible Basic Controls through a 640x480 FIFO swap chain with
   validation enabled. Both movie observations had disabled audio; a bounded
   no-script audio-on trace subsequently opened both Bink logo files and kept

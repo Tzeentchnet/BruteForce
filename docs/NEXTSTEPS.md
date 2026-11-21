@@ -1351,8 +1351,11 @@ for live backend switching is outside this workstream.
    physical movie review into a later required run. The cross-vendor fixture
    now enters and restores the exact host borderless-fullscreen bounds,
    recreates the swap chain, and requires injected surface loss to return
-   fatal. Next add bounded final-output/capture evidence; physical fullscreen
-   review and real device loss remain open. Do not
+   fatal. Test-only readback now verifies the final composed swap-chain image
+   for native, forced-CPU, source-allowed CPU and fullscreen routes, including
+   exact center colours and opaque-black fitted bars, on both vendors. This
+   proves Vulkan image composition, not physical compositor scanout.
+   Physical fullscreen review and real device loss remain open. Do not
    start the deferred M5 comparison campaign. Coordinate any upstream
    proposal with the unanswered
    presentation part of
@@ -1410,8 +1413,10 @@ for live backend switching is outside this workstream.
    gate, and a native retail route reaches visible Basic Controls. The
    audio-on/off no-script trace resolves the missing-movie observation without
    another manual run. Synthetic borderless-fullscreen enter/restore and
-   fail-stop surface loss now pass on both vendors. Add bounded final-output
-   or capture evidence next; reserve a multi-run A/B/A campaign for M5,
+   fail-stop surface loss now pass on both vendors. Test-only final
+   swap-chain-image readback now proves native, both CPU and fullscreen
+   compositions on both vendors without claiming physical scanout. Close the
+   remaining automatable renderer-state gaps next; reserve a multi-run A/B/A campaign for M5,
    and only when its acceptance evidence is actionable.
    Continue covering menus,
    movies, fades, PVIDEO and CPU fallback without weakening synchronization.
@@ -1527,7 +1532,10 @@ Still open: access to a native 4K display. Optional 5.1 output is deferred.
    integrated native retail run reached visible Basic Controls, and the
    bounded route trace attributes movie skipping to audio-off title behavior.
    Borderless-fullscreen enter/restore and fail-stop surface loss are now
-   cross-vendor fixture-covered. Next add bounded final-output/capture evidence without
+   cross-vendor fixture-covered. Final composed swap-chain images for native,
+   forced-CPU, source-allowed CPU and fullscreen routes now pass exact
+   test-only readback checks on both vendors; physical compositor scanout
+   remains unproved. Continue synthetic renderer-state parity without
    scheduling the deferred M5 campaign. Submit no
    upstream work without approval. Implement D3D12 in F8, promote `auto` only
    after F9, and retain D3D11 and CPU as F10 requires.

@@ -52,7 +52,10 @@ void bruteforce_vulkan_present_queue_unlock(void);
 int bruteforce_vulkan_present_test_parse_options(void);
 void bruteforce_vulkan_present_test_stats(
     uint64_t *native_frames, uint64_t *cpu_frames,
-    uint64_t *dropped_sources, uint64_t *last_frame_id,
+    uint64_t *cpu_forced_frames, uint64_t *cpu_missing_frames,
+    uint64_t *dropped_sources, uint64_t *coalesced_sources,
+    uint64_t *forced_sources, uint64_t *stale_sources,
+    uint64_t *last_frame_id,
     uint64_t *swapchain_generations);
 #endif
 

@@ -806,7 +806,12 @@ static int run_presentation_test(void)
     uint64_t frame_id;
     uint64_t native_frames;
     uint64_t cpu_frames;
+    uint64_t cpu_forced_frames;
+    uint64_t cpu_missing_frames;
     uint64_t dropped_sources;
+    uint64_t coalesced_sources;
+    uint64_t forced_sources;
+    uint64_t stale_sources;
     uint64_t last_frame_id;
     uint64_t swapchain_generations;
     unsigned i;
@@ -854,9 +859,14 @@ static int run_presentation_test(void)
               pixels, 4, 4, 1, frame_id) == 1,
           "present an exact-frame native Vulkan source");
     bruteforce_vulkan_present_test_stats(
-        &native_frames, &cpu_frames, &dropped_sources, &last_frame_id,
+        &native_frames, &cpu_frames, &cpu_forced_frames, &cpu_missing_frames,
+        &dropped_sources, &coalesced_sources, &forced_sources, &stale_sources,
+        &last_frame_id,
         &swapchain_generations);
-    CHECK(native_frames == 1 && cpu_frames == 0 && dropped_sources == 1 &&
+    CHECK(native_frames == 1 && cpu_frames == 0 &&
+          cpu_forced_frames == 0 && cpu_missing_frames == 0 &&
+          dropped_sources == 1 && coalesced_sources == 1 &&
+          forced_sources == 0 && stale_sources == 0 &&
           last_frame_id == frame_id && swapchain_generations == 1,
           "record exact native routing and bounded ready-source coalescing");
     CHECK(recomp_present_provider_output_size(
@@ -878,12 +888,39 @@ static int run_presentation_test(void)
               pixels, 4, 4, 0, frame_id) == 1,
           "force CPU presentation while discarding a queued native source");
     bruteforce_vulkan_present_test_stats(
-        &native_frames, &cpu_frames, &dropped_sources, &last_frame_id,
+        &native_frames, &cpu_frames, &cpu_forced_frames, &cpu_missing_frames,
+        &dropped_sources, &coalesced_sources, &forced_sources, &stale_sources,
+        &last_frame_id,
         &swapchain_generations);
     CHECK(native_frames == 1 && cpu_frames == 1 &&
-          dropped_sources >= 1 && last_frame_id == frame_id &&
+          cpu_forced_frames == 1 && cpu_missing_frames == 0 &&
+          dropped_sources >= 2 && coalesced_sources == 1 &&
+          forced_sources >= 1 && stale_sources == 0 &&
+          last_frame_id == frame_id &&
           swapchain_generations >= 2,
           "record CPU fallback, source discard, and swap-chain recreation");
+
+    for (i = 0; i < 16; ++i)
+        pixels[i] = 0xFF445566;
+    CHECK(bruteforce_vulkan_test_flip_readback(color_va),
+          "preserve a clean CPU-written presentation frame");
+    for (i = 0; i < 16; ++i)
+        CHECK(pixels[i] == 0xFF445566,
+              "CPU-owned presentation frame remains guest-visible");
+    CHECK(recomp_present_provider_present(
+              pixels, 4, 4, 1, frame_id) == 1,
+          "use CPU fallback when no current native source is eligible");
+    bruteforce_vulkan_present_test_stats(
+        &native_frames, &cpu_frames, &cpu_forced_frames, &cpu_missing_frames,
+        &dropped_sources, &coalesced_sources, &forced_sources, &stale_sources,
+        &last_frame_id,
+        &swapchain_generations);
+    CHECK(native_frames == 1 && cpu_frames == 2 &&
+          cpu_forced_frames == 1 && cpu_missing_frames == 1 &&
+          coalesced_sources == 1 && forced_sources >= 1 &&
+          stale_sources == 0 &&
+          last_frame_id == frame_id,
+          "keep clean CPU-written frames off the stale native source route");
     CHECK(bruteforce_vulkan_test_validation_errors() == 0,
           "Vulkan presentation reported no validation errors");
 

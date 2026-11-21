@@ -51,7 +51,7 @@ D3D11 remains the measured GPU baseline until matched correctness and
 presentation gates pass, and no graphics API is presumed to improve the
 guest-side PFB flush wait.
 
-The ownership build subsequently restored the visible Vulkan movie/manual
+The ownership build subsequently restored the visible Vulkan manual-menu
 route and completed one same-executable movement capture per renderer. Strict
 review classifies 917 Vulkan and 1,273 D3D11 world changes with no unknown
 frames and confirms the same tutorial scene and fixed camera route. Their
@@ -896,7 +896,7 @@ the ordered implementation tasks are
 Current D3D11 measurements remain the baseline until Vulkan reaches matched
 retail rendering and native-presentation parity.
 
-Current status is partial M1 with a synthetic M2 prototype. M0 has transactional startup/fake-fallback
+Current status is partial M1 with an integrated but incomplete M2 prototype. M0 has transactional startup/fake-fallback
 coverage, the accepted #319 baseline, and renderer-neutral surface/texture
 layouts, checked snapshots and filter/LOD decoding, but official optional
 extensions are not complete. M1 has NVIDIA/AMD validation-clean base and
@@ -905,15 +905,21 @@ CPU-transformed extended draws, precise visibility, register combiners, exact
 one state-matched NVIDIA retail tutorial capture, gathered-input GPU vertex
 programs, clean CPU/PVIDEO surface preservation and one completely reviewed
 D3D11/Vulkan movement pair. It does not have direct raw-stream vertex fetch,
-scale, retail native-presentation coverage, broad menu/movie/fade coverage
-or the complete ordering matrix. M2 now has a default-inactive, versioned
+scale, complete retail native-presentation coverage, broad menu/movie/fade
+coverage or the complete ordering matrix. M2 now has a default-inactive, versioned
 host presentation-provider seam with explicit framebuffer-thread lifecycle,
 concurrent output-size queries, CPU-required routing, frame identity, pacing
 results, fail-stop errors and shutdown waiting. Its downstream Vulkan
 consumer adds a real Win32 surface and swap chain, three-slot completed-image
 handoff, queue synchronization, resize, fitted blit, VSync and CPU fallback.
 Validation-enabled NVIDIA and AMD fixtures cover the synthetic route, but
-retail, fullscreen, PVIDEO/capture integration and device loss remain open.
+one validation-enabled retail run also reached operator-confirmed visible
+Basic Controls through its 640x480 FIFO swap chain. The opening movies were
+not observed in that run or its focused retry because both disabled audio.
+An otherwise matched bounded audio-on trace opened the Bink files and
+produced changing CPU-owned frames through the native provider. Physical
+movie review, fullscreen, PVIDEO/capture integration and device loss remain
+open.
 No M1-M5 gate is met.
 
 The pre-presentation counter attribution is complete and promotes no gate.
@@ -926,9 +932,10 @@ Exact texture-snapshot elision was reviewed and deferred because checked
 `ReadProcessMemory` plus post-copy layout/allocation/bounds identities
 preserve guard and lifetime behavior, while Windows write-watch cannot track
 the aliased file mappings. No approximate cache or stale snapshot replaces
-that contract. The next bounded task is one integrated retail native-
-presentation validation, not a multi-run comparison. No additional manual
-route is scheduled merely to repeat the baseline.
+that contract. The missing-movie observation is now attributed to the
+audio-off title path with matched bounded traces, not a multi-run comparison.
+The next bounded task is automated fullscreen/loss coverage. No additional
+manual route is scheduled merely to repeat the baseline.
 
 The retail captures are correctness bring-up evidence only. The final
 combiner attempts ended at their 300-second watchdogs before the stationary
@@ -936,7 +943,9 @@ interval completed; the same-generation D3D11 reference completed one
 interval at 13.813 flips/s. The separate visibility-only interval and stopped
 wrong-menu mip probe are not comparable replacements. The runs were not an
 alternating A/B/A campaign, so no Vulkan/D3D11 performance comparison is
-recorded.
+recorded. The native-present retail validation reported 8.451 stationary
+flips/s with validation enabled, and its focused movie retry was stopped
+without a readiness token. Neither is distinct-world-frame or M5 evidence.
 
 | Gate | Required evidence |
 | --- | --- |

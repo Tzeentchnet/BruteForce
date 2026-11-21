@@ -17,8 +17,10 @@ upstream commits. The retail acceptance in this section used 43 local patches
 and tree `8938ce1b635e25832539a0bc6500b2fe2fa14565`. Default-inactive
 presentation-provider patch 0048 later advanced the current stack to 44
 patches and expected tree `23a92b43c0042297160e985b31d61308e0d15da6`;
-that addition has synthetic validation only and does not retroactively change
-the retail results below. Patch 0030 now passes mirror
+the generic addition has synthetic fixture coverage and does not
+retroactively change the acceptance results below. Its downstream Vulkan
+consumer was exercised in the later native-WSI retail validation recorded in
+this document. Patch 0030 now passes mirror
 physical names unchanged to the APU resolver and uses cached
 last-translation inference for low image and stack names, which remain
 unaliased, and for all low names when aliases are unavailable. This fallback
@@ -603,7 +605,11 @@ wait completes. The provider accepts only an exact frame ID. A missing match
 uses the stable CPU pixels, while `allow_source == 0` also drops eligible
 READY images before CPU upload. This preserves pinned-frame, PVIDEO and
 presenter-capture ownership instead of using native presentation as a reason
-to skip the readback or CPU route.
+to skip the readback or CPU route. A subsequent ownership correction also
+withholds the native source when a clean guest-written surface has
+`guest_pending_upload`; otherwise the retained GPU image could replace the
+newer CPU-owned publication before its upload. The fixture separately covers
+this source-allowed CPU fallback.
 
 The provider owns the Win32 Vulkan surface, FIFO/mailbox/immediate selection,
 swap-chain images and per-image completion semaphores, resize recreation,
@@ -624,12 +630,75 @@ errors on:
 - NVIDIA GeForce RTX 5070, Vulkan API 1.4.357, driver `0x9B460000`.
 - AMD Radeon(TM) Graphics, Vulkan API 1.4.315, driver `0x00800161`.
 
-These are synthetic ownership, WSI and cross-vendor validation results. No
-retail executable used native Vulkan presentation, no physical scanout or
-PVIDEO movie was reviewed, and no performance result follows from them.
-`tools/bench.py` now records `RECOMP_VULKAN_PRESENT` among matched runtime
-options so a later campaign cannot mix CPU-presented and native-presented
-runs.
+These are synthetic ownership, WSI and cross-vendor validation results.
+`tools/bench.py` records `RECOMP_VULKAN_PRESENT` among matched runtime options
+so a later campaign cannot mix CPU-presented and native-presented runs.
+
+One operator-assisted retail validation then completed on generation
+`20261121-004454-e74f8af6`, executable SHA-256
+`1943ef361b85a8145888ad52f4c57a100ad1be3c12450b2fa1bc80f93112d1dc`.
+It used Vulkan, native presentation, validation, FIFO VSync, linear
+filtering, supplied mips, asynchronous visibility, the zero-delay sleep fix,
+four raster threads and no audio. The native provider created a 640x480 FIFO
+swap chain, Basic Controls displayed with visible world and HUD, and no WSI
+or Vulkan validation error was reported. The operator did not observe the
+opening movies.
+
+The clean guest-write source-eligibility correction above then passed the
+NVIDIA and AMD validation fixtures. One focused retail retry on generation
+`20261121-005939-bc768cc6` still did not show the opening movies, although
+Basic Controls again displayed. Its early framebuffer hashes changed; flips
+18 onward reported about 145 draws with changing hashes, and by flip 300 the
+backend reported four guest uploads, 14 guest preserves and no conflicts.
+The native provider remained active without a WSI or validation failure. The
+declared readiness state required visible movies, so no readiness token was
+written and the process was stopped rather than recording a false success.
+Manual readiness removes `RECOMP_PAD_SCRIPT`, so the legacy scripted A
+presses do not explain this observation.
+
+Bounded attribution is now available before another retail attempt. Every
+300 successful WSI presentations, the provider reports cumulative native,
+forced-CPU and no-exact-source CPU frames plus coalesced, forced and stale
+source drops. The backend's existing 300-flip line reports clean guest-owned
+publications for which native-source creation was suppressed. The hardware
+fixture checks the route-reason counters as well as their presentation
+behavior.
+
+Two unattended 30-second no-script traces on generation
+`20261121-005939-bc768cc6`, executable SHA-256
+`364529997ee0e9e7705c489225a9b02ce821b4999be3bd90c6c5c09aa152752b`,
+then isolated the missing-movie observation. With `RECOMP_AUDIO=0`, the first
+300 WSI presentations were all CPU fallback with no exact native source and
+ended on publication 15. At backend flip 300, 16 clean guest-owned
+publications had suppressed native-source creation; four guest uploads, 16
+preserves and no conflicts were recorded. The title then entered its
+approximately 145-draw path. This proves the ownership correction was active
+and that an older native source did not hide the opening pixels.
+
+With otherwise matched settings and `RECOMP_AUDIO=1`, the runtime initialized
+the APU/XAudio2 path and the title opened `MGS_Logo_Final.bik` and
+`DA_Logo_Final1.bik`. The 30-second trace remained in a zero-draw,
+continuously changing CPU-written route. By flip 1,200 it had recorded 1,150
+guest uploads, 1,162 guest preserves, 1,162 suppressed native sources and no
+guest/GPU conflicts. The WSI line at 1,500 presentations reported 1,467 CPU
+frames with no exact native source, 33 native frames, no forced-CPU frames
+and three stale-source drops. No Vulkan validation or WSI failure was
+reported.
+
+The two audio-off visual observations therefore did not expose a Vulkan
+movie-source bug: disabling the runtime audio path caused this title to skip
+opening its Bink movies. Manual movie validation must keep
+`RECOMP_AUDIO=1`; `tools/bench.py` now rejects an audio-off manual readiness
+state whose description names a movie, Bink or cinematic. The audio-on trace
+is strong decoded-frame and routing evidence, not operator review of the
+physical swap-chain image. Fold that review into a later required native
+validation instead of scheduling a dedicated manual boot.
+
+The completed validation reported 8.451 stationary flips/s and a 6.672
+flip/s 1% low. This was one validation-enabled static run, not an alternating
+A/B/A comparison or distinct-world-frame evidence. It makes no performance
+claim. No further manual boot is justified merely to repeat the movie
+observation.
 
 **Remaining hypotheses and gates:** pinned DXC has produced the static Vulkan
 base and extended shaders. The static register-combiner interpreter has a
@@ -640,10 +709,13 @@ constructor are extracted; scale, cross-backend cache-key and shader-input
 policy are not. The host-service provider lifecycle and forced CPU route are
 implemented, and the downstream Vulkan module owns the Win32 surface/swap
 chain and bounded completed-image handoff in synthetic tests. That
-API-specific handoff is not accepted upstream. Raw GPU vertex programs,
-render scaling, window clip, retail native presentation, reviewed
-target-scene mip parity, wider matched-retail parity and stability, Intel
-coverage, device-loss recovery, D3D12 and automatic fallback remain open.
+API-specific handoff is not accepted upstream. One retail native route reaches
+visible Basic Controls, and an audio-on trace carries changing Bink frames
+through its CPU fallback. Physical movie review remains open. Raw GPU vertex
+programs, render scaling, window clip, complete retail native presentation,
+reviewed target-scene mip parity, wider matched-retail parity and stability,
+Intel coverage, device-loss recovery, D3D12 and automatic fallback remain
+open.
 
 No measured result predicts that Vulkan or D3D12 will improve cadence. The
 dominant recorded G3 PFB flush wait is upstream of the host graphics API.

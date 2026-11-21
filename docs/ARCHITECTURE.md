@@ -69,7 +69,10 @@ compute readback verifier; direct raw guest-stream fetch, native presentation
 and broader state/scene parity remain open. Vulkan color surfaces also retain
 a guest shadow: clean CPU/PVIDEO changes survive readback and are uploaded
 before later GPU work, while dirty conflicts are reported and preserve the
-GPU frame. This restores the visible manual movie/menu route. A retained
+GPU frame. This restores the visible manual menu route. Two audio-off native
+runs did not show the opening Bink movies; a bounded audio-on retry opened the
+movie files and produced changing CPU-owned frames, locating that observation
+in title/audio bring-up rather than native-source ownership. A retained
 `0x80000000` surface still overlaps staged pushbuffer traffic because the
 executor does not resolve the color-DMA object base; exact lifetime ownership
 remains open. The window can otherwise use D3D11

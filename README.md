@@ -35,7 +35,7 @@ This is an experimental Windows release for the North American retail game:
   the tutorial panel; three opaque panel regions have no pixels over 8/255.
   NVIDIA and AMD fixtures cover the interpreter, whole-triangle non-finite
   rejection, verification readback, CPU/PVIDEO surface preservation and
-  dirty-conflict handling. The formerly black manual opening now reaches
+  dirty-conflict handling. The formerly black manual menu route now reaches
   visible Basic Controls. Complete guest-surface review of one matched
   movement pair shows the same tutorial scene and scripted camera route with
   zero unknown frames; continuous capture prevents treating its rates as a
@@ -44,9 +44,13 @@ This is an experimental Windows release for the North American retail game:
   48.193 movement flips/s, while Vulkan reported 23.164 and 17.469. Inputs
   matched within 78 ms, but the frames remain unreviewed and one pair is not
   A/B/A or distinct-world-frame evidence. The native path is validation-clean
-  in its NVIDIA and AMD hardware fixture, but retail native-presentation
-  coverage, movement-gap attribution, direct raw-stream fetch, broader scene
-  parity, and accepted performance evidence remain open.
+  in its NVIDIA and AMD hardware fixture, and one operator-confirmed retail
+  run reached visible Basic Controls through a 640x480 FIFO swap chain with
+  validation enabled. Both movie observations had disabled audio; a bounded
+  no-script audio-on trace subsequently opened both Bink logo files and kept
+  changing CPU-owned movie frames on the native route. Physical movie review,
+  movement-gap attribution, direct raw-stream fetch, broader scene parity,
+  and accepted performance evidence remain open.
 - A Vulkan-first default with D3D12 startup fallback remains the gated design
   direction. D3D12 and production `auto` selection are not implemented, and
   D3D11 remains selectable through both parity gates.

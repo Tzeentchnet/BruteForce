@@ -435,6 +435,7 @@ typedef struct VulkanState {
     uint64_t guest_surface_uploads;
     uint64_t guest_surface_preserves;
     uint64_t guest_surface_conflicts;
+    uint64_t present_sources_suppressed;
     VulkanPipeline pipelines[VULKAN_MAX_PIPELINES];
     unsigned pipeline_count;
     uint64_t clears;
@@ -4253,10 +4254,14 @@ static int vulkan_readback_internal(uint32_t color_va, int publish_source)
     sync_result = sync_surface_guest(surface, NULL, 1, 0);
     if (!sync_result)
         return 0;
-    if (publish_source && s_vk.present_registered)
-        present_source = bruteforce_vulkan_present_begin_source(
-            surface->layout.width, surface->layout.height,
-            xbox_FramebufferWindowNextFrameId());
+    if (publish_source && s_vk.present_registered) {
+        if (surface->guest_pending_upload)
+            s_vk.present_sources_suppressed++;
+        else
+            present_source = bruteforce_vulkan_present_begin_source(
+                surface->layout.width, surface->layout.height,
+                xbox_FramebufferWindowNextFrameId());
+    }
     if (!surface->gpu_dirty) {
         if (present_source) {
             slot = begin_commands();
@@ -4462,6 +4467,7 @@ static void vulkan_flip(void)
         fprintf(stderr, "[GPU-Vulkan] %llu flips, %llu draws, %llu clears,"
                         " %llu readbacks, %llu guest uploads,"
                         " %llu guest preserves, %llu guest conflicts,"
+                        " %llu native sources suppressed,"
                         " %u surfaces, %u pipelines, %u textures,"
                         " %llu cache hits, %llu lookup probes, %llu uploads,"
                         " %llu mip uploads,"
@@ -4479,6 +4485,7 @@ static void vulkan_flip(void)
                 (unsigned long long)s_vk.guest_surface_uploads,
                 (unsigned long long)s_vk.guest_surface_preserves,
                 (unsigned long long)s_vk.guest_surface_conflicts,
+                (unsigned long long)s_vk.present_sources_suppressed,
                 s_vk.surface_count, s_vk.pipeline_count, s_vk.texture_count,
                 (unsigned long long)s_vk.texture_hits,
                 (unsigned long long)s_vk.texture_lookup_probes,

@@ -13,12 +13,14 @@ CTests, the FCMOV/WBINVD fixtures passed nine tests, and the project DSP
 memory and lifecycle fixtures passed. Retail regeneration, exact
 discovery/translation comparison, and bounded one-core, audio-on CPU/D3D11
 smokes passed on the preceding 43-patch runtime tree. Patch 0048 is default-
-inactive and has synthetic validation only; no retail result is attributed
-to the new tree. Details, limits and the 128 MB host-mirror observation are
-in [FINDINGS.md](FINDINGS.md).
+inactive; its generic seam has synthetic fixture coverage, while its
+downstream Vulkan consumer later reached visible retail Basic Controls
+and carried changing Bink frames in a bounded audio-on native trace. Details,
+limits and the 128 MB host-mirror observation are in
+[FINDINGS.md](FINDINGS.md).
 
-The latest retail-validated generation `20261120-163420-f9e3b4ed` predates
-patch 0048 and uses the preceding runtime tree
+The latest full regeneration-validated generation
+`20261120-163420-f9e3b4ed` predates patch 0048 and uses the preceding runtime tree
 `8938ce1b635e25832539a0bc6500b2fe2fa14565`. It translated all 22,295
 identified functions with zero failures,
 six unresolved direct-call targets and the same 11 untranslated instruction
@@ -313,8 +315,11 @@ implemented, but this is not a broad parity or performance claim. See
   shutdown. The default-off downstream WSI consumer now adds a real Win32
   Vulkan surface and swap chain, a three-slot completed-image queue, exact
   frame IDs, resize, fitted blit, VSync and CPU fallback. Its NVIDIA and AMD
-  hardware fixtures pass with validation; no retail native-presentation or
-  performance result is claimed.
+  hardware fixtures pass with validation. One validation-enabled retail run
+  reached operator-confirmed visible Basic Controls through a 640x480 FIFO
+  swap chain. Both movie observations disabled audio; an otherwise matched,
+  unattended audio-on trace opened the Bink files and produced changing
+  CPU-owned native-route frames. None of these runs is performance evidence.
 - The previous stationary campaign measured about 3.2 rendered frames per
   second on the CPU and 30.4 on D3D11 with GPU vertex programs, three runs
   each. The hold is visually static, so these are **rendered**, not distinct,
@@ -1315,9 +1320,9 @@ for live backend switching is outside this workstream.
    renderer errors. Clean CPU/PVIDEO surface writes now survive readback, and
    reviewed movement captures retain the same tutorial scene and scripted
    camera route on D3D11 and Vulkan. Direct raw-stream fetch, render scaling,
-   retail native-presentation coverage and wider parity remain F7 scope.
-6. **Prototype host-owned Vulkan presentation (synthetic milestone
-   complete).** Local framework patch 0048 adds a versioned, copied
+   complete native-presentation parity and wider parity remain F7 scope.
+6. **Prototype host-owned Vulkan presentation (retail bring-up in
+   progress).** Local framework patch 0048 adds a versioned, copied
    `RecompPresentProvider` registration that is default-inactive and separate
    from `Nv2aBackend`. Its `initialize`, `present` and `shutdown` callbacks
    run on the framebuffer-window thread; `output_size` may run concurrently.
@@ -1334,9 +1339,18 @@ for live backend switching is outside this workstream.
    one externally synchronized graphics queue, and retains mandatory guest
    readback. Validation-enabled NVIDIA and AMD fixtures cover native routing,
    coalescing, forced CPU input, resize and explicit provider-before-device
-   shutdown. Do not require D3D11 keyed-mutex interop. Next validate one
-   integrated retail native route and window/fullscreen behavior without
-   starting the deferred M5 comparison campaign. Coordinate any upstream
+   shutdown. The first integrated retail run reached visible Basic Controls
+   through the native FIFO swap chain with no validation error. Its opening
+   movies were not observed in two audio-off attempts. Bounded 300-frame
+   counters now distinguish native,
+   forced-CPU and no-exact-source CPU routes, source-drop reasons and backend
+   publication suppression. Matched unattended traces showed that audio-off
+   skipped the Bink files, while audio-on opened them and emitted changing
+   CPU-owned frames with no WSI or validation error. The benchmark now rejects
+   audio-off movie readiness. Do not require D3D11 keyed-mutex interop. Fold
+   physical movie review into a later required run. Next extend bounded
+   fullscreen/loss coverage; fullscreen behavior remains open. Do not
+   start the deferred M5 comparison campaign. Coordinate any upstream
    proposal with the unanswered
    presentation part of
    [sp00nznet/xboxrecomp#312](https://github.com/sp00nznet/xboxrecomp/issues/312).
@@ -1357,8 +1371,10 @@ for live backend switching is outside this workstream.
    with no unknown frames, panel, cinematic, fade or missing geometry. The
    guest-surface source and continuous-capture perturbation make this
    correctness evidence rather than performance or physical-presentation
-   proof. The manual Vulkan route now shows the opening and reaches Basic
-   Controls after clean guest-surface writes stopped being overwritten.
+   proof. The manual Vulkan menu route now reaches Basic Controls after clean
+   guest-surface writes stopped being overwritten. The two direct movie
+   observations were audio-off; a bounded audio-on trace opened both Bink
+   files and remained on changing CPU-owned movie frames.
    Investigate the remaining `0x80000000` staged-memory conflict through the
    generic color-DMA/lifetime gap; do not change the conservative GPU-wins
    policy. The first no-capture same-build A/B/A attempt set was invalidated
@@ -1388,9 +1404,11 @@ for live backend switching is outside this workstream.
    direct raw-stream fetch unless the unattributed framework gather cost is
    independently shown to justify it. Patch 0048's provider seam and the
    downstream WSI/source-ownership module now pass the cross-vendor synthetic
-   gate. Validate the integrated retail native route, fullscreen/resize and
-   CPU/PVIDEO fallback next. Reserve a multi-run A/B/A campaign for M5, and
-   only when its acceptance evidence is actionable.
+   gate, and a native retail route reaches visible Basic Controls. The
+   audio-on/off no-script trace resolves the missing-movie observation without
+   another manual run. Validate fullscreen/resize and CPU/PVIDEO fallback only
+   with a discriminating bounded check. Reserve a multi-run A/B/A campaign for M5,
+   and only when its acceptance evidence is actionable.
    Continue covering menus,
    movies, fades, PVIDEO and CPU fallback without weakening synchronization.
    The mip fixture is complete; repeat its retail comparison only with
@@ -1489,8 +1507,10 @@ Still open: access to a native 4K display. Optional 5.1 output is deferred.
    register-combiner path are complete. The retained stationary
    over-threshold differences are reviewed as exposed world animation. The
    gathered GPU-VSH path now clears the immediate gameplay-throughput blocker,
-   the manual movie/menu route is visible, and the first matched movement pair
-   has complete guest-surface review. Preserve the unresolved color-DMA
+   the manual menu route reaches visible Basic Controls, and the first matched
+   movement pair has complete guest-surface review. Audio-off skipped the
+   opening movies; an unattended audio-on native trace opened both Bink files
+   and produced changing CPU-owned frames. Preserve the unresolved color-DMA
    conflict policy. The reduced no-capture pair and final Vulkan counter run
    are complete, and unactionable pre-deadline asynchronous visibility polls
    are now deferred with cross-vendor synthetic coverage. Exact texture
@@ -1499,9 +1519,11 @@ Still open: access to a native 4K display. Optional 5.1 output is deferred.
    from the measured 0.56% backend vertex-copy cost alone. The default-
    inactive host presentation-provider seam is implemented in patch 0048,
    and its downstream Vulkan WSI module and bounded completed-image ownership
-   handshake pass validation-enabled NVIDIA and AMD fixtures. Next validate
-   an integrated retail native route and window/fullscreen/CPU-fallback
-   behavior without scheduling the deferred M5 campaign. Submit no
+   handshake pass validation-enabled NVIDIA and AMD fixtures. The first
+   integrated native retail run reached visible Basic Controls, and the
+   bounded route trace attributes movie skipping to audio-off title behavior.
+   Next use a bounded check for window/fullscreen/CPU-fallback behavior without
+   scheduling the deferred M5 campaign. Submit no
    upstream work without approval. Implement D3D12 in F8, promote `auto` only
    after F9, and retain D3D11 and CPU as F10 requires.
 3. Complete A1 and the single-view E1-E2 scope, then A2-A4 as the reference

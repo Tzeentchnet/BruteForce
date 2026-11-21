@@ -51,10 +51,13 @@ application and focused fixtures pass. Exact retail regeneration review and
 bounded one-core, audio-on CPU and D3D11 Basic Controls smokes passed on the
 preceding 43-patch tree
 `8938ce1b635e25832539a0bc6500b2fe2fa14565`; default-inactive patch 0048 and
-its downstream Vulkan WSI consumer have synthetic validation only. This
-accepts the local base upgrade and provider seam, not a performance,
-listening, movement, Accurate-DSP, retail native-presentation or long-session
-result.
+its downstream Vulkan WSI consumer have cross-vendor synthetic validation.
+One later validation-enabled native retail run reached operator-confirmed
+visible Basic Controls. Its two movie observations disabled audio; a matched
+bounded audio-on trace later opened the Bink files and carried changing
+CPU-owned frames through the provider. This accepts the local base upgrade
+and provider seam, not a performance, listening, movement, Accurate-DSP,
+physical-movie-review or long-session result.
 
 v0.18.0 absorbs the formerly selected #314, #319 and #320 commits and adds
 directly useful generic work:
@@ -2304,8 +2307,8 @@ own GPU back end, an extended interface for it, and its own pacing fixes.
     guard evidence places staged pushbuffer accesses in the same range, and
     the executor documents but does not implement
     `NV097_SET_CONTEXT_DMA_COLOR` base resolution. Direct raw-stream fetch,
-    resolved color-DMA/lifetime ownership, wider matched parity and retail
-    host-native presentation remain unproved.
+    resolved color-DMA/lifetime ownership, wider matched parity and complete
+    retail host-native presentation remain unproved.
     *Change:* develop Vulkan downstream as the conformance exemplar while
     shaping every generic dependency for upstream independently:
     version/capabilities, durable failure, texture stages and combiners,
@@ -2438,8 +2441,11 @@ own GPU back end, an extended interface for it, and its own pacing fixes.
     or live color-surface ownership. One #184 comment mentions report and
     semaphore DMA bases for another title; it is adjacent evidence, not a
     color-surface implementation. No upstream interaction was performed.
-    *Before filing:* validate the downstream provider in one integrated
-    retail native route plus fullscreen, PVIDEO/capture and loss cases.
+    *Before filing:* validate the downstream provider's fullscreen,
+    PVIDEO/capture and loss cases. One integrated native retail route reaches
+    visible Basic Controls, and matched bounded traces attribute movie
+    skipping to the audio-off title path, but those remaining cases are not
+    complete.
     Validate the generic provider seam with another downstream consumer or
     otherwise narrow its proven scope; refresh overlap; and request explicit
     approval before every
@@ -2456,14 +2462,16 @@ own GPU back end, an extended interface for it, and its own pacing fixes.
     polls are now deferred with NVIDIA and AMD fixture coverage; no retail
     performance result is claimed. One wrong-route
     retail probe confirms a supplied six-level BC chain reaches Vulkan but is
-    not parity evidence. The formerly black manual movie/menu route now
-    reaches visible Basic Controls, and one movement pair has complete
-    guest-surface review. The default-inactive patch-0048 provider lifecycle,
+    not parity evidence. The formerly black manual menu route now reaches
+    visible Basic Controls. Two direct audio-off observations skipped movies;
+    a bounded audio-on native trace opened both Bink files and produced
+    changing CPU-owned frames. One movement pair has complete guest-surface review.
+    The default-inactive patch-0048 provider lifecycle,
     CPU-fallback, pacing, capture and shutdown seam is implemented and
     synthetic-tested. Its downstream Vulkan surface, swap chain and bounded
     completed-image consumer are validation-clean on both available vendors.
     Direct raw-stream vertex fetch, generic color-DMA/lifetime resolution,
-    wider matched parity, retail native presentation and the upstream
+    wider matched parity, complete retail native presentation and the upstream
     contribution series remain pending. The
     first contract fixture is merged as #319. The neutral
     layout/snapshot/filter/default-combiner helpers have not been proposed

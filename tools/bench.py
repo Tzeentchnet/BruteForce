@@ -5,7 +5,9 @@ Each run boots the verified build with isolated saves. The default legacy menu
 script and draw-count threshold are heuristics, not verified state signals.
 For matched audio experiments use --readiness manual: an operator navigates
 to the requested visible state and acknowledges each attempt. Timeouts still
-apply. The executor's RECOMP_FRAME_STATS then helps find the measured windows:
+apply. Movie readiness requires RECOMP_AUDIO=1 because this title skips its
+Bink movies when the runtime audio path is disabled. The executor's
+RECOMP_FRAME_STATS then helps find the measured windows:
 
 * world: in legacy mode, the first WORLD_RUN consecutive flips with at least
   WORLD_DRAWS draws; manual mode starts after the operator's assertion;
@@ -842,6 +844,13 @@ def run_once(out_dir, label, scene, env_overrides, threads, watchdog, profile, c
             "RECOMP_PAD_SCRIPT", "RECOMP_PAD_LIVE", "RECOMP_FRAME_STATS",
             "RECOMP_WATCHDOG_SECS"}):
         raise BenchError("manual readiness owns pad input, frame statistics, and watchdog paths")
+    if (readiness == "manual" and ready_state and
+            any(term in ready_state.casefold()
+                for term in ("movie", "bink", "cinematic")) and
+            any(key.upper() == "RECOMP_AUDIO" and value == "0"
+                for key, value in env_overrides.items())):
+        raise BenchError(
+            "movie readiness requires RECOMP_AUDIO=1; audio-off skips the title's Bink movies")
     if (capture or capture_movement or capture_world) and overridden.intersection({
             "RECOMP_FB_DUMP", "RECOMP_FB_DUMP_FLIPS", "RECOMP_FB_DUMP_FLIPS_ONLY",
             "RECOMP_FB_DUMP_FLIP_ID"}):

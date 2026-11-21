@@ -100,6 +100,21 @@ def test_profile_callers_rejects_variant_override(tmp_path):
     assert not (tmp_path / "run").exists()
 
 
+@pytest.mark.parametrize("ready_state", [
+    "opening movies visible",
+    "Bink logo playback",
+    "intro cinematic",
+])
+def test_movie_readiness_rejects_audio_off_before_creating_run(tmp_path, ready_state):
+    with pytest.raises(bench.BenchError, match="movie readiness requires RECOMP_AUDIO=1"):
+        bench.run_once(
+            tmp_path / "run", "gpu", "stationary", {"RECOMP_AUDIO": "0"},
+            1, 120, False, False, "Release", readiness="manual",
+            ready_state=ready_state,
+        )
+    assert not (tmp_path / "run").exists()
+
+
 def test_movement_capture_requires_movement_scene(tmp_path, capsys):
     assert bench.main(["--capture-movement", "--out", str(tmp_path / "out")]) == 1
     assert "--capture-movement requires --scene movement" in capsys.readouterr().err

@@ -476,9 +476,14 @@ three-slot ownership queue while retaining that readback. Non-aliased
 unsupported-format behavior. Validation-enabled rendering and native-presentation fixtures pass on NVIDIA
 and AMD. The native fixture covers exact frame identity, bounded READY-image
 coalescing, forced CPU fallback, resize, and explicit provider shutdown. This
-is synthetic validation, not a retail native-presentation or performance
-result. Vulkan has reached and captured the retail Basic Controls state
-through the CPU-presented route; the
+fixture evidence is synthetic and not a performance result. One operator-
+confirmed validation-enabled retail run reached visible Basic Controls
+through a 640x480 FIFO swap chain. Opening movies were not observed in that
+run or its focused retry because both used `RECOMP_AUDIO=0`. A later bounded
+no-script audio-on trace opened both Bink files and produced changing
+CPU-owned frames through the native provider. Physical movie review remains
+open. Vulkan has also captured the retail Basic Controls state through
+the CPU-presented route; the
 matched frame has 134 of 307,200 pixels over 8/255 versus D3D11. A reviewed
 component overlay places all 134 in animated world content visible outside
 the opaque tutorial panel. Three opaque panel regions have zero pixels over
@@ -489,12 +494,21 @@ movement, movie, fade or wider-scene parity.
 Tracked Vulkan color surfaces retain a guest shadow and allocation identity.
 If CPU code or PVIDEO changes a clean surface, readback preserves those bytes
 and the next partial clear or draw uploads them first. This keeps opening
-movie/menu output visible instead of replacing it with an earlier black GPU
-clear. A guest change while GPU work is dirty is a reported conflict; the
-completed GPU frame wins. Periodic diagnostics include guest uploads,
-preserves and conflicts. A conflict is not permission to disable readback:
+menu output from being replaced with an earlier black GPU clear. The native
+presenter also refuses a retained GPU source while a clean guest-written
+surface is pending upload, so the stable CPU pixels win that publication. A guest change while GPU work is
+dirty is a reported conflict; the completed GPU frame wins. Periodic
+diagnostics include guest uploads, preserves and conflicts. A conflict is not
+permission to disable readback:
 the retail `0x80000000` range also overlaps staged pushbuffer traffic, and the
 executor does not yet resolve the programmed color-DMA object base.
+
+Every 300 successful native presentations, `[GPU-Vulkan-WSI]` reports native
+frames, forced CPU frames, CPU frames with no exact source, and coalesced,
+forced or stale source drops. The normal 300-flip `[GPU-Vulkan]` line also
+reports how many native sources were suppressed because clean guest pixels
+were pending upload. Use these bounded counters rather than continuous
+capture when diagnosing the opening route.
 
 The Vulkan GPU-VSH path uses one statically compiled interpreter rather than
 runtime per-program compilation. The framework supplies exactly the float
@@ -614,7 +628,11 @@ not recommended as defaults.
 The benchmark's legacy menu script deliberately sends A presses through the
 intro movies. A movie file opening without remaining visible in such a run is
 not a playback failure or a playback validation result. Use a direct run or
-manual readiness when validating movies.
+manual readiness when validating movies. Manual readiness removes
+`RECOMP_PAD_SCRIPT`. Keep `RECOMP_AUDIO=1`: the title skipped its Bink movies
+in two audio-off native runs, while a bounded audio-on run opened both files
+and produced changing movie-route frames. The benchmark rejects a manual
+movie/Bink/cinematic readiness state paired with `RECOMP_AUDIO=0`.
 
 `BRUTEFORCE_PERF_COUNTERS=1` enables detailed title and renderer performance
 diagnostics. Approximately every ten seconds, the normal D3D11 statistics
@@ -719,7 +737,9 @@ back to guest-pixel units. Scale 1 keeps the prior allocation and readback
 paths and remains the default.
 
 Bink opening movies write decoded pixels directly into the guest colour
-surface rather than using PVIDEO or D3D11 draws. The D3D11 backend keeps a
+surface rather than using PVIDEO or D3D11 draws. Keep `RECOMP_AUDIO=1` when
+validating them: disabling the runtime APU caused this title to skip the
+movie files entirely in a bounded no-script comparison. The D3D11 backend keeps a
 logical guest shadow, mirrors full colour clears, and uploads detected CPU
 writes before the first GPU overlay draw or at flip. The upload is scaled into
 the physical render target before shared presentation. A detected CPU write

@@ -121,7 +121,12 @@ typedef struct VulkanPresentState {
     uint64_t source_serial;
     uint64_t native_frames;
     uint64_t cpu_frames;
+    uint64_t cpu_forced_frames;
+    uint64_t cpu_missing_frames;
     uint64_t dropped_sources;
+    uint64_t coalesced_sources;
+    uint64_t forced_sources;
+    uint64_t stale_sources;
     uint64_t last_frame_id;
     uint64_t swapchain_generations;
     int registered;
@@ -797,8 +802,10 @@ BruteforceVulkanPresentSource *bruteforce_vulkan_present_begin_source(
                     (!source ||
                      s_present.sources[i].serial < source->serial))
                     source = &s_present.sources[i];
-            if (source)
+            if (source) {
                 s_present.dropped_sources++;
+                s_present.coalesced_sources++;
+            }
         }
         if (source) {
             source->state = VULKAN_PRESENT_SOURCE_WRITING;
@@ -902,6 +909,10 @@ static BruteforceVulkanPresentSource *take_source(
             source->state = VULKAN_PRESENT_SOURCE_FREE;
             source->frame_id = 0;
             s_present.dropped_sources++;
+            if (!allow_source)
+                s_present.forced_sources++;
+            else
+                s_present.stale_sources++;
         } else if (source->frame_id == frame_id && !result) {
             source->state = VULKAN_PRESENT_SOURCE_PRESENTING;
             result = source;
@@ -1321,11 +1332,44 @@ static int provider_present(void *context, const uint32_t *pixels,
         s_present.extent.width = 0;
         s_present.extent.height = 0;
     }
-    if (route_native)
+    if (route_native) {
         s_present.native_frames++;
-    else
+    } else {
         s_present.cpu_frames++;
+        if (allow_source)
+            s_present.cpu_missing_frames++;
+        else
+            s_present.cpu_forced_frames++;
+    }
     s_present.last_frame_id = frame_id;
+    if (((s_present.native_frames + s_present.cpu_frames) % 300) == 0) {
+        uint64_t dropped;
+        uint64_t coalesced;
+        uint64_t forced;
+        uint64_t stale;
+        AcquireSRWLockShared(&s_source_lock);
+        dropped = s_present.dropped_sources;
+        coalesced = s_present.coalesced_sources;
+        forced = s_present.forced_sources;
+        stale = s_present.stale_sources;
+        ReleaseSRWLockShared(&s_source_lock);
+        fprintf(stderr,
+                "[GPU-Vulkan-WSI] %llu presented frames: %llu native,"
+                " %llu CPU (%llu forced, %llu no exact source),"
+                " %llu dropped sources (%llu coalesced, %llu forced,"
+                " %llu stale), last frame %llu\n",
+                (unsigned long long)(s_present.native_frames +
+                                     s_present.cpu_frames),
+                (unsigned long long)s_present.native_frames,
+                (unsigned long long)s_present.cpu_frames,
+                (unsigned long long)s_present.cpu_forced_frames,
+                (unsigned long long)s_present.cpu_missing_frames,
+                (unsigned long long)dropped,
+                (unsigned long long)coalesced,
+                (unsigned long long)forced,
+                (unsigned long long)stale,
+                (unsigned long long)frame_id);
+    }
     return s_present.present_mode == VK_PRESENT_MODE_FIFO_KHR;
 }
 
@@ -1410,15 +1454,28 @@ int bruteforce_vulkan_present_test_parse_options(void)
 
 void bruteforce_vulkan_present_test_stats(
     uint64_t *native_frames, uint64_t *cpu_frames,
-    uint64_t *dropped_sources, uint64_t *last_frame_id,
+    uint64_t *cpu_forced_frames, uint64_t *cpu_missing_frames,
+    uint64_t *dropped_sources, uint64_t *coalesced_sources,
+    uint64_t *forced_sources, uint64_t *stale_sources,
+    uint64_t *last_frame_id,
     uint64_t *swapchain_generations)
 {
     if (native_frames)
         *native_frames = s_present.native_frames;
     if (cpu_frames)
         *cpu_frames = s_present.cpu_frames;
+    if (cpu_forced_frames)
+        *cpu_forced_frames = s_present.cpu_forced_frames;
+    if (cpu_missing_frames)
+        *cpu_missing_frames = s_present.cpu_missing_frames;
     if (dropped_sources)
         *dropped_sources = s_present.dropped_sources;
+    if (coalesced_sources)
+        *coalesced_sources = s_present.coalesced_sources;
+    if (forced_sources)
+        *forced_sources = s_present.forced_sources;
+    if (stale_sources)
+        *stale_sources = s_present.stale_sources;
     if (last_frame_id)
         *last_frame_id = s_present.last_frame_id;
     if (swapchain_generations)

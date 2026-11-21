@@ -58,12 +58,16 @@ interpreter from gathered float inputs, with a compute readback verifier.
 The default-off mip switch also exposes supplied 2D/cube chains. Its captured
 Basic Controls frame is near the matched D3D11 output, and reviewed movement
 guest-surface captures now retain the same tutorial scene and camera route.
-CPU/PVIDEO writes made before GPU ownership are preserved, so the manual
-opening route reaches visible movies and menus. Vulkan is still not the
-default or a native-presentation path, and broader parity/stability gates
-remain open. D3D12 and production `auto` selection remain unimplemented, and
-D3D11 remains the launcher and graphical `build.py` default until the
-migration gates below pass.
+CPU/PVIDEO writes made before GPU ownership are preserved. The default-off
+native presenter now reaches operator-confirmed visible Basic Controls
+through a validation-enabled FIFO swap chain. The opening Bink movies were
+not observed in that audio-off run or its audio-off retry. A later bounded
+audio-on trace opened both movie files and produced changing CPU-owned
+publications through the native route, so source ownership is not the cause;
+physical movie review remains open. Vulkan is still not the default, and
+broader parity/stability gates remain open. D3D12 and production `auto`
+selection remain unimplemented, and D3D11 remains the launcher and graphical
+`build.py` default until the migration gates below pass.
 
 ## What has been observed in the title
 
@@ -512,11 +516,20 @@ claim FREE or oldest READY storage, but never WRITING or PRESENTING storage;
 reusing READY storage records an explicit coalesced source. A source becomes
 READY only after the existing submission fence completes. The provider takes
 only an exact publication-frame ID, and otherwise uploads the stable CPU
-pixels. Pinned frames, PVIDEO and presenter-source capture force that CPU
-route and discard eligible queued sources. Resize or
+pixels. A clean guest-written surface with a pending GPU upload deliberately
+publishes no native source, preventing an older GPU image from replacing the
+CPU-owned frame. Pinned frames, PVIDEO and presenter-source capture also
+force the CPU route and discard eligible queued sources. Resize or
 `VK_ERROR_OUT_OF_DATE_KHR` recreates the swap chain; device/surface failures
 remain fatal. D3D12 follows the same ownership split with a future host
 D3D12 module.
+
+Every 300 successful WSI presentations, a cumulative diagnostic separates
+native frames, forced CPU frames, CPU frames with no exact native source, and
+coalesced, forced or stale source drops. The existing 300-flip backend
+diagnostic also counts native-source publication suppressed for pending clean
+guest uploads. These counters attribute the early movie route without
+changing synchronization or requiring continuous capture.
 
 The provider lifecycle/CPU-fallback seam and its downstream Vulkan
 image/synchronization implementation are complete for the synthetic
@@ -565,7 +578,11 @@ exact 2D/cube/mip texture reuse, register combiners, compatible color aliases
 and precise visibility. Its default-inactive host presentation-provider seam
 and the downstream Vulkan WSI module are implemented and synthetic-tested.
 The WSI fixture uses real NVIDIA and AMD surfaces and swap chains with
-validation enabled, but no retail native-presentation run is recorded.
+validation enabled. One validation-enabled retail run reached an operator-
+confirmed visible Basic Controls screen through its 640x480 FIFO swap chain;
+opening movies were not observed because both attempts disabled audio. A
+bounded audio-on no-script trace subsequently opened the movie files and
+produced changing CPU-owned frames through the native provider.
 Stages 2-3 continue as full parity reveals proven generic seams; stages 6-9
 remain open.
 
@@ -601,8 +618,12 @@ remain open.
    no registered-provider behavior change. The default-off WSI provider now
    covers a three-slot completed-image ownership handoff, exact frame IDs,
    forced CPU fallback, aspect-fit scaling, resize and VSync on validation-
-   enabled NVIDIA and AMD fixtures. Validate the integrated retail native
-   route and window/fullscreen behavior next; window clip remains open.
+   enabled NVIDIA and AMD fixtures. The integrated retail route reaches
+   visible Basic Controls. Bounded no-script evidence now shows that
+   audio-off skips the title's movies while audio-on opens both Bink files and
+   sends changing CPU-owned frames through the provider. Fold physical movie
+   review into a later required validation rather than scheduling a separate
+   operator boot; fullscreen behavior and window clip remain open.
    The first no-capture D3D11/Vulkan sequence was invalidated by a recurring
    pre-movie guest-worker poll on run 3. A default-off framework zero-delay
    backoff now passes its focused fixture and three no-retry D3D11 startup
@@ -1154,9 +1175,10 @@ its per-surface shadow. Clean guest changes are retained and uploaded before
 later GPU work; dirty guest/GPU conflicts are reported and the completed GPU
 frame wins. Full clears mirror their logical pixels into guest memory so an
 early clear cannot later erase CPU/PVIDEO movie output merely because a
-tracked image exists. This fixes the observed black manual opening route but
-does not prove OS-compositor presentation or solve the executor's ignored
-color-DMA object base.
+tracked image exists. This fixes the observed black manual menu route, but
+does not bypass the title's audio dependency: `RECOMP_AUDIO=0` skips the
+opening Bink movies. The executor's ignored color-DMA object base remains
+unresolved.
 
 The default-off `RECOMP_GPU_SKIP_CLEAN_READBACK=1` elides that copy only for
 an unscaled, native-sized 32-bit surface whose guest bytes are already known
@@ -1330,9 +1352,12 @@ replace matched gameplay or original-hardware validation.
   capture through the existing CPU presenter. Its default-off native path now
   has a real Win32 Vulkan surface and swap chain, bounded source ownership,
   fitted scaling, resize, VSync and CPU fallback in synthetic cross-vendor
-  tests. It still lacks a retail native-presentation run, a
-  native-resolution render-surface handoff, direct raw guest-stream vertex
-  fetch and window clip. Surface layout changes after creation fail rather
+  tests. One retail native run reached visible Basic Controls. Two audio-off
+  observations skipped the opening movies; a bounded audio-on trace opened
+  both Bink files and produced changing CPU-owned native-route frames. It
+  still lacks physical movie review, a native-resolution render-surface
+  handoff, direct raw guest-stream vertex fetch and window clip. Surface
+  layout changes after creation fail rather
   than migrate. In one matched Basic Controls capture, 134 of
   307,200 pixels
   (0.0436%) exceed 8/255 versus D3D11; mean channel error is 0.374562 and the

@@ -317,6 +317,13 @@ around each copy and are part of cache validity. Known-short ranges and failed
 copies, including guarded or reprotected pages, are rejected; checked reads
 do not clear a guard flag. The CPU texture-decoding fallback uses the same
 immutable input snapshot rather than rereading guest memory.
+The v0.18 framework rebase preserves the upstream heap split/address ordering
+and contiguous-page protection rules while tracking those identities. This
+has synthetic coverage. Bounded audio-on CPU and D3D11 runs reached the same
+Basic Controls state on the regenerated retail target; their stable 640x480
+captures differed by more than 8/255 in 677 pixels (0.2204%). That closes the
+base-upgrade smoke gate, not movement equivalence, full-game ownership, G4, or
+performance.
 Retained snapshots have a 128 MiB budget; transient copies, decoded buffers
 and GPU resources are outside that budget. Evicted snapshots require another
 upload. The approximate cache is opt-in and can miss same-frame or sparse

@@ -1,5 +1,5 @@
 diff --git a/src/apu/apu_core.c b/src/apu/apu_core.c
-index a6a3657..f1a01b6 100644
+index 8ae9b20..8124e22 100644
 --- a/src/apu/apu_core.c
 +++ b/src/apu/apu_core.c
 @@ -82,6 +82,16 @@ extern uint32_t xbox_ContiguousAllocatedBytes(void);
@@ -19,36 +19,7 @@ index a6a3657..f1a01b6 100644
  /* How far up the host actually mapped guest RAM: the map size when it was
   * set apart from the RAM size (xbox_SetMapSize), else the RAM size. */
  static inline uint32_t apu_mapped_ram(void)
-@@ -92,6 +102,15 @@ static inline uint32_t apu_mapped_ram(void)
- uint8_t *mcpx_apu_phys(uint64_t addr)
- {
-     uint32_t a = (uint32_t)addr & 0x0FFFFFFFu;
-+    /* Cached APU scatter-gather entries tag the storage selected when the
-+     * title translated the page: bit 29 is the contiguous window and bit 28
-+     * is RAM. These tags are outside the MCPX physical address range. */
-+    if (a < (64u << 20)) {
-+        if ((uint32_t)addr & 0x20000000u)
-+            return g_apu_ram_ptr + 0x80000000u + a;
-+        if ((uint32_t)addr & 0x10000000u)
-+            return g_apu_ram_ptr + a;
-+    }
-     /* RAM above the window's 64 MB. On a 128 MB layout (a devkit) most of
-      * the heap sits above 0x04000000, and so do the sound buffers a title
-      * malloc()s and hands to DirectSound as plain pointers, which
-@@ -142,6 +161,12 @@ uint8_t *mcpx_apu_phys(uint64_t addr)
- const char *mcpx_apu_phys_class(uint64_t addr)
- {
-     uint32_t a = (uint32_t)addr & 0x0FFFFFFFu;
-+    if (a < (64u << 20)) {
-+        if ((uint32_t)addr & 0x20000000u)
-+            return "post-win";
-+        if ((uint32_t)addr & 0x10000000u)
-+            return "post-ram";
-+    }
-     if (a >= (64u << 20))
-         return a < apu_mapped_ram() ? "ram" : "wrap";
-     if (xbox_PhysRamNamedAt(a))
-@@ -453,6 +478,17 @@ void mcpx_apu_write(void *opaque, hwaddr addr, uint64_t val,
+@@ -463,6 +473,17 @@ void mcpx_apu_write(void *opaque, hwaddr addr, uint64_t val,
          stl_le_phys(address_space_memory, d->regs[NV_PAPU_FEMEMADDR], (uint32_t)val);
          qatomic_set(&d->regs[addr], (uint32_t)val);
          break;
@@ -138,17 +109,16 @@ index bd36f2a..2170d9b 100644
          for (int i = 0; i < NUM_SAMPLES_PER_FRAME; i++) {
              /* Bins 2..31 used to be computed and then dropped on the floor.
 diff --git a/src/kernel/kernel_memory.c b/src/kernel/kernel_memory.c
-index 43897a1..3754df3 100644
+index 4075a85..662faa1 100644
 --- a/src/kernel/kernel_memory.c
 +++ b/src/kernel/kernel_memory.c
-@@ -16,6 +16,23 @@
+@@ -16,6 +16,22 @@
  #include <malloc.h>
  #endif
  
-+/* A physical number below 64 MB can identify both ordinary RAM and the
-+ * separate contiguous window in this runtime. Record which storage the most
-+ * recent MmGetPhysicalAddress call named so device models can preserve the
-+ * caller's intent when they cache scatter-gather entries. */
++/* Mirror names disambiguate heap RAM, but image and stack addresses retain
++ * low physical numbers. Record low translations so scatter-gather consumers
++ * can preserve their RAM/window intent as well as the alias-off fallback. */
 +static volatile uint8_t g_phys_last_translation[(64u << 20) / 4096];
 +
 +const volatile uint8_t *xbox_PhysLastTranslationMap(void)
@@ -165,7 +135,7 @@ index 43897a1..3754df3 100644
  /* ============================================================================
   * Helper: Xbox protect flags → Win32 protect flags
   * ============================================================================ */
-@@ -170,11 +187,15 @@ ULONG_PTR __stdcall xbox_MmGetPhysicalAddress(PVOID BaseAddress)
+@@ -171,11 +187,17 @@ ULONG_PTR __stdcall xbox_MmGetPhysicalAddress(PVOID BaseAddress)
       */
      uint32_t va = (uint32_t)(uintptr_t)BaseAddress;
      if (va >= XBOX_CONTIG_BASE &&
@@ -176,18 +146,21 @@ index 43897a1..3754df3 100644
 +        note_physical_translation(physical, 2);
 +        return (ULONG_PTR)physical;
 +    }
-     /* The same number can be a window page; record that the title meant RAM
-      * (xbox_PhysNoteRamName says why the APU needs to know). */
-     xbox_PhysNoteRamName(va);
-+    note_physical_translation(va, 1);
-     return (ULONG_PTR)va;
+     /* RAM gets a number no window page has, where it can (xbox_PhysRamName:
+      * a heap page's alias in the first mirror; otherwise the identity, with
+      * the RAM name recorded for the APU). */
++    uint32_t physical = xbox_PhysRamName(va);
++    if (physical == va)
++        note_physical_translation(va, 1);
+-    return (ULONG_PTR)xbox_PhysRamName(va);
++    return (ULONG_PTR)physical;
  }
  
 diff --git a/tests/apu_phys/test_main.c b/tests/apu_phys/test_main.c
-index 5d21b74..e7fe57c 100644
+index d78e367..6a52f11 100644
 --- a/tests/apu_phys/test_main.c
 +++ b/tests/apu_phys/test_main.c
-@@ -31,6 +31,7 @@ recomp_func_t recomp_lookup(uint32_t xbox_va);
+@@ -40,6 +40,7 @@ recomp_func_t recomp_lookup(uint32_t xbox_va);
  recomp_func_t recomp_lookup(uint32_t xbox_va) { (void)xbox_va; return NULL; }
  recomp_func_t recomp_lookup_manual(uint32_t xbox_va);
  recomp_func_t recomp_lookup_manual(uint32_t xbox_va) { (void)xbox_va; return NULL; }
@@ -195,7 +168,20 @@ index 5d21b74..e7fe57c 100644
  
  static int failures;
  
-@@ -109,6 +110,8 @@ int main(int argc, char **argv)
+@@ -111,6 +112,12 @@ static void check_alias(uint32_t alias)
+               XBOX_STACK_BASE + 0x100, "a stack address keeps the identity");
+     check(xbox_MmGetPhysicalAddress((PVOID)(uintptr_t)(XBOX_CONTIG_BASE + a)) == a,
+           "a window address is still its offset");
++    check(xbox_PhysLastTranslationMap()[a >> 12] == 2,
++          "a low window translation records window intent");
++    check(xbox_PhysLastTranslationMap()[g_xbox_image_lo >> 12] == 1,
++          "an unaliased image translation records RAM intent");
++    check(xbox_PhysLastTranslationMap()[(XBOX_STACK_BASE + 0x100) >> 12] == 1,
++          "an unaliased stack translation records RAM intent");
+     xbox_HeapFree(a);
+ }
+ 
+@@ -160,6 +163,8 @@ int main(int argc, char **argv)
          check(xbox_MmGetPhysicalAddress((PVOID)(uintptr_t)w) == w,
                "MmGetPhysicalAddress is the identity for the heap");
      xbox_MmGetPhysicalAddress((PVOID)(uintptr_t)b);
@@ -204,19 +190,12 @@ index 5d21b74..e7fe57c 100644
      check(side(a + 0x10) == 0 && side(a + 0x2FF0) == 0,
            "a page named from the heap reads RAM");
      check(side(c + 0x1800) == 1, "a page nobody named still reads the window");
-@@ -121,7 +124,15 @@ int main(int argc, char **argv)
+@@ -172,6 +177,8 @@ int main(int argc, char **argv)
      check(side(c + 0x10) == 1, "an unnamed block's bytes on that page read the window");
  
      xbox_MmGetPhysicalAddress((PVOID)(uintptr_t)(XBOX_CONTIG_BASE + a));
 +    check(xbox_PhysLastTranslationMap()[a >> 12] == 2,
 +          "a contiguous translation records window intent");
      check(side(a + 0x10) == 0, "a window name of the same number keeps RAM");
-+    check((uintptr_t)(mcpx_apu_phys((a + 0x10) | 0x10000000u) - g_apu_ram_ptr)
-+              == a + 0x10,
-+          "a cached RAM tag overrides the general resolver");
-+    check((uintptr_t)(mcpx_apu_phys((a + 0x10) | 0x20000000u) - g_apu_ram_ptr)
-+              == 0x80000000u + a + 0x10,
-+          "a cached window tag overrides the general resolver");
  
      /* Not heap: the image and the main stack are never recorded. */
-     xbox_MmGetPhysicalAddress((PVOID)(uintptr_t)g_xbox_image_lo);

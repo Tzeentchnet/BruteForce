@@ -76,17 +76,24 @@ and odd-numbered mixbins to right; this preserves paired bins but is not an
 emulation of the Xbox EP program. In corrected retail gameplay traces,
 Brute Force uses hardware 3D-list voices 25-31 and HRTF submix bins 6-10;
 menu effects instead use equal-gain 2D routes in bins 0/1. HRTF turns a
-duplicated mono source into two output channels. Patch 0035 records that
-post-filter width so the bin router selects both HRTF channels rather than
-copying the left filter result into every route.
+duplicated mono source into two output channels. Upstream #298, which replaced
+the former local patch 0035, records that post-filter width so the bin router
+selects both HRTF channels rather than copying the left filter result into
+every route.
 
 The accurate stage uses a dedicated worker and bounded ring. Persistent
-window shadows preserve DSP memory that is outside each changed span. APU
-physical lookups carry a RAM-versus-contiguous-window intent tag so aliased
-scratch and FIFO pages resolve to the allocation the guest named. Repeated
+window shadows preserve DSP memory that is outside each changed span. With
+the v0.18 framework, heap physical names use RAM-mirror aliases and the DSP
+passes those names to the APU resolver without masking them. Low image and
+stack names remain unaliased, so cached translation intent chooses RAM versus
+the separate contiguous window for those names and for every low name when
+`RECOMP_PHYS_RAM_ALIAS=0`; overlapping names remain ambiguous before the DSP
+observes an entry. Repeated
 real-time overload can switch explicitly to fold-down unless
 `RECOMP_APU_DSP_FALLBACK=0` is set; allocation failures use the same reported
 fallback rather than silently returning success.
+The bounded v0.18 retail acceptance runs used the default fold-down, so the
+new external-DSP mirror and image/stack contracts remain synthetic-only.
 
 Shutdown order is part of the architecture: firmware-return and normal window
 exits run the additional project hook; the framework stops its frame worker;

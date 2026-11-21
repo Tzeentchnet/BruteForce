@@ -3,12 +3,35 @@
 The rendering architecture is in [RENDERING.md](RENDERING.md),
 the performance plan is in [PERFPLAN.md](PERFPLAN.md), measured
 results are in [FINDINGS.md](FINDINGS.md), and framework work is
-tracked in [UPSTREAM.md](UPSTREAM.md). The current
-toolkit uses xboxrecomp v0.17.0 at
-`343b6d8901723b37ce568b2418c5df4e1fe1d223`, selected post-release commits
-from #314, #319 and #320, and 43 local patches. Its isolated and independently
-replayed tree is `3e3ae3600802d2bf4446d86fc546322d60849047`.
-The framework tools on that tree report 995 passed, 2 skipped and 134
+tracked in [UPSTREAM.md](UPSTREAM.md). The current framework pin is xboxrecomp
+v0.18.0 at `37b61d589168adee3680fabd51805ee81427bf07` with 42 local patches
+and no separate selected upstream commits. Its reconstructed tree is
+`3fda068cfc85573c49b93230ea850298d4c948e1`. The clean patch replay and
+toolkit verification passed; focused v0.18 framework fixtures passed 31
+CTests, the FCMOV/WBINVD fixtures passed nine tests, and the project DSP
+memory and lifecycle fixtures passed. Retail regeneration, exact
+discovery/translation comparison, and bounded one-core, audio-on CPU/D3D11
+smokes also pass. Details, limits and the 128 MB host-mirror observation are
+in [FINDINGS.md](FINDINGS.md).
+
+Supported retail generation `20261120-163420-f9e3b4ed` is a Release build on
+that tree. It translated all 22,295 identified functions with zero failures,
+six unresolved direct-call targets and the same 11 untranslated instruction
+sites as v0.17. Function starts and ends are unchanged; only
+`0x002EA100`'s instruction count changed, from 262 to 265, after code/data
+resynchronization. The 37,582,848-byte executable SHA-256 is
+`a85d62f9558da67757559fc35119fb9d904fd6b0700da4ace86ccdf878902cc8`;
+the 36,474,880-byte PDB SHA-256 is
+`fab0485c13954988d3e9a1f95619b637275838a6d57d29432ebae40f0dd80420`.
+One D3D11 and one CPU attempt reached the same reviewed Basic Controls state
+without retry at 87.97 and 87.59 seconds, with audio on and guest threads on
+one core. Their stable captures differ by more than 8/255 in 677 pixels
+(0.2204%). This accepts the framework base, not performance, movement
+correctness, listening quality or long-session reliability.
+
+The preceding v0.17 toolkit used selected #314/#319/#320 commits and 43
+local patches, with tree `3e3ae3600802d2bf4446d86fc546322d60849047`.
+The framework tools on that earlier tree reported 995 passed, 2 skipped and 134
 subtests passed; the project suite reports 972 passed with WARP and the
 available hardware adapter; eleven focused framework groups report 47 CTests
 passed; and the presenter suite reports 19 passed. The Phase 4 subset
@@ -17,20 +40,18 @@ and the title-side fence, pushbuffer, PGRAPH, interrupt and toolkit selection
 reports 67 passed. The validation includes the runtime PGRAPH/PFB deadlock
 fix and its segment-ordering fixture.
 
-xboxrecomp v0.18.0 was released on 2026-11-20 at
-`37b61d589168adee3680fabd51805ee81427bf07`. It is the next framework base,
-not yet the supported pin. A disposable application-only probe found 39 of 43
-local patches apply unchanged. Patch 0030 must be redesigned around merged
-#286's RAM-mirror physical names; 0033 must be re-evaluated with merged #341's
-per-frame APU pacing; 0041 must preserve merged heap split/order/protection
-semantics; and 0042 needs a fixture-only CMake resolution. The provisional
-review tree `c549a8ebd6ca5bca31072737153e811014cd1ec2` was not built or tested
-and is not an expected toolkit tree. Do not update `toolkit.py` until those
-four overlaps are resolved in the patch files, focused fixtures pass,
-`toolkit.py --verify` passes from a clean checkout, and a regenerated title
-has discovery-delta, CPU-reference, D3D11, audio and startup validation.
+xboxrecomp v0.18.0 was released on 2026-11-20. The rebase preserves #286's
+RAM-mirror names in the external DSP. Its cached translation fallback remains
+for low image/stack names, which are not aliased, and for all low names when
+aliases are disabled. Patch 0033's unmeasured fixed APU-frame priority is
+retired rather than stacked on #341's new pacing. Patch 0041 preserves the
+upstream split, address-order and reprotection rules while tracking allocation
+lifetimes; 0042 retains both the upstream clear/present test and local
+diagnostics. The provisional review tree
+`c549a8ebd6ca5bca31072737153e811014cd1ec2` remains historical and is not the
+expected toolkit tree.
 
-Supported retail generation `20261113-214800-12924697` is a Release build on
+The preceding v0.17 supported generation `20261113-214800-12924697` is a Release build on
 runtime tree `3e3ae3600802d2bf4446d86fc546322d60849047`. It translated all
 22,295 identified functions with zero failures, six unresolved direct-call
 targets and 11 untranslated instruction sites. Its current 37,578,240-byte
@@ -38,7 +59,8 @@ executable SHA-256 is
 `f07ab1b80f34331eb2484c4c75f198cb7fb7726174cdf3eb2fce83dd84eb7d69`;
 the 36,474,880-byte PDB SHA-256 is
 `9ce6039972b27a5a9c1e173a5f91a82300d10def0a096e8c688d05702c0bb48d`.
-This clean generation retains explicit title-side caller layouts for three
+It predates the new pin and is not a v0.18 generation. This clean generation
+retains explicit title-side caller layouts for three
 PFB sites found incomplete by the texture-index campaign, adds the one-core
 guest-thread title default, and rejects both alias options at active internal
 scales. The scheduling/default selection reports 64 passed; the focused
@@ -96,18 +118,18 @@ sp00nznet/xboxrecomp#297, sp00nznet/xboxrecomp#298,
 sp00nznet/xboxrecomp#299 and sp00nznet/xboxrecomp#300 merged in v0.17.0;
 local patches 0001, 0005 and 0035 were removed. Issue
 [sp00nznet/xboxrecomp#301](https://github.com/sp00nznet/xboxrecomp/issues/301)
-closed after v0.17.0 corrected the raw `XC_VIDEO` encoding. Selected
+closed after v0.17.0 corrected the raw `XC_VIDEO` encoding. Previously selected
 sp00nznet/xboxrecomp#314, sp00nznet/xboxrecomp#319 and
-sp00nznet/xboxrecomp#320 are validated on the current v0.17 toolkit and now
-merged in v0.18.0; the base upgrade will remove their separate cherry-picks.
+sp00nznet/xboxrecomp#320 were validated on v0.17 and are now included in the
+v0.18.0 base; their separate cherry-picks have been removed.
 sp00nznet/xboxrecomp#315 remains unselected. Although GitHub marks it merged,
 v0.18.0 reverted that merge before release because its native Windows 16-bit
 `IDIV` test failed, consistent with the earlier 2,643 signed 16-bit mismatch
 result.
 
-The fresh-generation and focused-bring-up completion gate is met. A native
-xemu Basic Controls frame is now content-matched to fresh v0.17 CPU and D3D11
-captures, and a same-generation controlled comparison identifies the packed
+The v0.18 base-acceptance and focused-bring-up completion gate is met. The
+exact native xemu Basic Controls match remains against v0.17 CPU and D3D11
+captures; that same-generation controlled comparison identifies the packed
 stencil alias as the mechanism that removes the large brightness difference.
 The next gate is to extend that evidence through the sun-facing and
 end-of-opening-fade states and verify E1-E2 ownership in gameplay; the old
@@ -425,7 +447,7 @@ Blood Wake remains the main prior-art source, as it was for the renderer. The
 adapted-code baseline is the checkout in `.deps/bloodwake-recomp` at
 `e631edddfe56d22344e9f696923aeb6d78a9e7ba`; the latest reviewed source is
 v0.3.3 at `6292340705d9b863351a45ba160174a346a81688`. Both use the older
-xboxrecomp v0.16.0 base, not Brute Force's current v0.17.0 tree. Follow the
+xboxrecomp v0.16.0 base, not Brute Force's current v0.18.0 tree. Follow the
 AGENTS rules when adapting it: copy only generic code, preserve the applicable
 notice, add new adaptations to `THIRD_PARTY_NOTICES.md`, and name the exact
 source revision in the UPSTREAM entry. Its title-specific hooks, addresses
@@ -728,29 +750,37 @@ artifacts that the fixtures do not cover, and G5 is recorded.
 
 **Implemented and verified**
 
+The detailed retail observations in this section use the earlier framework.
+The v0.18 default Simple path passed bounded CPU and D3D11 Basic Controls
+smokes without an underrun or starvation diagnostic; Accurate, listening and
+long-session acceptance remain open.
+
 - Audio is default-on; `--no-audio` and `RECOMP_AUDIO=0` are explicit off
   paths. The launcher exposes On/Off and Accurate/Simple choices.
 - The default Simple path preserves the stereo all-mixbin fold-down. Accurate
   remains an experimental option that runs the title's GP and EP programs
   through the vendored xemu v0.8.139 DSP56300 C interpreter.
-- Framework patch 0035 preserves the two channels produced when HRTF filters
-  a mono source. Its synthetic negative control produced `+1/+1`; the fixed
-  path produces `+1/-1`.
-- Physical-translation intent distinguishes aliased heap and contiguous-window
-  pages. The dedicated DSP worker is signaled and joined before interpreters,
-  shadows, queues, and caches are released.
+- Merged framework #298, formerly local patch 0035, preserves the two
+  channels produced when HRTF filters a mono source. Its synthetic negative
+  control produced `+1/+1`; the fixed path produces `+1/-1`.
+- RAM-mirror physical names distinguish heap and contiguous-window pages by
+  default; the legacy no-mirror fallback remains ambiguous before an entry is
+  observed. The dedicated DSP worker is signaled and joined before
+  interpreters, shadows, queues, and caches are released.
 - Firmware-return and shutdown routes run full APU cleanup before
   `ExitProcess`; bounded WAVs now receive an exact RIFF header.
 - Xboxrecomp v0.17.0 includes former selected PR #264 commit
   `eb7b1f5833205a24fcc0eda6eb4ed2df4f2bc2e3` for the observed 2,048-sample
   sequencer restart hold, and merged #261 is current-base behavior. Open #266
-  and draft #286 remain unselected; closed #270 was not adopted because its
-  distinct failure mode was not observed.
+  remains unselected; #286 is merged in v0.18, and closed #270 was not
+  adopted because its distinct failure mode was not observed.
 - Six repeated native init/shutdown cycles passed without leaked process
   handles. Accurate and fold-down retail exit captures finalized correctly.
-- The host policy uses eight 512-sample buffers, a three-quarter refill
-  threshold, and a high-priority APU frame worker. The last long
-  then-default Accurate probe ran 164.47 seconds from startup through
+- The v0.17 host policy used eight 512-sample buffers, a three-quarter refill
+  threshold, and a high-priority APU frame worker. Eight buffers and the
+  refill threshold remain, but the fixed frame-worker priority is retired on
+  v0.18 pending measurements. The last long then-default Accurate probe ran
+  164.47 seconds from startup through
   tutorial/gameplay; it, an earlier 115-second transition, and a 260-second
   tutorial-world run reported zero underruns, starvation events, and refused
   submissions.
@@ -779,7 +809,7 @@ artifacts that the fixtures do not cover, and G5 is recorded.
 - The user's gameplay listening pass found the fixed Simple path improved but
   not fully correct. The remaining symptom was not characterized before the
   user deferred further audio work.
-- The final Release executable rebuilt with patch 0035. The standalone
+- The earlier Release executable rebuilt with the then-local patch 0035. The standalone
   `apu_vp` fixture and toolkit-tree verification passed; focused
   audio/build/launcher tests passed 144 cases, and the integrated selection
   passed 274 with 365 hardware/platform cases skipped.
@@ -808,10 +838,10 @@ artifacts that the fixtures do not cover, and G5 is recorded.
 5. The mono-HRTF correction merged as
    [sp00nznet/xboxrecomp#298](https://github.com/sp00nznet/xboxrecomp/pull/298)
    and local patch 0035 was removed; do not bundle follow-up changes with the
-   external-DSP series. Patches 0030-0034 still require the generic pieces and
-   policy changes to be split before upstream review. During the v0.18 rebase,
-   replace 0030's superseded physical-intent tags with #286's mirror aliases
-   and compare #341 pacing with and without patch 0033.
+   external-DSP series. The remaining 0030-0034 changes still require their
+   generic pieces and policy changes to be split before upstream review.
+   Compare #341 pacing without the retired 0033 policy against a controlled
+   priority/MMCSS alternative before considering its restoration.
 6. Do not import Blood Wake v0.3.0's native DSP, WASAPI path, or bit-exact hot
    loops while audio is deferred. If work resumes, first assess its
    off-thread device-rebuild and MMCSS policy against the existing XAudio2
@@ -1118,24 +1148,17 @@ Still open: access to a native 4K display. Optional 5.1 output is deferred.
 
 ## Order
 
-1. Rebase the framework stack onto xboxrecomp v0.18.0. Resolve 0030, 0033,
-   0041 and 0042 as described above; remove the now-merged #314/#319/#320
-   cherry-picks; run the focused framework fixtures and clean toolkit
-   verification; regenerate and compare discovery/function boundaries,
-   unresolved sites and `RECOMP_UNIMPL` reports; then run bounded CPU,
-   D3D11, audio and one-core startup smokes. Keep v0.17.0 as the supported
-   pin until every gate passes.
-2. Complete A1 and the single-view E1-E2 scope, then A2-A4 as the reference
+1. Complete A1 and the single-view E1-E2 scope, then A2-A4 as the reference
    and gamma-ramp question allow. The widescreen trace is diagnostic and must
    not change output.
-3. Implement the single-view E3-E8 scope behind one default-off mode, with a
+2. Implement the single-view E3-E8 scope behind one default-off mode, with a
    4:3 regression gate before wide output. Keep HUD relocation and split
    screen deferred.
-4. Continue B1-B10 behind switches with default scale-1 behavior unchanged.
-5. Run C's human listening pass against the stable scene from A; repeat
+3. Continue B1-B10 behind switches with default scale-1 behavior unchanged.
+4. Run C's human listening pass against the stable scene from A; repeat
    automated audio probes only for a new symptom or materially different
    audio-heavy scene.
-6. Continue D's compatibility work without weakening audio or GPU ordering.
+5. Continue D's compatibility work without weakening audio or GPU ordering.
 
 Update FINDINGS, UPSTREAM, PERFPLAN, ARCHITECTURE and the README in the same
 change as each milestone, as AGENTS requires.

@@ -16,6 +16,12 @@ the shortest supported build-and-run path, start with the
   public tooling; it does not upload the disc, extracted files, or generated
   code.
 
+The repository pins xboxrecomp v0.18.0. Its framework stack has synthetic
+coverage, and the North American retail game has been regenerated and reached
+the Basic Controls state in bounded one-core, audio-on CPU and D3D11 smokes.
+Those two legacy-readiness runs are bring-up evidence only; they do not
+establish full-game correctness, listening quality, or performance.
+
 From the project directory:
 
 ```powershell
@@ -49,7 +55,8 @@ and writes each run to a fresh directory. It records logs and a manifest under
 latest successful generation and MSVC's x64 toolchain. Generation verifies
 that each seed is present in dispatch, and build and run reject generations
 whose game, fingerprint, seeds, manual source, or pinned toolkit no longer
-match.
+match. The v0.18 rebase changes code generation, so v0.17 generations must be
+regenerated and compared rather than reused with the new framework.
 
 The executable checks the XBE fingerprint again at startup. Its default game
 directory is `game\disc` relative to the current working directory; an
@@ -239,7 +246,11 @@ events, or refused submissions; every marked startup, cinematics/menu,
 tutorial, and gameplay interval was non-silent, with no clipped samples or
 recurring 32/256/near-2,048-frame hole candidates. After the default changed,
 a bounded boot of the final linked executable with `RECOMP_APU_DSP` unset
-selected the stereo fold-down.
+selected the stereo fold-down. Those runs used the earlier v0.17 framework;
+the v0.18 Simple path subsequently reached Basic Controls in bounded CPU and
+D3D11 runs with the new pacing window and no logged underrun or starvation
+event. The Accurate path, human listening quality, and longer v0.18
+frame-worker behavior remain untested with retail.
 
 A corrected Quick Campaign diagnostic reached the rendered world and
 confirmed that Brute Force uses 3D/HRTF voices for gameplay effects. In a
@@ -264,6 +275,15 @@ Controls:
 - `RECOMP_APU_DSP_TRACE=1` enables the five-second DSP cost and worker-wait
   reports. They are off by default so diagnostic I/O cannot block an audio
   worker.
+- `RECOMP_PHYS_RAM_ALIAS=0` disables the framework's default RAM-mirror
+  physical names. The accurate DSP then uses a legacy cached-translation
+  fallback that cannot distinguish colliding names reliably if another
+  translation occurs before an entry is observed; leave aliases enabled for
+  normal use.
+- `RECOMP_APU_XDSP_PAGES=window` is a diagnostic override that redirects
+  low/window-overlapping SGE names, including RAM aliases, to the contiguous
+  window; directly addressed high RAM is unchanged. It can select the wrong
+  storage and should not be used for normal play.
 
 Invalid `RECOMP_AUDIO` values fail explicitly. The old
 `--experimental-audio` argument remains a hidden compatibility alias but is
@@ -953,10 +973,11 @@ fix. The only completed A/B pair is rejected because its final command has
 1,656 ms runtime drift. The operator chose not to restart another six-run
 sequence. Treat both collections as inconclusive mechanism evidence, not an
 accepted speedup; no further repeat is currently scheduled.
-Clean supported generation `20261113-214800-12924697` retains those mappings
-and adds the one-core startup default. Its supported build restores explicit
+Preceding v0.17 generation `20261113-214800-12924697` retains those mappings
+and adds the one-core startup default. Its build restored explicit
 scaled-alias rejection after the 4.5x correctness check; that check is not a
-retail performance run.
+retail performance run. Current v0.18 support comes from the separate
+regeneration and bounded acceptance smokes recorded in FINDINGS.
 
 ## Index-word batching comparison
 

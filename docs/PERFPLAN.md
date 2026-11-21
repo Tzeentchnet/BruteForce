@@ -14,8 +14,8 @@ pipeline and system boundaries are summarized in [RENDERING.md](./RENDERING.md).
 The worked example is the
 [Blood Wake recompilation](https://github.com/minimalice92/bloodwake-recomp)
 at commit `e631edddfe56d22344e9f696923aeb6d78a9e7ba`. That recorded checkout
-pins xboxrecomp `f0f8a461` (v0.16.0), while this project now pins v0.17.0 plus
-selected post-release work. Blood Wake reports 205–290 fps in gameplay at
+pins xboxrecomp `f0f8a461` (v0.16.0), while this project now pins v0.18.0.
+Blood Wake reports 205–290 fps in gameplay at
 3440×1440 with a D3D11 renderer and remains implementation prior art, not a
 shared current framework baseline. Its own files are MIT licensed, so they
 can be adapted here with attribution in `THIRD_PARTY_NOTICES.md`. Its
@@ -26,6 +26,14 @@ must not be copied.
 
 Measurements are in [FINDINGS.md](./FINDINGS.md#performance-plan-phase-0-and-the-first-gpu-path-results);
 next steps are in [NEXTSTEPS.md](./NEXTSTEPS.md).
+
+The v0.18 framework rebase is the supported base after clean replay, focused
+fixtures, exact retail regeneration review, and one bounded audio-on CPU and
+D3D11 Basic Controls smoke each. Those single stationary runs used legacy
+readiness and are not an A/B/A comparison or distinct-world measurement.
+No prior v0.17 frame-rate or audio-scheduling result becomes a v0.18 result;
+all performance phases and their existing reference, ordering and A/B/A gates
+remain unchanged.
 
 Before the runtime-only Phase 4 fix, integrated v0.17 Release generation
 `20261111-084222-7bdb6e56`'s codegen-identical executable completed one CPU
@@ -58,10 +66,14 @@ repeat. Older unpinned measurements remain valid only for their named
 generations and controls; do not combine them numerically with new pinned
 runs. Every future campaign must retain and report this control or name an
 explicit override.
-Clean supported generation `20261113-214800-12924697` contains that default
-and restores the fail-closed scaled depth/stencil-alias boundary after a 4.5x
-correctness check found a missing player model with packed aliases enabled.
-That check was not a performance run, so no phase or gate is promoted.
+Current supported generation `20261120-163420-f9e3b4ed` contains that default
+on the v0.18 framework tree and restores the fail-closed scaled
+depth/stencil-alias boundary. Its bounded D3D11 and CPU attempts reported
+25.409 and 3.681 stationary flips/s, respectively, but one run per renderer
+without alternation is not a performance comparison and promotes no phase or
+gate. The preceding v0.17 generation's 4.5x correctness check found a missing
+player model with packed aliases enabled and remains historical evidence for
+the boundary, not a performance run.
 
 A native 640x480 xemu Basic Controls frame is now matched by content to the
 preceding `20261111-002138-a9dbc18a` reference generation. A focused
@@ -103,8 +115,8 @@ matched performance pairs and reports missing gate evidence as inconclusive.
 The 24-run Phase 4 matrix is explicitly deferred; it is not an active phase
 exit or prerequisite for other work. The switches remain default-off and the
 unmeasured gates remain open.
-Current generation `20261111-084222-7bdb6e56` contains the required store
-hooks and its runtime-only rebuild pins the fixed tree.
+Phase 4 generation `20261111-084222-7bdb6e56` contains the required store
+hooks and its runtime-only rebuild pins the fixed historical tree.
 Opt-in interval timing also now covers pixel-shader compile/create failures
 and elapsed time when the persistent shader cache is off; existing
 cache-enabled hit/compile diagnostics remain separate.
@@ -122,8 +134,10 @@ cache-enabled hit/compile diagnostics remain separate.
 
 Simple stereo fold-down is now the default independently of the experimental
 graphics path. The vendored xemu v0.8.139 GP/EP interpreter remains an
-experimental option on a dedicated high-priority worker while the framework
-APU frame worker is also raised to `THREAD_PRIORITY_HIGHEST` on Windows.
+experimental option on a dedicated high-priority worker. The old v0.17
+framework APU frame worker was also raised to `THREAD_PRIORITY_HIGHEST` on
+Windows; that local policy is retired on v0.18 pending an A/B/A comparison
+with merged per-frame pacing and any MMCSS alternative.
 Observed DSP time was roughly 200-250 ms per second of game time on the
 validation host, so raw compute was not the source of the remaining queue
 gaps.
@@ -152,8 +166,9 @@ in the then-current Simple build as well.
 
 The first Simple traces were mistakenly classified as gameplay; framebuffer
 evidence showed that they were still on the main menu. A corrected Quick
-Campaign route reached the world and exercised 3D/HRTF voices. Patch 0035
-fixes a generic mono-source channel-selection defect there. A clean scripted
+Campaign route reached the world and exercised 3D/HRTF voices. Former local
+patch 0035, now merged as #298, fixed a generic mono-source channel-selection
+defect there. A clean scripted
 fixed/baseline/fixed comparison measured firing-window correlation
 `0.415/0.542/0.422` and side-to-mid RMS ratios
 `0.641/0.544/0.636`, with zero underruns, starvation, refusals, clipping, or

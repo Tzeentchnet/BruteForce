@@ -12,8 +12,8 @@ import tempfile
 ROOT = Path(__file__).resolve().parents[1]
 TOOLKIT_DIR = ROOT / ".deps" / "xboxrecomp"
 TOOLKIT_URL = "https://github.com/sp00nznet/xboxrecomp.git"
-TOOLKIT_BASE = "343b6d8901723b37ce568b2418c5df4e1fe1d223"
-TOOLKIT_TREE = "3e3ae3600802d2bf4446d86fc546322d60849047"
+TOOLKIT_BASE = "37b61d589168adee3680fabd51805ee81427bf07"
+TOOLKIT_TREE = "3fda068cfc85573c49b93230ea850298d4c948e1"
 LOCAL_PATCHES = (
     ROOT / "patches" / "xboxrecomp" / "0002-model-wbinvd.patch",
     ROOT / "patches" / "xboxrecomp" / "0003-synchronize-semaphore-target.patch",
@@ -45,7 +45,6 @@ LOCAL_PATCHES = (
     ROOT / "patches" / "xboxrecomp" / "0030-accurate-apu-dsp-hooks.patch",
     ROOT / "patches" / "xboxrecomp" / "0031-external-apu-dsp-lifecycle.patch",
     ROOT / "patches" / "xboxrecomp" / "0032-run-hooks-before-firmware-exit.patch",
-    ROOT / "patches" / "xboxrecomp" / "0033-prioritize-apu-frame-worker.patch",
     ROOT / "patches" / "xboxrecomp" / "0034-raise-apu-queue-low-water.patch",
     ROOT / "patches" / "xboxrecomp" / "0036-event-driven-pfb-flush-wait.patch",
     ROOT / "patches" / "xboxrecomp" / "0037-report-serial-raster-worker.patch",
@@ -60,13 +59,8 @@ LOCAL_PATCHES = (
     ROOT / "patches" / "xboxrecomp" / "0046-index-word-runs.patch",
 )
 
-# PRs #314, #319, and #320, in their tested application order.
-PATCH_COMMITS = (
-    "f4e42bece1bfa7cafabc5112b0d59790634a0f63",
-    "7aba7bcb73b439671848e32829b2ca1953108ed2",
-    "fc95701c1a1994991e06c41d56fdeb234d708930",
-    "cf5a4db8272945d256d472ff46278470552113ae",
-)
+# v0.18.0 already includes the previously selected #314, #319, and #320.
+PATCH_COMMITS = ()
 
 
 class ToolkitError(Exception):
@@ -143,7 +137,8 @@ def setup_toolkit(path=TOOLKIT_DIR):
         checkout = Path(temp) / "checkout"
         git(None, "clone", "-c", "core.autocrlf=false", "--no-checkout", TOOLKIT_URL, str(checkout))
         git(checkout, "checkout", "--detach", TOOLKIT_BASE)
-        git(checkout, "fetch", "--no-tags", "origin", *PATCH_COMMITS)
+        if PATCH_COMMITS:
+            git(checkout, "fetch", "--no-tags", "origin", *PATCH_COMMITS)
         for commit in PATCH_COMMITS:
             print(f"Applying upstream commit {commit[:12]}", flush=True)
             git(checkout, "cherry-pick", "--no-commit", commit)

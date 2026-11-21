@@ -186,6 +186,18 @@ target_include_directories(bruteforce_apu_dsp_lifecycle_test PRIVATE
 )
 target_link_libraries(bruteforce_apu_dsp_lifecycle_test PRIVATE xboxrecomp)
 
+add_executable(bruteforce_apu_xdsp_memory_test EXCLUDE_FROM_ALL
+    tests/apu_xdsp_memory_test.c src/audio/recomp_apu_xdsp.c)
+target_compile_definitions(bruteforce_apu_xdsp_memory_test PRIVATE
+    RECOMP_XDSP_TESTING=1 WIN32_LEAN_AND_MEAN NOMINMAX _CRT_SECURE_NO_WARNINGS)
+target_include_directories(bruteforce_apu_xdsp_memory_test PRIVATE
+    "${XBOXRECOMP_DIR}/src"
+    "${XBOXRECOMP_DIR}/src/apu"
+    "${XBOXRECOMP_DIR}/src/kernel"
+    "${XBOXRECOMP_DIR}/src/nv2a"
+)
+target_link_libraries(bruteforce_apu_xdsp_memory_test PRIVATE xboxrecomp recomp_xemu_dsp)
+
 add_executable(bruteforce_gpu_audit_test EXCLUDE_FROM_ALL tests/gpu_audit_test.c)
 target_compile_definitions(bruteforce_gpu_audit_test PRIVATE
     WIN32_LEAN_AND_MEAN NOMINMAX _CRT_SECURE_NO_WARNINGS)

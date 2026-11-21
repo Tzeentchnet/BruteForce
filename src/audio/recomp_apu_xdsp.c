@@ -57,6 +57,8 @@
 
 extern ptrdiff_t xbox_GetMemoryOffset(void);
 extern const volatile uint8_t *xbox_ContiguousPageMap(void);
+extern uint32_t xbox_PhysRamAlias(void);
+extern size_t g_xbox_total_ram, g_xbox_map_size;
 
 /* Unset RECOMP_APU_DSP selects the stereo fold-down. */
 #define RECOMP_XDSP_DEFAULT 0
@@ -157,55 +159,75 @@ static uint8_t *win(uint32_t guest)
 
 /* ---- scatter-gather (xemu scatter_gather_rw) -------------------------- */
 
-/* Which copy a DSP page is (TK-17). Here the heap and the contiguous window
- * are separate storage that share physical numbers, and DirectSound fills
- * the DSPs' SGE tables with MmGetPhysicalAddress results. Seen in Blood
- * Wake: the four tables, the FIFOs and the EP's scratch
- * are contiguous memory (the window); the GP's effect scratch that comes
- * with the effects image (entries 12-205, about 780 KB: the reverb's delay
- * lines) is heap RAM, whose numbers the contiguous allocator later also
- * hands out (textures, buffers).
- *
- * The first version of this file resolved by the general rules, which put a
- * table in the heap copy and wrote DSP output over the guest's main stack;
- * the second pinned everything to the window, which put the delay lines in
- * other allocations' memory: the reverb read their contents (a second of
- * loud noise at boot) and wrote over them. Now each entry's copy comes from
- * the kernel's record of the page's last translation (t1 RAM, t2 window),
- * taken once, when the entry's value first appears, and kept: a later
- * translation of the same number for something else (D3D translating a
- * texture there) must not move it. The tables are scanned when DirectSound
- * writes an SGE register (recomp_xdsp_sge_written, right after its
- * translations) and once a frame. RECOMP_APU_XDSP_PAGES=window restores the
- * pinning. */
+/* Mirror physical names distinguish heap RAM from the contiguous window.
+ * Image and stack names remain low, so cache their latest translation like
+ * alias-disabled names. That record remains ambiguous if another translation
+ * of the same number wins before the entry is observed. */
 extern const volatile uint8_t *xbox_PhysRamNameMap(void);
 extern const volatile uint8_t *xbox_PhysLastTranslationMap(void);
 
-enum { COPY_NONE, COPY_WINDOW, COPY_RAM };
-enum { WHY_T1, WHY_T2, WHY_NEXT, WHY_C, WHY_N, WHY_DEFAULT, WHY_PINNED, WHY_COUNT };
+enum { COPY_NONE, COPY_WINDOW, COPY_RAM, COPY_PHYSICAL };
+enum { WHY_PHYSICAL, WHY_T1, WHY_T2, WHY_NEXT, WHY_C, WHY_N, WHY_DEFAULT,
+       WHY_PINNED, WHY_COUNT };
 static const char *const s_why_name[WHY_COUNT] = {
-    "last translation RAM", "last translation window", "next page of the entry before",
-    "contiguous, never named", "named heap, not contiguous", "default window", "pinned"
+    "physical name", "last translation RAM", "last translation window",
+    "next page of the entry before", "contiguous, never named",
+    "named heap, not contiguous", "default window", "pinned"
 };
 static int s_pages_mode = -1;               /* 'w': pinned to the window */
 
+/* A cached SGE may span an unaligned 4 KB run, but not cross out of its
+ * physical RAM or alias region. Do not feed out-of-range values to the APU
+ * resolver, which otherwise wraps them. */
+static int physical_span_valid(uint64_t pa, uint64_t bytes)
+{
+    const uint64_t low = 64u << 20;
+    uint64_t end = pa + bytes, alias = xbox_PhysRamAlias();
+    uint64_t mapped = g_xbox_map_size ? g_xbox_map_size : g_xbox_total_ram;
+
+    if (!bytes || end < pa || end > (1u << 28))
+        return 0;
+    if (pa < low)
+        return end <= low;
+    if (alias && pa >= alias && pa < alias + low)
+        return end <= alias + low;
+    return pa < mapped && end <= mapped;
+}
+
+static int physical_low_offset(uint32_t pa, uint32_t *offset)
+{
+    uint32_t alias = xbox_PhysRamAlias();
+    if (alias && pa >= alias && pa - alias < (64u << 20))
+        pa -= alias;
+    if (pa >= (64u << 20))
+        return 0;
+    *offset = pa;
+    return 1;
+}
+
 static int page_copy(uint32_t pa, int prev_copy, uint32_t prev_pa, int *why)
 {
-    uint32_t pg = (pa & 0x03FFFFFFu) >> 12;
-    uint8_t kind = xbox_PhysLastTranslationMap()[pg];
-    uint8_t c = xbox_ContiguousPageMap()[pg], n = xbox_PhysRamNameMap()[pg];
+    uint32_t alias = xbox_PhysRamAlias(), low, pg;
+    uint8_t kind, c, n;
 
     if (s_pages_mode < 0) {
         const char *e = getenv("RECOMP_APU_XDSP_PAGES");
         s_pages_mode = e && e[0] == 'w' ? 'w' : 'r';
     }
-    if (s_pages_mode == 'w')
+    if (s_pages_mode == 'w' && physical_low_offset(pa, &low))
         return *why = WHY_PINNED, COPY_WINDOW;
+    if ((alias && pa >= alias && pa - alias < (64u << 20)) ||
+            pa >= (64u << 20))
+        return *why = WHY_PHYSICAL, COPY_PHYSICAL;
+    pg = pa >> 12;
+    kind = xbox_PhysLastTranslationMap()[pg];
+    c = xbox_ContiguousPageMap()[pg];
+    n = xbox_PhysRamNameMap()[pg];
     if (kind == 2)
         return *why = WHY_T2, COPY_WINDOW;
     if (kind == 1)
         return *why = WHY_T1, COPY_RAM;
-    if (prev_copy && pa == prev_pa + SG_PAGE)
+    if (prev_copy && prev_pa <= UINT32_MAX - SG_PAGE && pa == prev_pa + SG_PAGE)
         return *why = WHY_NEXT, prev_copy;  /* a block translated by its first page */
     if (c && !n)
         return *why = WHY_C, COPY_WINDOW;
@@ -216,8 +238,12 @@ static int page_copy(uint32_t pa, int prev_copy, uint32_t prev_pa, int *why)
 
 static uint8_t *copy_ptr(uint32_t pa, int copy)
 {
-    return mcpx_apu_phys((uint64_t)(pa & 0x03FFFFFFu)
-                         | (copy == COPY_RAM ? 0x10000000u : 0x20000000u));
+    uint32_t low;
+    if (copy == COPY_PHYSICAL)
+        return mcpx_apu_phys(pa);
+    if (!physical_low_offset(pa, &low))
+        return NULL;
+    return g_apu_ram_ptr + low + (copy == COPY_WINDOW ? 0x80000000u : 0u);
 }
 
 #define SGE_CACHE_MAX 4096
@@ -252,8 +278,10 @@ static void sgc_table(SgeCache *c, uint32_t base)
     memset(c->copy, 0, sizeof c->copy);
     memset(c->by_why, 0, sizeof c->by_why);
     c->resolved = c->max_seen = c->reported = 0;
-    fprintf(stderr, "[APU-XDSP] SGE %s table 0x%08X: the %s copy (%s)\n", c->name, base,
-            c->table_copy == COPY_RAM ? "RAM" : "window", s_why_name[c->table_why]);
+    fprintf(stderr, "[APU-XDSP] SGE %s table 0x%08X: %s (%s)\n", c->name, base,
+            c->table_copy == COPY_RAM ? "RAM" :
+            c->table_copy == COPY_WINDOW ? "window" : "physical resolver",
+            s_why_name[c->table_why]);
 }
 
 /* Entry e's 4 KB, or NULL if the entry names none. An entry need not be
@@ -265,11 +293,16 @@ static void sgc_table(SgeCache *c, uint32_t base)
  * the lock. */
 static uint8_t *sgc_entry(SgeCache *c, uint32_t e, uint32_t *prd_out)
 {
-    uint32_t prd = *(const uint32_t *)copy_ptr(c->base + e * 8, c->table_copy);
+    uint64_t offset = (uint64_t)e * 8;
+    uint32_t prd;
     int why, copy;
 
+    *prd_out = 0;
+    if (!physical_span_valid(c->base, offset + sizeof prd))
+        return NULL;
+    memcpy(&prd, copy_ptr(c->base + (uint32_t)offset, c->table_copy), sizeof prd);
     *prd_out = prd;
-    if (!prd || prd > (64u << 20) - SG_PAGE)
+    if (!prd || !physical_span_valid(prd, SG_PAGE))
         return NULL;
     if (e >= SGE_CACHE_MAX)
         return copy_ptr(prd, page_copy(prd, 0, 0, &why));
@@ -366,11 +399,16 @@ static void sg_rw(MCPXAPUState *d, int which, uint8_t *ptr, uint32_t addr, size_
     ReleaseSRWLockExclusive(&s_sgc_lock);
 }
 
-/* Diagnostic: one SGE table's pages, as runs of entries with the same
- * evidence: c = the contiguous allocator has the page in use, n = a heap
- * address with that number was translated (xbox_PhysRamNameMap), t1/t2 =
- * the page's last translation was RAM / the window (TK-17's record), and
- * which copies are all zero (zR = RAM copy, zW = window copy). */
+#if defined(RECOMP_XDSP_TESTING)
+void recomp_xdsp_test_sg_rw(MCPXAPUState *d, uint32_t addr, uint8_t *ptr,
+                            size_t len, int write)
+{
+    sg_rw(d, 0, ptr, addr, len, write != 0);
+}
+#endif
+
+/* Diagnostic: c = contiguous page in use, n = fallback RAM-name record,
+ * t1/t2 = fallback last translation, zR/zW = zero RAM/window page. */
 static int page_zero(const uint8_t *p)
 {
     const uint64_t *q = (const uint64_t *)p;
@@ -383,9 +421,16 @@ static int page_zero(const uint8_t *p)
 
 static void page_desc(uint32_t pa, char *out, size_t cap)
 {
-    uint32_t pg = (pa & 0x03FFFFFFu) >> 12;
-    const uint8_t *ram = mcpx_apu_phys((uint64_t)(pg << 12) | 0x10000000u);
-    const uint8_t *wnd = mcpx_apu_phys((uint64_t)(pg << 12) | 0x20000000u);
+    uint32_t low, pg;
+    const uint8_t *ram, *wnd;
+    if (!physical_span_valid(pa, 1) || !physical_low_offset(pa, &low)) {
+        _snprintf(out, cap, "direct or invalid");
+        out[cap - 1] = 0;
+        return;
+    }
+    pg = low >> 12;
+    ram = g_apu_ram_ptr + (pg << 12);
+    wnd = ram + 0x80000000u;
     _snprintf(out, cap, "%s%s t%u %s%s", xbox_ContiguousPageMap()[pg] ? "c" : "-",
               xbox_PhysRamNameMap()[pg] ? "n" : "-", xbox_PhysLastTranslationMap()[pg],
               page_zero(ram) ? "zR" : "..", page_zero(wnd) ? "zW" : "..");
@@ -396,24 +441,37 @@ static void sge_survey(const char *name, uint32_t base, uint32_t max)
 {
     char d[32], run_d[32] = "";
     uint32_t e, run_start = 0, run_first = 0, run_last = 0;
-    int k, tc = COPY_WINDOW;
+    int k, tc = COPY_PHYSICAL;
     if (!base) {
         fprintf(stderr, "[APU-XDSP] SGE %s: no table\n", name);
         return;
     }
+    if (!physical_span_valid(base, 5 * sizeof(uint32_t))) {
+        fprintf(stderr, "[APU-XDSP] SGE %s: invalid table 0x%08X\n", name, base);
+        return;
+    }
     page_desc(base, d, sizeof d);
     {
-        const uint32_t *r = (const uint32_t *)mcpx_apu_phys((uint64_t)base | 0x10000000u);
-        const uint32_t *w = (const uint32_t *)mcpx_apu_phys((uint64_t)base | 0x20000000u);
-        fprintf(stderr, "[APU-XDSP] SGE %s: table 0x%08X [%s], entries 0..%u;"
-                        " RAM copy %08X %08X %08X, window copy %08X %08X %08X\n",
-                name, base, d, max, r[0], r[2], r[4], w[0], w[2], w[4]);
+        uint32_t low;
+        if (physical_low_offset(base, &low)) {
+            const uint32_t *r = (const uint32_t *)copy_ptr(base, COPY_RAM);
+            const uint32_t *w = (const uint32_t *)copy_ptr(base, COPY_WINDOW);
+            fprintf(stderr, "[APU-XDSP] SGE %s: table 0x%08X [%s], entries 0..%u;"
+                            " RAM copy %08X %08X %08X, window copy %08X %08X %08X\n",
+                    name, base, d, max, r[0], r[2], r[4], w[0], w[2], w[4]);
+        } else {
+            fprintf(stderr, "[APU-XDSP] SGE %s: table 0x%08X [%s], entries 0..%u\n",
+                    name, base, d, max);
+        }
     }
     for (k = 0; k < 4; k++)
         if (s_sgc[k].base == base && s_sgc[k].table_copy)
             tc = s_sgc[k].table_copy;
     for (e = 0; e <= max && e < 4096; e++) {
-        uint32_t prd = *(const uint32_t *)copy_ptr(base + e * 8, tc);
+        uint32_t prd;
+        if (!physical_span_valid(base, (uint64_t)e * 8 + sizeof prd))
+            break;
+        memcpy(&prd, copy_ptr(base + e * 8, tc), sizeof prd);
         page_desc(prd, d, sizeof d);
         if (e && (strcmp(d, run_d) || prd != run_last + 0x1000)) {
             fprintf(stderr, "[APU-XDSP]   %s %u-%u: 0x%08X-0x%08X [%s]\n", name, run_start, e - 1,

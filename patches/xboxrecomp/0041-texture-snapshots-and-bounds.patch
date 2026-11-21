@@ -17,10 +17,10 @@ index 493fa59..e5a6605 100644
   * of the semaphore the title reads GPU progress from (for XDK D3D, the
   * pointer at device+0x30). The executor writes each release there once it
 diff --git a/src/kernel/nv2a_pb_exec.c b/src/kernel/nv2a_pb_exec.c
-index 2876940..cae84b0 100644
+index 749817e..aac85aa 100644
 --- a/src/kernel/nv2a_pb_exec.c
 +++ b/src/kernel/nv2a_pb_exec.c
-@@ -1432,10 +1432,24 @@ static uint32_t linear_twin(uint32_t fmt)
+@@ -1437,10 +1437,24 @@ static uint32_t linear_twin(uint32_t fmt)
  }
  
  /* Sample texel (u, v) of stage texture `t`; `face` offsets a cube map. */
@@ -48,7 +48,7 @@ index 2876940..cae84b0 100644
      const uint8_t *p;
      uint32_t fmt, base = t->offset + face_offset;
  
-@@ -1503,10 +1517,10 @@ static int sample_tex(const Texture *t, uint32_t face_offset,
+@@ -1508,10 +1522,10 @@ static int sample_tex(const Texture *t, uint32_t face_offset,
  
      /* 32-bit, alpha-red-green-blue in the dword. */
      case 0x12:                                      /* LIN_A8R8G8B8 */
@@ -61,7 +61,7 @@ index 2876940..cae84b0 100644
          return 1;
  
      /* 8-bit palette index, swizzled. Burnout 3 draws its logo and frontend
-@@ -1525,12 +1539,12 @@ static int sample_tex(const Texture *t, uint32_t face_offset,
+@@ -1530,12 +1544,12 @@ static int sample_tex(const Texture *t, uint32_t face_offset,
      /* 32-bit, other channel orders. The name gives the byte order from the
       * top of the dword down, so each is a permutation of the same four. */
      case 0x3F: {                                    /* LIN_A8B8G8R8 */
@@ -76,7 +76,7 @@ index 2876940..cae84b0 100644
          *argb = ((t & 0xFFu) << 24)                 /* A, from the bottom */
                | (((t >>  8) & 0xFFu) << 16)         /* R */
                | (((t >> 16) & 0xFFu) <<  8)         /* G */
-@@ -1538,14 +1552,14 @@ static int sample_tex(const Texture *t, uint32_t face_offset,
+@@ -1543,14 +1557,14 @@ static int sample_tex(const Texture *t, uint32_t face_offset,
          return 1;
      }
      case 0x41: {                                    /* LIN_R8G8B8A8 */
@@ -93,7 +93,7 @@ index 2876940..cae84b0 100644
          *argb = ((t & 0x8000u) ? 0xFF000000u : 0u)
                | (expand((t >> 10) & 0x1F, 5) << 16)
                | (expand((t >>  5) & 0x1F, 5) <<  8)
-@@ -1553,7 +1567,7 @@ static int sample_tex(const Texture *t, uint32_t face_offset,
+@@ -1558,7 +1572,7 @@ static int sample_tex(const Texture *t, uint32_t face_offset,
          return 1;
      }
      case 0x1C: {                                    /* LIN_X1R5G5B5 */
@@ -102,7 +102,7 @@ index 2876940..cae84b0 100644
          *argb = 0xFF000000u
                | (expand((t >> 10) & 0x1F, 5) << 16)
                | (expand((t >>  5) & 0x1F, 5) <<  8)
-@@ -1561,7 +1575,7 @@ static int sample_tex(const Texture *t, uint32_t face_offset,
+@@ -1566,7 +1580,7 @@ static int sample_tex(const Texture *t, uint32_t face_offset,
          return 1;
      }
      case 0x11: {                                    /* LIN_R5G6B5 */
@@ -111,7 +111,7 @@ index 2876940..cae84b0 100644
          *argb = 0xFF000000u
                | (expand((t >> 11) & 0x1F, 5) << 16)
                | (expand((t >>  5) & 0x3F, 6) <<  8)
-@@ -1569,7 +1583,7 @@ static int sample_tex(const Texture *t, uint32_t face_offset,
+@@ -1574,7 +1588,7 @@ static int sample_tex(const Texture *t, uint32_t face_offset,
          return 1;
      }
      case 0x1D: {                                    /* LIN_A4R4G4B4 */
@@ -120,7 +120,7 @@ index 2876940..cae84b0 100644
          *argb = (expand((t >> 12) & 0x0F, 4) << 24)
                | (expand((t >>  8) & 0x0F, 4) << 16)
                | (expand((t >>  4) & 0x0F, 4) <<  8)
-@@ -1623,6 +1637,78 @@ static int sample_tex(const Texture *t, uint32_t face_offset,
+@@ -1628,6 +1642,78 @@ static int sample_tex(const Texture *t, uint32_t face_offset,
      }
  }
  
@@ -200,7 +200,7 @@ index 2876940..cae84b0 100644
  {
      return sample_tex(&s_gpu.texs[0], 0, u, v, argb);
 diff --git a/src/kernel/xbox_memory_layout.c b/src/kernel/xbox_memory_layout.c
-index e7a72f6..557ca8b 100644
+index 0b10fc7..c073d47 100644
 --- a/src/kernel/xbox_memory_layout.c
 +++ b/src/kernel/xbox_memory_layout.c
 @@ -54,6 +54,38 @@ static void *g_memory_base = NULL;
@@ -242,7 +242,7 @@ index e7a72f6..557ca8b 100644
  /* Actual mapped RAM for this run; see the header. Default retail 64 MB. */
  size_t g_xbox_total_ram = XBOX_TOTAL_RAM;
  size_t g_xbox_map_size = 0;   /* 0 = same as RAM */
-@@ -3688,6 +3720,7 @@ BOOL xbox_MemoryLayoutInit(const void *xbe_data, size_t xbe_size)
+@@ -3692,6 +3724,7 @@ BOOL xbox_MemoryLayoutInit(const void *xbe_data, size_t xbe_size)
          win_settle_placeholders();
  #endif
      xbox_WatchInit();
@@ -250,7 +250,7 @@ index e7a72f6..557ca8b 100644
      fprintf(stderr, "xbox_MemoryLayoutInit: complete\n");
      return TRUE;
  }
-@@ -3723,6 +3756,7 @@ void xbox_ProtectMirrorsForDebug(void)
+@@ -3727,6 +3760,7 @@ void xbox_ProtectMirrorsForDebug(void)
  
  void xbox_MemoryLayoutShutdown(void)
  {
@@ -258,7 +258,7 @@ index e7a72f6..557ca8b 100644
      if (g_kernel_memory) {
          VirtualFree(g_kernel_memory, 0, MEM_RELEASE);
          g_kernel_memory = NULL;
-@@ -3890,7 +3924,11 @@ static int g_heap_alloc_count = 0;
+@@ -3894,7 +3928,11 @@ static int g_heap_alloc_count = 0;
  #define XBOX_HEAP_MAX_BLOCKS 65536
  /* `named`: MmGetPhysicalAddress was given an address inside this live block
   * (xbox_PhysNoteRamName); cleared whenever the block is handed out or freed. */
@@ -271,23 +271,23 @@ index e7a72f6..557ca8b 100644
      g_heap_blocks[XBOX_HEAP_MAX_BLOCKS];
  static int g_heap_block_count = 0;
  
-@@ -3928,6 +3966,7 @@ static int heap_insert_free(int at, uint32_t addr, uint32_t size)
+@@ -3932,6 +3970,7 @@ static int heap_insert_free(int at, uint32_t addr, uint32_t size)
      g_heap_blocks[at].addr = addr;
      g_heap_blocks[at].size = size;
      g_heap_blocks[at].free = 1; g_heap_blocks[at].named = 0;
 +    g_heap_blocks[at].identity = 0;
-     return 1;
- }
- 
-@@ -3954,6 +3993,7 @@ static uint32_t heap_carve_free(uint32_t size, uint32_t alignment)
-         g_heap_blocks[i].addr = start;
-         g_heap_blocks[i].size = size;
-         g_heap_blocks[i].free = 0; g_heap_blocks[i].named = 0;
-+        g_heap_blocks[i].identity = next_memory_identity();
-         if (back && !heap_insert_free(i + 1, start + size, back))
-             g_heap_blocks[i].size += back;   /* table full: keep it attached */
-         memset((void *)((uintptr_t)start + g_memory_offset), 0, size);
-@@ -4147,6 +4187,7 @@ void xbox_FreeThreadStack(uint32_t stack_top)
+     /* The empty slots after a reused one kept addresses from inside the block
+      * that was carved, which can be below `addr` now. Left there they break
+      * the address order heap_block_at searches by: DOAX's replayed movie ring
+@@ -3966,6 +4005,7 @@ static uint32_t heap_carve_block(int i, uint32_t size, uint32_t alignment)
+     g_heap_blocks[i].addr = start;
+     g_heap_blocks[i].size = size;
+     g_heap_blocks[i].free = 0; g_heap_blocks[i].named = 0;
++    g_heap_blocks[i].identity = next_memory_identity();
+     if (back && !heap_insert_free(i + 1, start + size, back))
+         g_heap_blocks[i].size += back;   /* table full: keep it attached */
+     memset((void *)((uintptr_t)start + g_memory_offset), 0, size);
+@@ -4168,6 +4208,7 @@ void xbox_FreeThreadStack(uint32_t stack_top)
  static uint8_t  g_contig_used[CONTIG_PAGES] = { CONTIG_RESERVED };
                                                 /* 1 = page belongs to a block */
  static uint32_t g_contig_len[CONTIG_PAGES];    /* pages, at a block's first page */
@@ -295,7 +295,7 @@ index e7a72f6..557ca8b 100644
  static uint32_t g_contig_pages_in_use;
  static uint32_t g_contig_high = CONTIG_PAGE;   /* high-water mark, bytes */
  static uint32_t g_contig_first_free = 1;       /* no free page below this */
-@@ -4196,6 +4237,7 @@ static void contig_take(uint32_t first, uint32_t n)
+@@ -4217,6 +4258,7 @@ static void contig_take(uint32_t first, uint32_t n)
  
      memset(&g_contig_used[first], 1, n);
      g_contig_len[first] = n;
@@ -303,7 +303,7 @@ index e7a72f6..557ca8b 100644
      g_contig_pages_in_use += n;
      if (g_contig_pages_in_use > g_contig_peak_pages)
          g_contig_peak_pages = g_contig_pages_in_use;
-@@ -4385,10 +4427,13 @@ int xbox_ContiguousFree(uint32_t va)
+@@ -4412,10 +4454,13 @@ int xbox_ContiguousFree(uint32_t va)
  /* Bytes from va to the end of the block containing it, or 0 if va is not in
   * an allocated block -- the same convention as xbox_HeapBlockSize, and for
   * the same caller, MmQueryAllocationSize. */
@@ -318,7 +318,7 @@ index e7a72f6..557ca8b 100644
      if (va < XBOX_CONTIG_BASE
              || (uint64_t)va >= (uint64_t)XBOX_CONTIG_BASE + XBOX_CONTIG_SIZE)
          return 0;
-@@ -4400,9 +4445,19 @@ uint32_t xbox_ContiguousBlockSize(uint32_t va)
+@@ -4427,9 +4472,19 @@ uint32_t xbox_ContiguousBlockSize(uint32_t va)
              first--;
          result = XBOX_CONTIG_BASE + (first + g_contig_len[first]) * CONTIG_PAGE
                 - va;
@@ -339,15 +339,15 @@ index e7a72f6..557ca8b 100644
  }
  
  /* High-water mark of the window: everything below it was, at some point,
-@@ -4616,6 +4671,7 @@ static uint32_t heap_alloc_locked(uint32_t size, uint32_t alignment)
-                 continue;   /* wrong alignment for this request */
+@@ -4708,6 +4763,7 @@ static uint32_t heap_alloc_locked(uint32_t size, uint32_t alignment)
+                     return result;
              }
              g_heap_blocks[i].free = 0; g_heap_blocks[i].named = 0;
 +            g_heap_blocks[i].identity = next_memory_identity();
              result = g_heap_blocks[i].addr;
              memset((void *)((uintptr_t)result + g_memory_offset), 0, size);
              return result;
-@@ -4670,6 +4726,7 @@ static uint32_t heap_alloc_locked(uint32_t size, uint32_t alignment)
+@@ -4762,6 +4818,7 @@ static uint32_t heap_alloc_locked(uint32_t size, uint32_t alignment)
          g_heap_blocks[g_heap_block_count].addr = result;
          g_heap_blocks[g_heap_block_count].size = size;
          g_heap_blocks[g_heap_block_count].free = 0; g_heap_blocks[g_heap_block_count].named = 0;
@@ -355,7 +355,7 @@ index e7a72f6..557ca8b 100644
          g_heap_block_count++;
      }
  
-@@ -4700,11 +4757,14 @@ static uint32_t heap_alloc_locked(uint32_t size, uint32_t alignment)
+@@ -4792,11 +4849,14 @@ static uint32_t heap_alloc_locked(uint32_t size, uint32_t alignment)
   * forward is asking about the block that contains it. Returns 0 for an address
   * this heap never handed out, which is what "not one of mine" has to look like.
   */
@@ -371,7 +371,7 @@ index e7a72f6..557ca8b 100644
      if (!xbox_va)
          return 0;
      AcquireSRWLockShared(&g_heap_lock);
-@@ -4714,11 +4774,117 @@ uint32_t xbox_HeapBlockSize(uint32_t xbox_va)
+@@ -4806,11 +4866,117 @@ uint32_t xbox_HeapBlockSize(uint32_t xbox_va)
          if (xbox_va >= g_heap_blocks[i].addr &&
              xbox_va <  g_heap_blocks[i].addr + g_heap_blocks[i].size) {
              r = g_heap_blocks[i].size - (xbox_va - g_heap_blocks[i].addr);
@@ -491,7 +491,7 @@ index e7a72f6..557ca8b 100644
  
  void xbox_HeapFree(uint32_t xbox_va)
 diff --git a/src/kernel/xbox_memory_layout.h b/src/kernel/xbox_memory_layout.h
-index 0aec8bd..83622b9 100644
+index 6c21259..30f8c5b 100644
 --- a/src/kernel/xbox_memory_layout.h
 +++ b/src/kernel/xbox_memory_layout.h
 @@ -210,6 +210,18 @@ void xbox_ContiguousClaim(uint32_t va, uint32_t size);
@@ -514,18 +514,18 @@ index 0aec8bd..83622b9 100644
  uint32_t xbox_ContiguousAllocatedBytes(void);
  /* One byte per 4 KB page of the window, nonzero while the page is allocated
 diff --git a/tests/memory_regressions/test_main.c b/tests/memory_regressions/test_main.c
-index 9e2f95c..ae85940 100644
+index c79aeff..f8a37ef 100644
 --- a/tests/memory_regressions/test_main.c
 +++ b/tests/memory_regressions/test_main.c
-@@ -191,6 +191,7 @@ int main(int argc, char **argv)
+@@ -225,6 +225,7 @@ int main(int argc, char **argv)
      unsigned char *xbe;
      char d[160];
      int i;
 +    uint64_t before_layout = xbox_MemoryLayoutGeneration(), live_layout;
  
      setvbuf(stdout, NULL, _IONBF, 0);
-     if (!reclaim && !ext && !avoid && strcmp(mode, "default")) {
-@@ -215,6 +216,9 @@ int main(int argc, char **argv)
+     if (!reclaim && !ext && !avoid && !split_off && strcmp(mode, "default")) {
+@@ -251,6 +252,9 @@ int main(int argc, char **argv)
          puts("xbox_MemoryLayoutInit failed");
          return 2;
      }
@@ -535,7 +535,7 @@ index 9e2f95c..ae85940 100644
  
      scratch = xbox_HeapAlloc(0x10000, 4096);
      for (i = 0; i < N_SLOTS; i++)
-@@ -251,11 +255,28 @@ int main(int argc, char **argv)
+@@ -287,11 +291,32 @@ int main(int argc, char **argv)
          uint32_t a = xbox_HeapAlloc(big, 4096);
          uint32_t guard = xbox_HeapAlloc(4096, 16);
          uint32_t s1, s2;
@@ -561,10 +561,64 @@ index 9e2f95c..ae85940 100644
          s2 = xbox_HeapAlloc(16, 16);
 +        check(s1 == a && xbox_HeapBlockIdentity(s1, &remaining) != old_id,
 +              "heap address reuse receives a new identity", NULL);
++        check(xbox_HeapBlockIdentity(s1, NULL) &&
++              xbox_HeapBlockIdentity(s2, NULL) &&
++              xbox_HeapBlockIdentity(s1, NULL) != xbox_HeapBlockIdentity(s2, NULL),
++              "split or whole-block reuse keeps distinct live identities", NULL);
  
-         if (reclaim) {
-             snprintf(d, sizeof d, "block is %u bytes, expected 16", xbox_HeapBlockSize(s1));
-@@ -327,13 +348,22 @@ int main(int argc, char **argv)
+         if (reclaim || !split_off) {
+             /* RECOMP_HEAP_RECLAIM carves every reuse; by default a freed block
+@@ -330,6 +355,7 @@ int main(int argc, char **argv)
+     if (reclaim) {
+         enum { RUN = 256 };
+         uint32_t t = xbox_HeapAlloc(64, 16), run[RUN], guard;
++        uint64_t identity = xbox_HeapBlockIdentity(t, NULL);
+         int k;
+ 
+         for (k = 0; k < RUN; k++)
+@@ -342,6 +368,8 @@ int main(int argc, char **argv)
+         snprintf(d, sizeof d, "block 0x%08X, run 0x%08X..", t, run[0]);
+         check(xbox_PhysRamNamedAt(t),
+               "a named block before 255 merged-away slots stays named", d);
++        check(identity && xbox_HeapBlockIdentity(t, NULL) == identity,
++              "merging neighbours preserves the live block identity", NULL);
+     }
+ 
+     /* 2c. Carving the front of a merged run reuses the slot after it for the
+@@ -353,6 +381,8 @@ int main(int argc, char **argv)
+     if (reclaim) {
+         enum { RUN = 512, PIECE = 64, TAKE = RUN * PIECE * 3 / 4 };
+         uint32_t run[RUN], big, tail;
++        uint32_t remaining;
++        uint64_t old_id, carved_id;
+         int k = 0, tries;
+ 
+         for (tries = 0; k < RUN && tries < 64 * RUN; tries++) {
+@@ -364,8 +394,11 @@ int main(int argc, char **argv)
+         snprintf(d, sizeof d, "%d in a row after %d", k, tries);
+         check(k == RUN, "a run of pieces back to back", d);
+         if (k == RUN) {
++            old_id = xbox_HeapBlockIdentity(run[0], NULL);
+             for (k = 0; k < RUN; k++)
+                 xbox_HeapFree(run[k]);       /* each merges into run[0] */
++            check(!xbox_HeapBlockIdentity(run[0], &remaining) && !remaining,
++                  "merged free run has no live allocation identity", NULL);
+             big = xbox_HeapAlloc(TAKE, 16);
+             snprintf(d, sizeof d, "got 0x%08X, expected 0x%08X", big, run[0]);
+             check(big == run[0], "a large request carves the merged run's front", d);
+@@ -374,6 +407,11 @@ int main(int argc, char **argv)
+             snprintf(d, sizeof d, "block 0x%08X+0x%X, looked up 0x%08X", big, TAKE, tail);
+             check(xbox_PhysRamNamedAt(tail),
+                   "the carved block's second half is found by address", d);
++            carved_id = xbox_HeapBlockIdentity(big, NULL);
++            check(old_id && carved_id && carved_id != old_id &&
++                  xbox_HeapBlockIdentity(tail, &remaining) == carved_id &&
++                  remaining == PIECE,
++                  "merged-run carve retains its new identity through the tail", NULL);
+         }
+     }
+ 
+@@ -417,13 +455,22 @@ int main(int argc, char **argv)
      if (!ext) {
          uint32_t c1 = xbox_ContiguousAlloc(0x20000, 4096);
          uint32_t c2;
@@ -587,7 +641,52 @@ index 9e2f95c..ae85940 100644
          } else {
              check(c1 && c2 != c1, "default: contiguous memory is never reused", d);
          }
-@@ -469,6 +499,8 @@ int main(int argc, char **argv)
+@@ -436,13 +483,30 @@ int main(int argc, char **argv)
+     if (!ext) {
+         const uint32_t size = 0x2000;
+         uint32_t c1 = mm_contig_alloc(size, 0, 0xFFFFFFFFu), c2, c3;
++        uint32_t remaining;
++        uint64_t first_id = xbox_ContiguousBlockIdentity(c1, NULL), second_id;
+ 
++        check(first_id && xbox_GuestBoundsRegister(c1 + 16, 32),
++              "register a protected contiguous allocation's logical range", NULL);
+         *G(c1) = 0x11111111u;
+         mm_contig_protect_and_free(c1, size);
++        if (reclaim)
++            check(!xbox_ContiguousBlockIdentity(c1, &remaining) && !remaining &&
++                  !xbox_GuestBoundsIdentity(c1 + 16, NULL),
++                  "freeing protected pages invalidates allocation and range", NULL);
++        else
++            check(xbox_ContiguousBlockIdentity(c1, NULL) == first_id &&
++                  xbox_GuestBoundsIdentity(c1 + 16, NULL),
++                  "default retains protected pages and their identity", NULL);
++        check(xbox_GuestBoundsUnregister(c1 + 16),
++              "unregister the protected allocation's old range", NULL);
+         c2 = mm_contig_alloc(size, 0, 0xFFFFFFFFu);
++        second_id = xbox_ContiguousBlockIdentity(c2, NULL);
+         if (reclaim) {
+             snprintf(d, sizeof d, "got 0x%08X, expected 0x%08X", c2, c1);
+             check(c1 && c2 == c1, "a read-only freed block is reused", d);
++            check(second_id && second_id != first_id,
++                  "protected-page reuse receives a new identity", NULL);
+         }
+         if (c2) {
+             check(*G(c2) == 0 && *G(c2 + size - 4) == 0, "it comes back zeroed", NULL);
+@@ -457,6 +521,13 @@ int main(int argc, char **argv)
+         if (c3 == c2) {
+             *G(c3) = 0x33333333u;
+             check(*G(c3) == 0x33333333u && *G(c3 + 4) == 0, "pinned: zeroed and writable", NULL);
++            if (reclaim)
++                check(xbox_ContiguousBlockIdentity(c3, NULL) &&
++                      xbox_ContiguousBlockIdentity(c3, NULL) != second_id,
++                      "pinned protected-page reuse receives a new identity", NULL);
++            else
++                check(xbox_ContiguousBlockIdentity(c3, NULL) == second_id,
++                      "pinned overlap retains the existing allocation identity", NULL);
+         }
+     }
+ 
+@@ -603,6 +674,8 @@ int main(int argc, char **argv)
      }
  
      xbox_MemoryLayoutShutdown();

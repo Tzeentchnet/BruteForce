@@ -25,6 +25,10 @@ This is an experimental Windows release for the North American retail game:
   implemented.
 - Experimental rendering and performance options remain default-off unless
   explicitly documented otherwise.
+- The pinned framework is xboxrecomp v0.18.0. Its clean patch replay, focused
+  synthetic fixtures, retail regeneration, and bounded one-core, audio-on CPU
+  and D3D11 Basic Controls smokes pass. This is bring-up evidence, not
+  full-game correctness or a performance result.
 
 Detailed evidence and open gates live in
 [current findings](docs/FINDINGS.md), [next steps](docs/NEXTSTEPS.md),
@@ -51,7 +55,9 @@ python tools\build.py all --disc "F:\path\to\your\Brute Force.xiso.iso"
 The `all` command downloads the pinned public framework, verifies and extracts
 the supplied disc, generates the recompiled sources, and builds a Release
 executable. Disc contents, generated sources, logs, saves, and build products
-remain local and are excluded from Git.
+remain local and are excluded from Git. If an older framework checkout is
+already installed, preserve and move it before rerunning setup; generations
+from the previous pin must be regenerated.
 
 The supported executable fingerprint is recorded in
 [`fingerprints/retail.json`](fingerprints/retail.json); other revisions are

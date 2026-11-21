@@ -37,6 +37,58 @@ python tools\toolkit.py --verify --checkout build\pipeline-toolkit
 
 The `--checkout` option is verify-only; it cannot install or modify a checkout.
 
+For the v0.18 framework rebase, these focused fixture groups exercise physical
+names and the alias-disabled record, frame pacing, queue thresholds, heap
+splitting/order/protection and allocation lifetimes, the backend/clear
+contract, bounded flush diagnostics, and merged EEPROM options. Use build
+directories configured against this checkout rather than reusing directories
+from a different framework path:
+
+```powershell
+foreach ($fixture in @("apu_phys", "apu_monitor", "xaudio2",
+                       "memory_regressions", "nv2a_ffp_backend",
+                       "nv2a_pfb_flush", "kernel_eeprom_settings",
+                       "kernel_physical_address")) {
+  $build = "build\v018-canonical-$fixture"
+  cmake -S ".deps\xboxrecomp\tests\$fixture" -B $build `
+    -G "Visual Studio 17 2022" -A x64
+  cmake --build $build --config Release --parallel 4
+  ctest --test-dir $build -C Release --output-on-failure
+}
+Push-Location .deps\xboxrecomp
+python -m pytest -q -p no:cacheprovider tools\recomp\test_lifter_fcmov.py `
+  tools\recomp\test_lifter_wbinvd.py
+Pop-Location
+python -m pytest -q -p no:cacheprovider tests\test_toolkit.py
+python -m pytest -q -p no:cacheprovider `
+  tests\test_build.py::test_generation_records_all_stages_and_uses_fresh_output `
+  tests\test_build.py::test_generation_survives_runtime_only_toolkit_changes `
+  tests\test_build.py::test_generation_rejects_previous_toolkit_base `
+  tests\test_build.py::test_generation_rejects_changed_recompiler_or_template `
+  tests\test_build.py::test_run_rejects_an_executable_built_against_another_toolkit
+python tools\toolkit.py --verify
+```
+
+The project-owned external DSP fixture runs the real scatter-gather wrapper
+against synthetic 64/128 MB guest mappings, including mirror and fallback
+names, heap/image/stack collisions, read/write separation, an SGE
+register-write hook, unaligned/cross-entry transfers, invalid spans and the
+window-only override. The lifecycle test checks six init/shutdown cycles.
+Neither establishes retail audio quality or scheduling:
+
+```powershell
+cmake -S . -B build\v018-project-canonical -G "Visual Studio 17 2022" -A x64 `
+  "-DBRUTEFORCE_GEN_DIR=$PWD\tests\fixtures\generated"
+cmake --build build\v018-project-canonical --config Release --parallel 4 --target `
+  bruteforce_apu_xdsp_memory_test bruteforce_apu_dsp_lifecycle_test
+$xbe = "$PWD\.deps\xboxrecomp\tools\conformance\test.xbe"
+foreach ($mode in @("alias", "alias-128", "fallback", "fallback-128",
+                    "pinned", "pinned-128")) {
+  & build\v018-project-canonical\Release\bruteforce_apu_xdsp_memory_test.exe $mode $xbe
+}
+& build\v018-project-canonical\Release\bruteforce_apu_dsp_lifecycle_test.exe
+```
+
 The direct MSVC differential cases require the Visual Studio 2022 x86 C/C++
 tools. The focused native fixtures that cover the current selected backend
 contract, EEPROM options, GPU audit, PFB wait, and raster diagnostic can be

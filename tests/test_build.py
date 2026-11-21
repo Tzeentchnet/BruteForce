@@ -290,6 +290,14 @@ def test_generation_survives_runtime_only_toolkit_changes(tmp_path, monkeypatch)
     build.latest_generation()
 
 
+def test_generation_rejects_previous_toolkit_base(tmp_path, monkeypatch):
+    configure_generation(tmp_path, monkeypatch)
+    build.generate()
+    rewrite_manifest(toolkit_base="343b6d8901723b37ce568b2418c5df4e1fe1d223")
+    with pytest.raises(build.BuildError, match="pinned toolkit"):
+        build.latest_generation()
+
+
 def test_generation_rejects_changed_recompiler_or_template(tmp_path, monkeypatch):
     configure_generation(tmp_path, monkeypatch)
     build.generate()

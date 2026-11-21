@@ -1,8 +1,8 @@
 diff --git a/docs/runtime/environment-variables.md b/docs/runtime/environment-variables.md
-index 1a73e9c..fd504ff 100644
+index e37cc4a..47cc69f 100644
 --- a/docs/runtime/environment-variables.md
 +++ b/docs/runtime/environment-variables.md
-@@ -86,6 +86,7 @@ The executor is itself opt-in: set `RECOMP_PB_EXEC=1` to execute the pushbuffer.
+@@ -88,6 +88,7 @@ The executor is itself opt-in: set `RECOMP_PB_EXEC=1` to execute the pushbuffer.
  | `RECOMP_PB_SCAN` | off | Read-only survey of the pushbuffer; ranks what is not implemented. | `nv2a_pb_scan.c`, `xbox_memory_layout.c` |
  | `RECOMP_PB_WALK=dma` | off | Walks the pushbuffer as the DMA engine does, which delivers D3D's software-method interrupt. | `nv2a_pb_scan.c` |
  | `RECOMP_NV2A_TRACE` | off | Shows whether `DMA_PUT` moves at all. | `xbox_memory_layout.c` |
@@ -10,7 +10,7 @@ index 1a73e9c..fd504ff 100644
  | `RECOMP_PB_REPORT_MS=N` | 10000 | Milliseconds between `[GPU]` reports (minimum 100). | `xbox_memory_layout.c` |
  | `RECOMP_PB_EXEC_VERBOSE` | off | Per-batch trace. | `nv2a_pb_exec.c` |
  | `RECOMP_PB_UNHANDLED_ALL` | top 10 | Lists every method the executor does not model, not only the top ten. | `nv2a_pb_exec.c` |
-@@ -104,6 +105,7 @@ The executor is itself opt-in: set `RECOMP_PB_EXEC=1` to execute the pushbuffer.
+@@ -106,6 +107,7 @@ The executor is itself opt-in: set `RECOMP_PB_EXEC=1` to execute the pushbuffer.
  | `RECOMP_RASTER_TEST` | off | Bring-up aid: draws a magenta triangle after every clear, to prove the rasteriser and presenter work. | `nv2a_pb_exec.c` |
  | `RECOMP_FFP_TRACE` | off | Matrix and first vertices of the first fixed-function batches. | `nv2a_pb_exec.c` |
  | `RECOMP_VSH_TRACE=N` | 0 | Prints N vertex-program batches. | `nv2a_pb_exec.c` |
@@ -19,10 +19,10 @@ index 1a73e9c..fd504ff 100644
  | `RECOMP_FRAME_TRACE` | off | Traces one frame in detail. | `nv2a_pb_exec.c` |
  | `RECOMP_FRAME_TRACE_METHODS` | off | With the above: every method of the traced frame, less the bulk uploads. | `nv2a_pb_exec.c` |
 diff --git a/src/kernel/nv2a_pb_exec.c b/src/kernel/nv2a_pb_exec.c
-index cae84b0..0efc62c 100644
+index aac85aa..8ef40b9 100644
 --- a/src/kernel/nv2a_pb_exec.c
 +++ b/src/kernel/nv2a_pb_exec.c
-@@ -4043,6 +4043,20 @@ static int xvs_close(float a, float b, float abs_tol, float rel_tol)
+@@ -4057,6 +4057,20 @@ static int xvs_close(float a, float b, float abs_tol, float rel_tol)
  
  static int transform_vertex(uint32_t index, Nv2aVshOutput *out);
  
@@ -43,7 +43,7 @@ index cae84b0..0efc62c 100644
  /* RECOMP_GPU_VSH_VERIFY: the shader's outputs against the interpreter. The
   * tolerances allow float rounding: positions 0.01 px plus 1e-4 relative, the
   * rest 1e-3. A vertex whose inputs are not finite or are denormal is counted
-@@ -4060,13 +4074,20 @@ static void gpu_vsh_verify(uint32_t nv, uint32_t mask, uint32_t nin)
+@@ -4074,13 +4088,20 @@ static void gpu_vsh_verify(uint32_t nv, uint32_t mask, uint32_t nin)
          const char *e = getenv("RECOMP_GPU_VSH_VERIFY");
          every = e ? atoi(e) : 0;
      }
@@ -68,7 +68,7 @@ index cae84b0..0efc62c 100644
      for (l = 0; l < nv; l++) {
          Nv2aVshOutput c;
          const Nv2aXVsOut *o = &g[l];
-@@ -4087,8 +4108,10 @@ static void gpu_vsh_verify(uint32_t nv, uint32_t mask, uint32_t nin)
+@@ -4101,8 +4122,10 @@ static void gpu_vsh_verify(uint32_t nv, uint32_t mask, uint32_t nin)
                  if (!isfinite(in[k]) || (in[k] != 0.0f && fabsf(in[k]) < 1.17549435e-38f))
                      odd = 1;
          }
@@ -80,7 +80,7 @@ index cae84b0..0efc62c 100644
          verts++;
          if (odd) {
              odd_verts++;
-@@ -4124,6 +4147,7 @@ static void gpu_vsh_verify(uint32_t nv, uint32_t mask, uint32_t nin)
+@@ -4138,6 +4161,7 @@ static void gpu_vsh_verify(uint32_t nv, uint32_t mask, uint32_t nin)
                      c.pos[0], c.pos[1], c.pos[2], c.pos[3]);
      }
      (void)nin;
@@ -88,7 +88,7 @@ index cae84b0..0efc62c 100644
      bad_batches += bad;
      if (checked % 100 == 0 || checked <= 3)
          fprintf(stderr, "[VSH-VERIFY] %u batches checked, %u differ; %llu vertices, %llu differ,"
-@@ -4131,6 +4155,12 @@ static void gpu_vsh_verify(uint32_t nv, uint32_t mask, uint32_t nin)
+@@ -4145,6 +4169,12 @@ static void gpu_vsh_verify(uint32_t nv, uint32_t mask, uint32_t nin)
                  checked, bad_batches, verts, bad_verts, odd_verts);
  }
  
@@ -243,10 +243,10 @@ index 67bc725..e08453a 100644
          return 0;
      if (!(*reg & NV2A_PFB_FLUSH_BUSY_MASK))
 diff --git a/tests/nv2a_ffp_backend/CMakeLists.txt b/tests/nv2a_ffp_backend/CMakeLists.txt
-index 05c389f..cf6ef22 100644
+index cfad8f6..51ad09b 100644
 --- a/tests/nv2a_ffp_backend/CMakeLists.txt
 +++ b/tests/nv2a_ffp_backend/CMakeLists.txt
-@@ -12,6 +12,7 @@ set(NV2A_BACKEND_TEST_SOURCES
+@@ -12,11 +12,13 @@ set(NV2A_BACKEND_TEST_SOURCES
  set(NV2A_BACKEND_FIXTURE nv2a_backend_fixture.c)
  add_executable(nv2a-ffp-backend-test nv2a_ffp_backend_test.c
      ${NV2A_BACKEND_FIXTURE} ${NV2A_BACKEND_TEST_SOURCES})
@@ -254,7 +254,14 @@ index 05c389f..cf6ef22 100644
  add_executable(nv2a-present-sync-test nv2a_present_sync_test.c
      ${NV2A_BACKEND_FIXTURE} ${NV2A_BACKEND_TEST_SOURCES})
  add_executable(nv2a-backend-contract-test nv2a_backend_contract_test.c
-@@ -26,6 +27,10 @@ foreach(target nv2a-ffp-backend-test nv2a-present-sync-test
+     ${NV2A_BACKEND_FIXTURE} ${NV2A_BACKEND_TEST_SOURCES})
+-add_executable(nv2a-clear-present-test nv2a_clear_present_test.c ${NV2A_BACKEND_TEST_SOURCES})
++add_executable(nv2a-clear-present-test nv2a_clear_present_test.c
++    ${NV2A_BACKEND_FIXTURE} ${NV2A_BACKEND_TEST_SOURCES})
+ foreach(target nv2a-ffp-backend-test nv2a-present-sync-test
+         nv2a-backend-contract-test nv2a-clear-present-test)
+     target_include_directories(${target} PRIVATE ../../src/kernel ../../src)
+@@ -27,6 +29,10 @@ foreach(target nv2a-ffp-backend-test nv2a-present-sync-test
      endif()
  endforeach()
  add_test(NAME nv2a-ffp-backend COMMAND nv2a-ffp-backend-test)
@@ -263,8 +270,8 @@ index 05c389f..cf6ef22 100644
 +    "RECOMP_GPU_VSH_VERIFY=1;RECOMP_TEST_VSH_VERIFY_DIAG=1"
 +    PASS_REGULAR_EXPRESSION "verification skip diagnostics bounded")
  add_test(NAME nv2a-backend-contract COMMAND nv2a-backend-contract-test)
+ add_test(NAME nv2a-clear-present COMMAND nv2a-clear-present-test)
  add_test(NAME nv2a-present-sync COMMAND nv2a-present-sync-test
-          "${CMAKE_CURRENT_BINARY_DIR}/nv2a-present-sync-")
 diff --git a/tests/nv2a_ffp_backend/nv2a_ffp_backend_test.c b/tests/nv2a_ffp_backend/nv2a_ffp_backend_test.c
 index df98630..4b05ad1 100644
 --- a/tests/nv2a_ffp_backend/nv2a_ffp_backend_test.c

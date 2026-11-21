@@ -9,7 +9,86 @@ organization and importer research are tracked in
 in [RENDERING.md](./RENDERING.md), and general framework contributions are
 in [UPSTREAM.md](./UPSTREAM.md).
 
-## Integrated synthetic validation boundary
+## 2026-11-20 v0.18 framework and retail acceptance
+
+The repository pins xboxrecomp release v0.18.0 at
+`37b61d589168adee3680fabd51805ee81427bf07` with 42 local patches and no
+separately selected upstream commits. The expected patched tree is
+`3fda068cfc85573c49b93230ea850298d4c948e1`. Patch 0030 now passes mirror
+physical names unchanged to the APU resolver and uses cached
+last-translation inference for low image and stack names, which remain
+unaliased, and for all low names when aliases are unavailable. This fallback
+is inherently ambiguous if another translation wins before an SGE is
+observed. Patch 0033's fixed frame-worker priority is retired pending
+measurements with merged #341 pacing. Patch 0041 preserves the release's
+heap-split, address-order and reused-page protection behavior; patch 0042
+retains both #332's clear/present case and local diagnostic registration.
+
+An independent clean release checkout applied all 42 patches to the expected
+tree, and `python tools\toolkit.py --verify` passed on the installed checkout.
+Eight focused framework groups passed 31 CTests: `apu_phys` 2, `apu_monitor`
+3, `xaudio2` 1, `memory_regressions` 6, `nv2a_ffp_backend` 6,
+`nv2a_pfb_flush` 7, `kernel_eeprom_settings` 5 and `kernel_physical_address`
+1. The release FCMOV and local WBINVD lifter fixtures passed nine tests;
+toolkit setup passed four, and synthetic build/generation metadata checks
+passed five, including rejection of the old toolkit base. The project DSP
+memory fixture passed six 64/128 MB alias, fallback and window-pinned modes,
+including colliding low image/stack reads and writes and the actual SGE
+register-write hook; its lifecycle fixture passed six init/shutdown cycles.
+
+All three synthetic 128 MB modes logged `Mirror 15: FAILED ... error 487` on this
+Windows host. The first mirror needed by the alias case was present and its
+assertions passed, but these tests do not establish that every mirror mapped
+successfully. No devkit or other game revision was tested.
+
+Supported retail generation `20261120-163420-f9e3b4ed` was then regenerated
+on this tree. It translated all 22,295 identified functions with zero
+failures, six unresolved direct-call targets and the same 11 explicit
+unimplemented sites as v0.17: two `cli`, two `sti`, six `aas` and one `salc`.
+No function start or end changed. The sole discovery-record delta is
+`0x002EA100` increasing from 262 to 265 instructions after v0.18
+resynchronized two code/data regions; its generated function body did not
+change. The path-normalized recompilation summary is otherwise identical.
+
+The deterministic filename/content SHA-256 across the 94 generated files is
+`a272008963473118d3e5cd44ac08dea8d0401e2a8b7cd4f0ebfe6ddca6b3ca59`;
+the preceding v0.17 generation was
+`f226ab1a6cf4c664f493125bc26e863a693a05177315554173fe979d90f927b7`.
+The 26 changed generated files contain v0.18's explicit x87 portable-math
+wrappers, `fnclex` labeling and the shared `PCMPGTD` helper. The one observed
+generation took 325.4 seconds versus 382.4 seconds for the retained v0.17
+run, including 254.4 versus 283.5 seconds in discovery and 66.3 versus
+94.0 seconds in recompilation. These are single pipeline observations, not an
+A/B/A performance result.
+
+The resulting 37,582,848-byte Release executable has SHA-256
+`a85d62f9558da67757559fc35119fb9d904fd6b0700da4ace86ccdf878902cc8`;
+its 36,474,880-byte PDB has SHA-256
+`fab0485c13954988d3e9a1f95619b637275838a6d57d29432ebae40f0dd80420`.
+One D3D11 and one CPU-reference attempt, both audio-on with 12 raster threads
+and `RECOMP_GUEST_CPUS=one`, reached the Basic Controls state without retry at
+87.97 and 87.59 seconds. XAudio2 initialized at 48 kHz stereo with eight
+512-sample buffers and the 3,072-4,096-sample pacing window; neither log
+reported an underrun, starvation event, refused submission, device loss or
+fatal renderer error.
+
+All 11 D3D11 captures were byte-identical, as were both CPU captures. The
+reviewed 640x480 frames show the same Basic Controls panel, player, world and
+HUD. Their neutral comparison found 677 of 307,200 pixels (0.2204%) over
+8/255, mean absolute error 0.367866 per channel and maximum channel error
+114. The D3D11 attempt reported 25.409 stationary flips/s and the CPU attempt
+3.681 flips/s, but these are single, non-alternating smokes with legacy
+readiness and must not be reported as a performance comparison or distinct
+world FPS. Console-control shutdown was not forced and finalized without a
+harness error, but it does not cleanly join guest threads. No human listening
+pass, Accurate-DSP retail run, movement comparison, original-hardware match
+or long-session reliability result was performed.
+
+The clean replay, focused fixtures, exact regeneration review and two bounded
+retail smokes accept v0.18.0 as the supported framework pin for this game
+revision. They do not promote any performance or rendering-correctness phase.
+
+## Earlier v0.17 integrated synthetic validation boundary
 
 The complete 43-patch v0.17 framework stack independently replayed to tree
 `3e3ae3600802d2bf4446d86fc546322d60849047` and passed
@@ -62,7 +141,7 @@ the available 3440x1440 display is not a native 4K validation target.
 
 ## Phase 4 synthetic integration boundary
 
-On current generation `20261111-084222-7bdb6e56` and its preceding
+On historical Phase 4 generation `20261111-084222-7bdb6e56` and its preceding
 `20261111-002138-a9dbc18a` reference, static inspection found two principal
 real PUT store sites in `sub_00371FA0` and
 `sub_00372050`. The first also writes shadow RAM, so the hook distinguishes
@@ -191,7 +270,12 @@ promoted into a performance claim.
   `132bece507c1773c41eeaa6549687d2c493a121c2c102452a10465d5a584f073`;
   its pre-fix predecessor had SHA-256
   `60c232ee1206e99b8587d7b85329710dc48786bc9835bede19fbfa68347c2705`.
-- Current supported generation `20261113-214800-12924697` regenerates the same
+- Current supported generation `20261120-163420-f9e3b4ed` regenerates the
+  same retail XBE on v0.18 toolkit tree
+  `3fda068cfc85573c49b93230ea850298d4c948e1`. Its build, discovery,
+  generated-source and bounded CPU/D3D11 acceptance evidence is recorded in
+  the v0.18 milestone above.
+- Preceding v0.17 supported generation `20261113-214800-12924697` regenerates the same
   retail XBE on toolkit tree
   `3e3ae3600802d2bf4446d86fc546322d60849047` after completing the one-core
   title-default and scaled-alias investigation. It retains the title-side
@@ -213,7 +297,7 @@ promoted into a performance claim.
   focused scheduling/default selection reports 64 passed; the current focused
   alias/rejection selection reports 24 passed, and the broader WARP/hardware
   depth/stencil/glare selection reports 42 passed. The patched framework tree
-  verifies. The current fail-closed executable has no retail run; the
+  verifies. That v0.17 fail-closed executable has no retail run; the
   alias-capable predecessor supplies the rendering evidence, while the four
   bounded one-core boots used an earlier diagnostic predecessor before the
   trace hook was removed.
@@ -947,22 +1031,25 @@ all-mixbin fallback. `xemu` explicitly selects the experimental title GP/EP
 path on the vendored xemu v0.8.139 DSP56300 C interpreter. Output remains
 48 kHz stereo.
 
-The framework-side integration is reproducible as patches 0030-0034. Patch
-0030 records whether an APU physical translation named RAM or the contiguous
-window and adds optional external DSP hooks. Patch 0031 finalizes an external
+The framework-side integration is reproducible as patches 0030-0032 and
+0034; the former 0033 frame-worker priority policy is retired on v0.18.
+Patch 0030 adds optional external DSP hooks and records whether an unaliased
+low physical translation named RAM or the contiguous window. Heap mirror
+names remain self-describing; image and stack names retain low identities and
+therefore use the record even when heap aliases are enabled.
+Patch 0031 finalizes an external
 DSP after the APU frame thread has joined. Patch 0032 lets independent cleanup
-hooks run on window, firmware-return, and shutdown exits. Patch 0033 raises the
-APU frame worker to high priority on Windows. Patch 0034 raises the queue
+hooks run on window, firmware-return, and shutdown exits. Patch 0034 raises the queue
 refill threshold from one half to three quarters while retaining the same
 maximum. Xboxrecomp v0.17.0 includes former selected PR #264 commit
 `eb7b1f5833205a24fcc0eda6eb4ed2df4f2bc2e3`, which supplies the 2,048-sample
-SSL restart hold, and merged #261 is also current-base behavior. Open #266
-and draft #286 remain unselected; closed #270 was not adopted. Their distinct
-failure modes were not established in the title.
+SSL restart hold, and merged #261 and #286 are now base behavior. Open #266
+remains unselected; closed #270 was not adopted. Their distinct failure
+modes were not established in the title.
 
 The DSP wrapper mirrors the GP/EP windows against shadow copies, resolves SGE
-pages using recorded physical-translation intent, and writes EP FIFO 0 to the
-stereo monitor block. A joinable worker pipelines the DSP stage beside the VP
+pages using mirror names or cached intent for unaliased low names, and writes
+EP FIFO 0 to the stereo monitor block. A joinable worker pipelines the DSP stage beside the VP
 frame thread. Teardown signals and joins that worker, frees both interpreters
 and all shadows, and resets static queues and counters; a native fixture
 completed six init/shutdown cycles without leaking process handles.
@@ -2965,7 +3052,7 @@ with public Blood Wake v0.3.3 at
 exactly ten commits later and covering releases v0.2.5 through v0.3.3. The
 current source still fingerprints xboxrecomp
 `f0f8a461496a4f23d9b0aeaa284b8d70ba7ab82b` (v0.16.0), so it is prior art,
-not a newer framework base than Brute Force's v0.17.0 integration. The public
+not a newer framework base than Brute Force's then-v0.17.0 integration. The public
 commits are large private-repository synchronizations; release-note
 performance and completion claims were not independently reproduced. The
 recorded adaptation checkout remains at `e631eddd`; `62923407` was inspected
@@ -3186,7 +3273,7 @@ on runtime validation in either title:
 | Change | Source observation | Brute Force assessment |
 | --- | --- | --- |
 | Foreground-only display-awake policy (v0.3.3) | The Windows framebuffer thread calls `SetThreadExecutionState(ES_CONTINUOUS | ES_DISPLAY_REQUIRED)` only while its top-level game window is foreground and not minimized, and releases the hold in the background, on minimize, and on close. The behavior can be disabled and unattended runs leave the display timer alone. | Strongest small generic candidate. A framework adaptation should use a default-off `RECOMP_*` switch, preserve foreground/minimized/close behavior, report API failures, and have a Windows fixture that substitutes window state and execution-state calls. Exact upstream PR/issue searches found no equivalent through 2026-11-10. No patch was added during this review. |
-| 64-bit `MMX_PMADDWD` intermediate sum (v0.3.3) | Blood Wake patches the helper so each adjacent signed-word product pair is summed in 64 bits before retaining the low dword. | Already present in xboxrecomp v0.17.0 at the pinned Brute Force base, with dedicated `mmx_pmaddwd`, broader integer, and helper tests. Do not carry a duplicate patch. |
+| 64-bit `MMX_PMADDWD` intermediate sum (v0.3.3) | Blood Wake patches the helper so each adjacent signed-word product pair is summed in 64 bits before retaining the low dword. | Present since xboxrecomp v0.17.0 and in the current v0.18 base, with dedicated `mmx_pmaddwd`, broader integer, and helper tests. Do not carry a duplicate patch. |
 | Native fixed-function and point-sprite drawing (v0.3.1) | The extended backend contract now offers fixed-function batches as raw or gathered inputs plus matrices, lighting, fog, and material state. Point batches can remain as points through the vertex shader and expand in a geometry shader. The CPU routes remain references and fallbacks. | Adapt individual optional contracts, not Blood Wake's renderer core wholesale. Brute Force already runs eligible vertex programs on D3D11 but still transforms fixed-function batches on the CPU and rejects primitives below triangles. Its partial retail audit saw 174 line-list requests and no points; point sprites do not repair that known line gap. First census fixed-function cost and establish visible point use, then add CPU/GPU parity fixtures before any default change. |
 | Load-time vertex-shader preparation (v0.3.1) | A title wrapper observes every `D3DDevice_CreateVertexShader` during Blood Wake's known boot groups, generates raw, gathered, point, and fixed-function variants, and compiles them into the persistent cache on workers without touching the device. First use finds cached bytecode or explicitly waits/falls back. | Promising startup-hitch work after the existing cache is accepted. Brute Force currently persists combiner pixel shaders only and lets a new vertex program fall back to CPU transformation while its worker compiles. It must discover programs through Brute Force's own title routes or a generic backend feed, preserve compiler/source identity and explicit failures, and prove that warm-up does not alter output. Blood Wake's wrapper addresses and shader groups cannot be copied. |
 | Audio-device recovery, MMCSS, and WASAPI output (v0.2.5-v0.3.0) | A normal-priority COM worker rebuilds a lost or changed output device away from the frame thread; sound workers join MMCSS; v0.3.0 adds shared-mode WASAPI output. | Useful generic prior art, but deferred with the rest of audio. Brute Force's current framework XAudio2 path has no comparable rebuild worker, while the listening-quality gate remains unresolved. A future adaptation must keep device-loss and shutdown errors explicit, preserve a reference output, test concurrent rebuild/close, and measure latency and continuity rather than assuming WASAPI is better. |
@@ -3228,7 +3315,9 @@ validation. Upstream xboxrecomp v0.18.0 was released at
 `d93bc9f25a901650ce0390493893da3454cca3f1`. Its release notes report 1,023
 tests passed, one skipped, and 6,368 conformance vectors with no mismatches;
 those are upstream results and were not rerun locally during this review.
-The supported project toolkit and executable remain on v0.17.0.
+At the time of this review the project toolkit and executable remained on
+v0.17.0. The later framework-only v0.18 milestone is described above; its
+retail executable remains unvalidated.
 
 | Area | Observed upstream change | Brute Force decision |
 | --- | --- | --- |
@@ -3236,7 +3325,7 @@ The supported project toolkit and executable remain on v0.17.0.
 | Discovery and lifted code | #275, #324-#329, #333, #338 and #339 change direct-jump resynchronization, signatures, RTTI bounds, SSE/x87 lifting, seed caching and jump-table measurement. #329 also turns remaining silent SSE/x87 fallbacks into explicit unimplemented reports. | Regeneration is mandatory. Compare identified functions, generated-source fingerprints, unresolved calls, untranslated sites and newly surfaced `RECOMP_UNIMPL` entries before accepting the new executable. No claim is made yet that any of the current 11 untranslated sites is fixed. |
 | Kernel and memory | #268, #286, #330, #331 and #337 change heap splitting/order, RAM physical naming, virtual alignment and reused contiguous-page protection. | Adopt as correctness fixes, but run the full memory/APU/USB fixtures and retail startup/gameplay smokes because allocation addresses and physical identities can change. #286 requires a real external-DSP rebase rather than carrying the old last-translation tags. |
 | CPU-reference NV2A | #332 marks a colour-cleared linear surface as drawn; #343 draws RHW-zero 2D quads and follows hardware infinite-fog behavior. | Adopt with the release and keep the CPU path as the reference. Re-run movie/menu/HUD frames and matched CPU/D3D11 captures; these fixes do not waive the existing GPU ownership or scaling gates. |
-| Audio | #334 makes voice-field writes atomic, #340 rotates idle-voice traps, and default-on #341 paces one 32-sample frame at a time. #342 adds default-off `RECOMP_APU_SSL_ADVANCE=1`. Draft #344 proposes six Windows buffers. | Adopt #334/#340/#341 with the base, leave #342 disabled, and do not cherry-pick #344. Brute Force already selects eight buffers and patch 0034's three-quarter low-water mark. Re-measure that combination before deciding whether patch 0033's highest-priority worker is still needed, then repeat the deferred listening gate. |
+| Audio | #334 makes voice-field writes atomic, #340 rotates idle-voice traps, and default-on #341 paces one 32-sample frame at a time. #342 adds default-off `RECOMP_APU_SSL_ADVANCE=1`. Open #344 proposes six Windows buffers. | Adopt #334/#340/#341 with the base, leave #342 disabled, and do not cherry-pick #344. Brute Force already selects eight buffers and patch 0034's three-quarter low-water mark. Re-measure that combination before deciding whether patch 0033's highest-priority worker is still needed, then repeat the deferred listening gate. |
 | Deterministic x87 hooks | #335 adds default-inactive `RECOMP_PORTABLE_MATH`. | Carry the capability but do not enable it: this project has no netplay, rollback or cross-host bit-determinism requirement. |
 | Narrow DIV/IDIV | PR #315 is marked merged, but release commit `1ce3d64b4385a41179b76e92e361f23fd2cb1c61` reverts it because its own native Windows 16-bit `IDIV` test failed. | Keep it excluded. The release does not contain the change, matching the earlier 2,643-mismatch rejection. |
 
@@ -3248,7 +3337,8 @@ applied, producing provisional index tree
 `c549a8ebd6ca5bca31072737153e811014cd1ec2`. This is compatibility evidence
 only. The review checkout intentionally did not resolve 0030's title-side
 external-DSP contract, and no build, fixture, generation or retail run was
-performed on that tree; it must not replace the expected toolkit tree.
+performed on that tree; it did not replace the expected toolkit tree. The
+later synthetic rebase and its actual expected tree are recorded above.
 
 Blood Wake was also rechecked. Public `main` and release v0.3.3 are still
 `6292340705d9b863351a45ba160174a346a81688`, with no commit after

@@ -1,3 +1,4 @@
+from contextlib import nullcontext
 from pathlib import Path
 import sys
 
@@ -29,3 +30,24 @@ def test_checkout_option_cannot_trigger_setup(monkeypatch):
     with pytest.raises(SystemExit) as exc:
         toolkit.main(["--checkout", "build\\isolated-toolkit"])
     assert exc.value.code == 2
+
+
+def test_setup_does_not_fetch_when_no_cherry_picks_are_selected(monkeypatch):
+    calls = []
+    checkout = ROOT / "build" / "toolkit-setup-mock"
+    monkeypatch.setattr(toolkit, "PATCH_COMMITS", ())
+    monkeypatch.setattr(toolkit, "LOCAL_PATCHES", ())
+    monkeypatch.setattr(toolkit, "git", lambda repo, *args, **kwargs: calls.append(args))
+    monkeypatch.setattr(toolkit, "verify_toolkit", lambda path: path)
+    monkeypatch.setattr(toolkit.shutil, "copytree", lambda source, target: None)
+    monkeypatch.setattr(
+        toolkit.tempfile,
+        "TemporaryDirectory",
+        lambda **kwargs: nullcontext(str(ROOT / "build" / "toolkit-setup-mock-work")),
+    )
+
+    toolkit.setup_toolkit(checkout)
+
+    assert any(args[0] == "clone" for args in calls)
+    assert any(args[0] == "checkout" for args in calls)
+    assert not any(args[0] in ("fetch", "cherry-pick") for args in calls)

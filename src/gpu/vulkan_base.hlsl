@@ -26,6 +26,30 @@ Texture2D<float4> texture0;
 [[vk::binding(1, 0)]]
 SamplerState sampler0;
 
+[[vk::binding(15, 0)]]
+cbuffer WindowClipConstants
+{
+    uint4 window_rect[8];
+    uint4 window_info;
+};
+
+bool window_allows(float2 position)
+{
+    bool contained = false;
+    uint2 pixel = (uint2)position;
+
+    if (window_info.x == 0)
+        return true;
+    [unroll]
+    for (uint i = 0; i < 8; ++i) {
+        if (i < window_info.x &&
+            pixel.x >= window_rect[i].x && pixel.x <= window_rect[i].y &&
+            pixel.y >= window_rect[i].z && pixel.y <= window_rect[i].w)
+            contained = true;
+    }
+    return window_info.y != 0 ? !contained : contained;
+}
+
 PixelInput base_vs(VertexInput input)
 {
     PixelInput output;
@@ -42,6 +66,7 @@ PixelInput base_vs(VertexInput input)
 
 float4 base_ps(PixelInput input) : SV_Target
 {
+    clip(window_allows(input.position.xy) ? 1.0f : -1.0f);
     float4 color = input.color;
     if (constants.texture_info.z > 0.5)
         color *= texture0.Sample(sampler0, input.uv);
@@ -638,6 +663,7 @@ uint packed_combiner_word(uint4 first, uint4 second, uint index)
 
 float4 extended_ps(ExtendedPixelInput input) : SV_Target
 {
+    clip(window_allows(input.position.xy) ? 1.0f : -1.0f);
     float4 coordinates[4] = { input.tc0, input.tc1, input.tc2, input.tc3 };
     float4 sampled[4];
     float4 registers[16];

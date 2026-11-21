@@ -521,8 +521,9 @@ and `RECOMP_GPU_VSH_VERIFY=<n>` reruns every nth accepted batch in a compute
 shader and compares its output with the CPU interpreter. Verification is a
 slow diagnostic and is inactive unless requested.
 
-Vulkan still has no native presentation, render scaling, direct raw guest-
-stream vertex fetch, or window clip. Surface layout
+Vulkan's native presentation and window clipping remain explicit,
+default-off bring-up paths. Vulkan still has no render scaling or direct raw
+guest-stream vertex fetch. Surface layout
 changes after creation and incompatible render-target overlaps fail
 explicitly. The retained matched tutorial capture predates the GPU-VSH path,
 so it does not establish GPU-VSH movement, movie, fade, PVIDEO, or full-game
@@ -1088,8 +1089,8 @@ original-hardware correctness.
 
 ## Experimental window clipping
 
-The software rasterizer and D3D11 renderer can optionally apply the title's
-NV2A window-clip rectangles:
+The software rasterizer, D3D11 renderer and Vulkan renderer can optionally
+apply the title's NV2A window-clip rectangles:
 
 ```powershell
 $env:RECOMP_WINDOW_CLIP = "1"
@@ -1103,6 +1104,9 @@ implementation leaves clipping inactive; the hardware's initial state still
 needs investigation. Expanded synthetic CPU, WARP and hardware fixtures
 cover rectangle unions/exclusions, AA, scale, vertex paths, clears and GPU
 depth/stencil discard side effects; the CPU reference does not model stencil.
+Validation-enabled NVIDIA and AMD Vulkan fixtures additionally cover base,
+CPU-transformed extended and gathered GPU-VSH draws, incomplete-axis
+passthrough, AA scaling, clear isolation and clipped-fragment depth behavior.
 Other registered draw backends must advertise support
 for window clips or the executor stops with an error. This option is not a
 4K mode.

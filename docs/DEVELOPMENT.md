@@ -72,6 +72,9 @@ rewrites, depth/RGB565 readback, compatible full/self/subregion color aliases,
 clean CPU-written tracked-surface preservation, upload before a later partial
 clear, reported GPU-wins handling for a dirty guest/GPU conflict, and the
 submission wait retained by a guest-coherent full clear,
+inclusive/exclusive window-clip unions, incomplete-axis passthrough, AA-scaled
+inclusive bounds, unaffected clears, suppressed clipped-fragment depth writes,
+and clipping on base, CPU-transformed extended and gathered GPU-VSH draws,
 precise visibility on base and extended draws including AA normalization,
 ordered asynchronous reporting including a forced pre-deadline no-submit
 poll followed by exact aged completion,

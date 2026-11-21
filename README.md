@@ -23,8 +23,8 @@ This is an experimental Windows release for the North American retail game:
   the base and CPU-transformed extended draw contracts, four texture stages,
   register combiners, cube maps, default-off supplied mip chains, exact
   texture caching, compatible color render-target aliases, precise visibility,
-  depth/stencil, bounded submission, RGB565 conversion, and mandatory guest
-  readback. An additional default-off host-owned Vulkan presentation path now
+  depth/stencil, opt-in window clipping, bounded submission, RGB565 conversion,
+  and mandatory guest readback. An additional default-off host-owned Vulkan presentation path now
   has a bounded completed-image queue, Win32 surface and swap chain, resize,
   aspect-fit blit, VSync selection, and required CPU fallback. Eligible
   vertex-program batches now run through a static Vulkan interpreter from
@@ -34,8 +34,8 @@ This is an experimental Windows release for the North American retail game:
   Review places those sparse pixels in animated world content visible around
   the tutorial panel; three opaque panel regions have no pixels over 8/255.
   NVIDIA and AMD fixtures cover the interpreter, whole-triangle non-finite
-  rejection, verification readback, CPU/PVIDEO surface preservation and
-  dirty-conflict handling. The formerly black manual menu route now reaches
+  rejection, verification readback, inclusive/exclusive and AA-scaled window
+  clipping, CPU/PVIDEO surface preservation and dirty-conflict handling. The formerly black manual menu route now reaches
   visible Basic Controls. Complete guest-surface review of one matched
   movement pair shows the same tutorial scene and scripted camera route with
   zero unknown frames; continuous capture prevents treating its rates as a

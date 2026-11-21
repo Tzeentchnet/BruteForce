@@ -363,6 +363,11 @@ typedef struct VulkanExtendedConstants {
     uint32_t vsh_verify[4];
 } VulkanExtendedConstants;
 
+typedef struct VulkanWindowClipConstants {
+    uint32_t rect[NV2A_WINDOW_CLIP_COUNT][4];
+    uint32_t info[4];
+} VulkanWindowClipConstants;
+
 typedef struct VulkanVshVerification {
     uint8_t *data;
     size_t data_size;
@@ -3236,7 +3241,7 @@ static VkDescriptorSet allocate_descriptor_set(VulkanCommandSlot *slot)
         sizes[1].type = VK_DESCRIPTOR_TYPE_SAMPLER;
         sizes[1].descriptorCount = 4 * VULKAN_BATCH_OPERATIONS;
         sizes[2].type = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
-        sizes[2].descriptorCount = VULKAN_BATCH_OPERATIONS;
+        sizes[2].descriptorCount = 3 * VULKAN_BATCH_OPERATIONS;
         sizes[3].type = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
         sizes[3].descriptorCount = 3 * VULKAN_BATCH_OPERATIONS;
         pool.maxSets = VULKAN_BATCH_OPERATIONS;
@@ -3258,11 +3263,14 @@ static VkDescriptorSet allocate_descriptor_set(VulkanCommandSlot *slot)
 
 static VkDescriptorSet create_descriptor_set(VulkanCommandSlot *slot,
                                              VkImageView view,
-                                             VkSampler sampler)
+                                             VkSampler sampler,
+                                             VkBuffer window,
+                                             VkDeviceSize window_offset)
 {
     VkDescriptorImageInfo image;
     VkDescriptorImageInfo sampler_info;
-    VkWriteDescriptorSet writes[2];
+    VkDescriptorBufferInfo window_buffer;
+    VkWriteDescriptorSet writes[3];
     VkDescriptorSet set = allocate_descriptor_set(slot);
 
     memset(&image, 0, sizeof image);
@@ -3270,6 +3278,10 @@ static VkDescriptorSet create_descriptor_set(VulkanCommandSlot *slot,
     image.imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
     memset(&sampler_info, 0, sizeof sampler_info);
     sampler_info.sampler = sampler;
+    memset(&window_buffer, 0, sizeof window_buffer);
+    window_buffer.buffer = window;
+    window_buffer.offset = window_offset;
+    window_buffer.range = sizeof(VulkanWindowClipConstants);
     memset(writes, 0, sizeof writes);
     writes[0].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
     writes[0].dstSet = set;
@@ -3283,7 +3295,13 @@ static VkDescriptorSet create_descriptor_set(VulkanCommandSlot *slot,
     writes[1].descriptorCount = 1;
     writes[1].descriptorType = VK_DESCRIPTOR_TYPE_SAMPLER;
     writes[1].pImageInfo = &sampler_info;
-    s_vk.fn.UpdateDescriptorSets(s_vk.device, 2, writes, 0, NULL);
+    writes[2].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+    writes[2].dstSet = set;
+    writes[2].dstBinding = 15;
+    writes[2].descriptorCount = 1;
+    writes[2].descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
+    writes[2].pBufferInfo = &window_buffer;
+    s_vk.fn.UpdateDescriptorSets(s_vk.device, 3, writes, 0, NULL);
     return set;
 }
 
@@ -3291,22 +3309,25 @@ static VkDescriptorSet create_extended_descriptor_set(
     VulkanCommandSlot *slot, const VkImageView views[4],
     const VkImageView cube_views[4], const VkSampler samplers[4],
     VkBuffer constants, VkDeviceSize constants_offset,
+    VkBuffer window, VkDeviceSize window_offset,
     VkBuffer storage, VkDeviceSize storage_offset, VkDeviceSize storage_size)
 {
     VkDescriptorImageInfo images[4];
     VkDescriptorImageInfo cube_images[4];
     VkDescriptorImageInfo sampler_info[4];
     VkDescriptorBufferInfo buffer;
+    VkDescriptorBufferInfo window_buffer;
     VkDescriptorBufferInfo storage_buffer;
-    VkWriteDescriptorSet writes[14];
+    VkWriteDescriptorSet writes[15];
     VkDescriptorSet set = allocate_descriptor_set(slot);
-    unsigned write_count = 13;
+    unsigned write_count = 14;
     unsigned i;
 
     memset(images, 0, sizeof images);
     memset(cube_images, 0, sizeof cube_images);
     memset(sampler_info, 0, sizeof sampler_info);
     memset(&buffer, 0, sizeof buffer);
+    memset(&window_buffer, 0, sizeof window_buffer);
     memset(&storage_buffer, 0, sizeof storage_buffer);
     memset(writes, 0, sizeof writes);
     for (i = 0; i < 4; ++i) {
@@ -3343,16 +3364,25 @@ static VkDescriptorSet create_extended_descriptor_set(
     writes[8].descriptorCount = 1;
     writes[8].descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
     writes[8].pBufferInfo = &buffer;
+    window_buffer.buffer = window;
+    window_buffer.offset = window_offset;
+    window_buffer.range = sizeof(VulkanWindowClipConstants);
+    writes[13].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+    writes[13].dstSet = set;
+    writes[13].dstBinding = 15;
+    writes[13].descriptorCount = 1;
+    writes[13].descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
+    writes[13].pBufferInfo = &window_buffer;
     if (storage) {
         storage_buffer.buffer = storage;
         storage_buffer.offset = storage_offset;
         storage_buffer.range = storage_size;
-        writes[13].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
-        writes[13].dstSet = set;
-        writes[13].dstBinding = 13;
-        writes[13].descriptorCount = 1;
-        writes[13].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
-        writes[13].pBufferInfo = &storage_buffer;
+        writes[14].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+        writes[14].dstSet = set;
+        writes[14].dstBinding = 13;
+        writes[14].descriptorCount = 1;
+        writes[14].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+        writes[14].pBufferInfo = &storage_buffer;
         write_count++;
     }
     s_vk.fn.UpdateDescriptorSets(
@@ -3459,12 +3489,16 @@ static void end_zpass_query(VulkanCommandSlot *slot,
     s_vk.zpass_queries++;
 }
 
+static void fill_window_clip_constants(
+    VulkanWindowClipConstants *constants, const Nv2aSurface *surface);
+
 static void vulkan_draw(const Nv2aSurface *input, const Nv2aBatch *batch)
 {
     VulkanCommandSlot *slot;
     VulkanSurface *surface;
     VulkanDepth *depth;
     VulkanUpload vertices;
+    VulkanUpload window;
     VulkanPipelineKey key;
     VulkanPushConstants constants;
     VkPipeline pipeline;
@@ -3505,6 +3539,10 @@ static void vulkan_draw(const Nv2aSurface *input, const Nv2aBatch *batch)
     vertex_bytes = (size_t)batch->count * sizeof(VulkanVertex);
     vertices = slot_upload(slot, vertex_bytes, 4);
     fill_vertices(batch, vertices.mapped);
+    window = slot_upload(
+        slot, sizeof(VulkanWindowClipConstants),
+        s_vk.properties.limits.minUniformBufferOffsetAlignment);
+    fill_window_clip_constants(window.mapped, input);
     if (perf_start)
         s_vk.perf.vertex_bytes += vertex_bytes;
     vulkan_perf_finish(perf_start, &s_vk.perf.vertex_ticks);
@@ -3514,7 +3552,8 @@ static void vulkan_draw(const Nv2aSurface *input, const Nv2aBatch *batch)
     vulkan_perf_finish_call(
         perf_start, &s_vk.perf.texture_ticks, &s_vk.perf.texture_calls);
     perf_start = vulkan_perf_begin();
-    descriptors = create_descriptor_set(slot, texture_view, sampler);
+    descriptors = create_descriptor_set(
+        slot, texture_view, sampler, window.buffer, window.offset);
     vulkan_perf_finish_call(
         perf_start, &s_vk.perf.descriptor_ticks,
         &s_vk.perf.descriptor_calls);
@@ -3559,6 +3598,34 @@ static void vulkan_draw(const Nv2aSurface *input, const Nv2aBatch *batch)
     s_vk.draws++;
     vulkan_perf_finish_call(
         draw_start, &s_vk.perf.draw_ticks, &s_vk.perf.draw_calls);
+}
+
+static void fill_window_clip_constants(
+    VulkanWindowClipConstants *constants, const Nv2aSurface *surface)
+{
+    unsigned count;
+    unsigned i;
+    uint32_t sx;
+    uint32_t sy;
+
+    memset(constants, 0, sizeof *constants);
+    if (!surface->window_clip_enabled || surface->window_clip.axes != 3)
+        return;
+    sx = surface->aa_sx > 1 ? 2 : 1;
+    sy = surface->aa_sy > 1 ? 2 : 1;
+    count = surface->window_clip.uniform ? 1 : NV2A_WINDOW_CLIP_COUNT;
+    constants->info[0] = count;
+    constants->info[1] = surface->window_clip.exclusive;
+    for (i = 0; i < count; ++i) {
+        uint32_t horizontal = surface->window_clip.horizontal[i];
+        uint32_t vertical = surface->window_clip.vertical[i];
+        constants->rect[i][0] = (horizontal & 0xFFFu) * sx;
+        constants->rect[i][1] =
+            (((horizontal >> 16) & 0xFFFu) + 1) * sx - 1;
+        constants->rect[i][2] = (vertical & 0xFFFu) * sy;
+        constants->rect[i][3] =
+            (((vertical >> 16) & 0xFFFu) + 1) * sy - 1;
+    }
 }
 
 static void fill_extended_constants(VulkanExtendedConstants *constants,
@@ -3614,6 +3681,7 @@ static void vulkan_xdraw(const Nv2aSurface *input, const Nv2aXBatch *batch)
     VulkanDepth *depth;
     VulkanUpload vertices;
     VulkanUpload constant_buffer;
+    VulkanUpload window;
     VulkanExtendedConstants *constants;
     VulkanPipelineKey key;
     VkPipeline pipeline;
@@ -3671,6 +3739,10 @@ static void vulkan_xdraw(const Nv2aSurface *input, const Nv2aXBatch *batch)
         s_vk.properties.limits.minUniformBufferOffsetAlignment);
     constants = constant_buffer.mapped;
     fill_extended_constants(constants, surface, batch, combiner);
+    window = slot_upload(
+        slot, sizeof(VulkanWindowClipConstants),
+        s_vk.properties.limits.minUniformBufferOffsetAlignment);
+    fill_window_clip_constants(window.mapped, input);
     if (perf_start)
         s_vk.perf.vertex_bytes += vertex_bytes;
     vulkan_perf_finish(perf_start, &s_vk.perf.vertex_ticks);
@@ -3704,6 +3776,7 @@ static void vulkan_xdraw(const Nv2aSurface *input, const Nv2aXBatch *batch)
     descriptors = create_extended_descriptor_set(
         slot, texture_views, cube_views, samplers,
         constant_buffer.buffer, constant_buffer.offset,
+        window.buffer, window.offset,
         VK_NULL_HANDLE, 0, 0);
     vulkan_perf_finish_call(
         perf_start, &s_vk.perf.descriptor_ticks,
@@ -3746,6 +3819,7 @@ static int vulkan_xdraw_vsh(const Nv2aSurface *input,
     VulkanUpload data;
     VulkanUpload indices;
     VulkanUpload constant_buffer;
+    VulkanUpload window;
     VulkanExtendedConstants *constants;
     VulkanPipelineKey key;
     VkPipeline pipeline;
@@ -3843,6 +3917,10 @@ static int vulkan_xdraw_vsh(const Nv2aSurface *input,
         s_vk.properties.limits.minUniformBufferOffsetAlignment);
     constants = constant_buffer.mapped;
     fill_extended_constants(constants, surface, xb, combiner);
+    window = slot_upload(
+        slot, sizeof(VulkanWindowClipConstants),
+        s_vk.properties.limits.minUniformBufferOffsetAlignment);
+    fill_window_clip_constants(window.mapped, input);
     constants->vsh_data[0] = 0;
     constants->vsh_data[1] = (uint32_t)program_bytes;
     constants->vsh_data[2] =
@@ -3915,6 +3993,7 @@ static int vulkan_xdraw_vsh(const Nv2aSurface *input,
     descriptors = create_extended_descriptor_set(
         slot, texture_views, cube_views, samplers,
         constant_buffer.buffer, constant_buffer.offset,
+        window.buffer, window.offset,
         data.buffer, data.offset, data_bytes);
     vulkan_perf_finish_call(
         perf_start, &s_vk.perf.descriptor_ticks,
@@ -4530,7 +4609,7 @@ static const Nv2aBackendExt s_backend_ext = {
     vulkan_zpass_count,
     vulkan_zpass_report,
     vulkan_poll,
-    0,
+    NV2A_BACKEND_CAP_WINDOW_CLIP,
 };
 
 static void destroy_state(void)
@@ -4840,7 +4919,7 @@ static BruteforceRendererStartupResult create_device_objects(void)
     VkQueryPoolCreateInfo query_pool = {
         VK_STRUCTURE_TYPE_QUERY_POOL_CREATE_INFO
     };
-    VkDescriptorSetLayoutBinding bindings[15];
+    VkDescriptorSetLayoutBinding bindings[16];
     VkDescriptorSetLayoutCreateInfo descriptors = {
         VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO
     };
@@ -4924,7 +5003,11 @@ static BruteforceRendererStartupResult create_device_objects(void)
     bindings[14].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
     bindings[14].descriptorCount = 1;
     bindings[14].stageFlags = VK_SHADER_STAGE_COMPUTE_BIT;
-    descriptors.bindingCount = 15;
+    bindings[15].binding = 15;
+    bindings[15].descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
+    bindings[15].descriptorCount = 1;
+    bindings[15].stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT;
+    descriptors.bindingCount = 16;
     descriptors.pBindings = bindings;
     vk_result = s_vk.fn.CreateDescriptorSetLayout(
         s_vk.device, &descriptors, NULL, &s_vk.descriptor_layout);

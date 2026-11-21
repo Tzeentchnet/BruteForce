@@ -719,7 +719,7 @@ chain and bounded completed-image handoff in synthetic tests. That
 API-specific handoff is not accepted upstream. One retail native route reaches
 visible Basic Controls, and an audio-on trace carries changing Bink frames
 through its CPU fallback. Physical movie review remains open. Raw GPU vertex
-programs, render scaling, window clip, complete retail native presentation,
+programs, render scaling, complete retail native presentation,
 reviewed target-scene mip parity, wider matched-retail parity and stability,
 Intel coverage, real device-loss recovery, D3D12 and automatic fallback
 remain open.
@@ -1861,6 +1861,17 @@ checks that default-off behavior is
 unchanged and that an unsupported hardware backend or invalid setting stops
 explicitly. The initial register state is not established by those tests: the
 experimental implementation defers clipping until both axes have been written.
+
+The downstream Vulkan backend now advertises the same window-clip capability
+and supplies one fragment uniform to its base and extended pixel shaders.
+Validation-enabled fixtures on NVIDIA GeForce RTX 5070 (Vulkan 1.4.357,
+driver `0x9B460000`) and AMD Radeon integrated graphics (Vulkan 1.4.315,
+driver `0x00800161`) pass inclusive unions, exclusive inversion,
+incomplete-axis passthrough, doubled-AA inclusive bounds, unaffected clears,
+discarded depth writes, CPU-transformed extended draws and gathered GPU-VSH
+draws. These are exact 4x4 synthetic pixels with no game data. They establish
+cross-vendor backend semantics, not the NV2A reset state or retail visual
+equivalence; the option remains default-off.
 In sequential isolated runs with refreshed presented-frame captures, both the
 enabled and disabled settings reached the tutorial, responded to scripted
 input, and displayed the HUD help screen. Both also produced dark captures

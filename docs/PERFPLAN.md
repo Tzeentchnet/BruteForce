@@ -628,6 +628,9 @@ expected tree updated.
      vertex shader.
 
    Their defaults stay as decided by the existing investigations.
+   Vulkan now consumes the same window-clip state through a dedicated
+   fragment uniform and passes base, extended and GPU-VSH coverage on both
+   available vendors; this closes backend support, not the opt-in parity gate.
 5. **Tests.** Native fixtures run on the D3D11 WARP device so they need no
    GPU and no game data. They compare:
    - generated combiner shaders against `nv2a_combiner.c` over randomized
@@ -938,9 +941,11 @@ audio-off title path with matched bounded traces, not a multi-run comparison.
 Test-only readback now verifies the final composed Vulkan swap-chain image
 for native, forced-CPU, source-allowed CPU and fullscreen routes, including
 the fitted opaque-black bars, on both available vendors. This is final-image
-composition evidence, not physical compositor scanout. Continue with
-synthetic renderer-state parity; no additional manual route is scheduled
-merely to repeat the baseline.
+composition evidence, not physical compositor scanout. Vulkan window clipping
+now also passes focused validation-enabled NVIDIA and AMD fixtures for base,
+extended and GPU-VSH draws without a retail run. Continue with the remaining
+synthetic renderer-state gaps; no additional manual route is scheduled merely
+to repeat the baseline.
 
 The retail captures are correctness bring-up evidence only. The final
 combiner attempts ended at their 300-second watchdogs before the stationary

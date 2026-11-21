@@ -229,6 +229,58 @@ static int run_render_test(void)
     CHECK(pixels[0] == 0xFFFF0000, "triangle reaches the top-left pixel");
     CHECK(pixels[15] == 0xFF000000, "triangle preserves the opposite corner");
 
+    memset(&surface.window_clip, 0, sizeof surface.window_clip);
+    nv2a_window_clip_write(&surface.window_clip, 0, 0, 0);
+    nv2a_window_clip_write(&surface.window_clip, 1, 0, 0);
+    nv2a_window_clip_write(&surface.window_clip, 0, 1, 0x00010001);
+    nv2a_window_clip_write(&surface.window_clip, 1, 1, 0);
+    surface.window_clip_enabled = 1;
+    bruteforce_vulkan_test_clear(&surface, &state, 0xF0, 0xFF112233, 0);
+    CHECK(bruteforce_vulkan_test_readback(color_va),
+          "read back clear while window clipping is enabled");
+    CHECK(pixels[15] == 0xFF112233,
+          "window clipping does not affect color clears");
+    bruteforce_vulkan_test_clear(&surface, &state, 0xF0, 0xFF000000, 0);
+    bruteforce_vulkan_test_draw(&surface, &batch);
+    CHECK(bruteforce_vulkan_test_readback(color_va),
+          "read back inclusive base window clip");
+    CHECK(pixels[0] == 0xFFFF0000 && pixels[1] == 0xFFFF0000 &&
+          pixels[2] == 0xFF000000,
+          "inclusive base window clip unions all programmed rectangles");
+
+    surface.window_clip.exclusive = 1;
+    bruteforce_vulkan_test_clear(&surface, &state, 0xF0, 0xFF000000, 0);
+    bruteforce_vulkan_test_draw(&surface, &batch);
+    CHECK(bruteforce_vulkan_test_readback(color_va),
+          "read back exclusive base window clip");
+    CHECK(pixels[0] == 0xFF000000 && pixels[1] == 0xFF000000 &&
+          pixels[2] == 0xFFFF0000,
+          "exclusive base window clip inverts the rectangle union");
+
+    memset(&surface.window_clip, 0, sizeof surface.window_clip);
+    nv2a_window_clip_write(&surface.window_clip, 0, 0, 0);
+    bruteforce_vulkan_test_clear(&surface, &state, 0xF0, 0xFF000000, 0);
+    bruteforce_vulkan_test_draw(&surface, &batch);
+    CHECK(bruteforce_vulkan_test_readback(color_va),
+          "read back incomplete-axis base window clip");
+    CHECK(pixels[0] == 0xFFFF0000 && pixels[2] == 0xFFFF0000,
+          "incomplete-axis window clip allows the ordinary draw");
+
+    memset(&surface.window_clip, 0, sizeof surface.window_clip);
+    nv2a_window_clip_write(&surface.window_clip, 0, 0, 0);
+    nv2a_window_clip_write(&surface.window_clip, 1, 0, 0);
+    surface.aa_sx = surface.aa_sy = 2;
+    bruteforce_vulkan_test_clear(&surface, &state, 0xF0, 0xFF000000, 0);
+    bruteforce_vulkan_test_draw(&surface, &batch);
+    CHECK(bruteforce_vulkan_test_readback(color_va),
+          "read back antialiased base window clip");
+    CHECK(pixels[0] == 0xFFFF0000 && pixels[1] == 0xFFFF0000 &&
+          pixels[5] == 0xFFFF0000 && pixels[2] == 0xFF000000,
+          "window clip expands inclusive bounds for antialiased pixels");
+    surface.aa_sx = surface.aa_sy = 1;
+    surface.window_clip_enabled = 0;
+    memset(&surface.window_clip, 0, sizeof surface.window_clip);
+
     memset(&vsh_batch, 0, sizeof vsh_batch);
     memset(vsh_constants, 0, sizeof vsh_constants);
     memset(vsh_inputs, 0, sizeof vsh_inputs);
@@ -277,6 +329,20 @@ static int run_render_test(void)
               vsh_output[i].d0[3] == 1.0f,
               "vertex-program readback preserves diffuse color");
     }
+
+    memset(&surface.window_clip, 0, sizeof surface.window_clip);
+    nv2a_window_clip_write(&surface.window_clip, 0, 0, 0);
+    nv2a_window_clip_write(&surface.window_clip, 1, 0, 0);
+    surface.window_clip_enabled = 1;
+    bruteforce_vulkan_test_clear(&surface, &state, 0xF0, 0xFF000000, 0);
+    CHECK(bruteforce_vulkan_test_draw_vsh(&surface, &vsh_batch),
+          "accept window-clipped vertex-program triangle");
+    CHECK(bruteforce_vulkan_test_readback(color_va),
+          "read back window-clipped vertex-program triangle");
+    CHECK(pixels[0] == 0xFFFF00FF && pixels[1] == 0xFF000000,
+          "GPU vertex-program draws honor the Vulkan window clip");
+    surface.window_clip_enabled = 0;
+    memset(&surface.window_clip, 0, sizeof surface.window_clip);
 
     state.cull_enable = 1;
     state.cull_face = 0x408;
@@ -433,6 +499,19 @@ static int run_render_test(void)
     CHECK(pixels[0] == 0xFFFF0000,
           "extended combiner multiplies texture stages zero and one");
 
+    memset(&surface.window_clip, 0, sizeof surface.window_clip);
+    nv2a_window_clip_write(&surface.window_clip, 0, 0, 0);
+    nv2a_window_clip_write(&surface.window_clip, 1, 0, 0);
+    surface.window_clip_enabled = 1;
+    bruteforce_vulkan_test_clear(&surface, &state, 0xF0, 0xFF000000, 0);
+    bruteforce_vulkan_test_xdraw(&surface, &xbatch);
+    CHECK(bruteforce_vulkan_test_readback(color_va),
+          "read back window-clipped extended draw");
+    CHECK(pixels[0] == 0xFFFF0000 && pixels[1] == 0xFF000000,
+          "CPU-transformed extended draws honor the Vulkan window clip");
+    surface.window_clip_enabled = 0;
+    memset(&surface.window_clip, 0, sizeof surface.window_clip);
+
     memset(cube_bytes, 0, 6 * 128);
     for (i = 0; i < 6; ++i)
         *(uint32_t *)(cube_bytes + i * 128) = 0xFF000000u | (i + 1);
@@ -535,11 +614,17 @@ static int run_render_test(void)
     CHECK(pixels[0] == 0xFF0000CC,
           "partial color clear uses a depth-compatible pipeline");
     bruteforce_vulkan_test_clear(&surface, &state, 0xF1, 0xFF000000, 0xFFFFFF00);
+    memset(&surface.window_clip, 0, sizeof surface.window_clip);
+    nv2a_window_clip_write(&surface.window_clip, 0, 0, 0);
+    nv2a_window_clip_write(&surface.window_clip, 1, 0, 0);
+    surface.window_clip_enabled = 1;
     for (i = 0; i < 3; ++i) {
         vertices[i].z = 16777215.0f * 0.25f;
         vertices[i].diffuse = 0xFFFF0000;
     }
     bruteforce_vulkan_test_draw(&surface, &batch);
+    surface.window_clip_enabled = 0;
+    memset(&surface.window_clip, 0, sizeof surface.window_clip);
     for (i = 0; i < 3; ++i) {
         vertices[i].z = 16777215.0f * 0.75f;
         vertices[i].diffuse = 0xFF00FF00;
@@ -547,6 +632,8 @@ static int run_render_test(void)
     bruteforce_vulkan_test_draw(&surface, &batch);
     CHECK(bruteforce_vulkan_test_readback(color_va), "read back depth-tested triangle");
     CHECK(pixels[0] == 0xFFFF0000, "near triangle rejects the later far triangle");
+    CHECK(pixels[1] == 0xFF00FF00,
+          "window-clipped fragment does not write depth");
 
     state = default_state();
     memset(quad, 0, sizeof quad);

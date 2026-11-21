@@ -1317,19 +1317,27 @@ own GPU back end, an extended interface for it, and its own pacing fixes.
     carries the existing rectangle state and an explicit backend capability.
     Back ends without the capability still reject the opt-in. The D3D11 base,
     transformed and GPU-vertex draws apply the same inclusive/exclusive union
-    and AA coordinate shifts as the software helper; patch 0021 does not
-    change clears. The project D3D11 renderer separately honors clear
-    rectangles and color masks.
+    and AA coordinate shifts as the software helper. The downstream Vulkan
+    backend now advertises that capability and applies the same state through
+    a fragment-only uniform on base, transformed and gathered GPU-VSH draws;
+    patch 0021 does not change clears. The project D3D11 renderer separately
+    honors clear rectangles and color masks.
     *Tests:* CPU, WARP and hardware fixtures check all eight rectangles,
     empty and incomplete state, inclusive/exclusive masks, state changes,
     both AA shifts, scale-two mapping, clear behavior, base/transformed/GPU
     vertex paths, and depth/stencil discard side effects. GPU stencil is
-    checked separately because the CPU renderer does not model it.
-    *Overlap:* #222 and the #184 index were last checked in the recorded
-    2026-11-10/11 review; no new upstream check or contact was made.
+    checked separately because the CPU renderer does not model it. Vulkan
+    validation fixtures on NVIDIA and AMD additionally cover inclusive and
+    exclusive masks, incomplete axes, AA-scaled bounds, unaffected clears,
+    suppressed depth writes and all three Vulkan draw paths.
+    *Overlap:* all 500 available upstream pull-request records were refreshed
+    read-only on 2026-11-21. #222 and the #184 index remain the relevant
+    overlap; no competing Vulkan window-clip implementation or upstream
+    interaction was found.
     *Before filing:* reconcile #222 state/reset semantics, test other
     backends and obtain matched gameplay/original-hardware evidence.
-    *Status:* local patch and project fixtures; keep the switch default off.
+    *Status:* local patch consumed by project D3D11 and Vulkan backends with
+    cross-vendor project fixtures; keep the switch default off.
 
 27. **Honor rectangular GPU clears and avoid redundant software depth clears.**
     *Problem:* treating a partial clear as a whole-target clear can erase

@@ -389,6 +389,25 @@ but the exact writer was not intercepted. Do not convert that pattern into a
 guest-wins rule or skip readback. Generic DMA-object resolution plus live
 surface lifetime tracking is the framework-level prerequisite.
 
+### Vulkan window clipping
+
+The Vulkan backend advertises `NV2A_BACKEND_CAP_WINDOW_CLIP` and consumes the
+same opt-in `Nv2aWindowClip` state as D3D11. Each base, CPU-transformed
+extended and gathered GPU-VSH draw uploads eight `uint4` rectangles plus a
+count/exclusive flag to a fragment-only uniform binding. Logical inclusive
+endpoints expand to inclusive physical bounds when either AA axis is doubled.
+Incomplete horizontal/vertical state uploads a zero count and leaves the draw
+unclipped, matching the CPU helper.
+
+Both Vulkan pixel paths discard a fragment before color or depth output when
+it is outside an inclusive union or inside an exclusive union. Clear shaders
+do not reference the clip uniform, so color and depth clears remain
+unaffected. The validation-enabled NVIDIA and AMD fixture covers multiple
+rectangles, inclusive and exclusive masks, incomplete axes, AA scaling,
+clear isolation, suppressed depth writes, and base, extended and GPU-VSH
+draws. `RECOMP_WINDOW_CLIP` remains default-off because those synthetic
+semantics do not establish original-hardware reset state or retail parity.
+
 ### Extended combiners, GPU vertex programs, and visibility
 
 The existing `Nv2aBackendExt.draw` seam supplies `Nv2aXVertex` data after the
@@ -628,7 +647,9 @@ remain open.
    audio-off skips the title's movies while audio-on opens both Bink files and
    sends changing CPU-owned frames through the provider. Fold physical movie
    review into a later required validation rather than scheduling a separate
-   operator boot; physical fullscreen review and window clip remain open.
+   operator boot; physical fullscreen review remains open. The Vulkan base,
+   CPU-transformed extended and gathered GPU-VSH paths now share the opt-in
+   window-clip state with cross-vendor synthetic coverage.
    The first no-capture D3D11/Vulkan sequence was invalidated by a recurring
    pre-movie guest-worker poll on run 3. A default-off framework zero-delay
    backoff now passes its focused fixture and three no-retry D3D11 startup
@@ -1363,7 +1384,7 @@ replace matched gameplay or original-hardware validation.
   observations skipped the opening movies; a bounded audio-on trace opened
   both Bink files and produced changing CPU-owned native-route frames. It
   still lacks physical movie review, a native-resolution render-surface
-  handoff, direct raw guest-stream vertex fetch and window clip. Surface
+  handoff and direct raw guest-stream vertex fetch. Surface
   layout changes after creation fail rather
   than migrate. In one matched Basic Controls capture, 134 of
   307,200 pixels

@@ -462,8 +462,10 @@ implemented, but this is not a broad parity or performance claim. See
   diagnostic recorded 19,029 accepted samples and no rejections in periodic
   reports, and a captured gameplay frame showed the character. This does not
   establish correctness across all frames. GPU window clipping is available
-  behind the existing opt-in flag. Neither change establishes original-hardware
-  equivalence.
+  behind the existing opt-in flag on D3D11 and Vulkan. Vulkan's base,
+  CPU-transformed extended and gathered GPU-VSH paths pass the focused
+  validation-enabled NVIDIA and AMD fixture. Neither change establishes
+  original-hardware equivalence.
 - A traced frame exposed whole-target D3D11 clears where the title requested
   narrow black/depth letterbox strips. The GPU backend now honors clear
   rectangles and channel masks; the executor skips the roughly 5 MiB
@@ -726,9 +728,12 @@ GPU methods in the CPU-path census.
 8. **GPU window clipping.** Expanded CPU, WARP and hardware fixtures cover
    multiple rectangles, incomplete state, AA and render scaling, base and
    vertex paths, clears, and depth/stencil discard side effects. CPU stencil
-   is unmodeled, so that side effect is checked on GPU separately. Keep the
-   switch off by default until matched gameplay and reference evidence settle
-   reset semantics and regressions.
+   is unmodeled, so that side effect is checked on GPU separately. Vulkan now
+   advertises the capability and passes inclusive/exclusive, incomplete-axis,
+   AA-scaled, clear, depth-write, base, extended and GPU-VSH cases with
+   validation on both available vendors. Keep the switch off by default until
+   matched gameplay and reference evidence settle reset semantics and
+   regressions.
 
 *Done when:* the A1 inventory lists every difference from the reference with
 a cause or an accepted reason; no recurring black interval or missing

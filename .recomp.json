@@ -1,0 +1,30 @@
+{
+  "$schema": "https://recomp.fyi/schema/v1.json",
+  "game": "Brute Force",
+  "system": "Xbox",
+  "type": "recomp",
+  "original": {
+    "region": "USA",
+    "serial": "0x4D53001E"
+  },
+  "project": "Brute Force Recomp",
+  "status": "in-progress",
+  "targets": [
+    "Windows"
+  ],
+  "toolchain": "Xboxrecomp",
+  "approach": "Static recompilation of Xbox x86 game code with xboxrecomp and a native Direct3D 11 runtime.",
+  "maintainers": [
+    {
+      "name": "Tzeentchnet",
+      "link": "https://github.com/Tzeentchnet"
+    }
+  ],
+  "links": [
+    {
+      "label": "Current findings",
+      "url": "https://github.com/Tzeentchnet/BruteForce/blob/main/docs/FINDINGS.md"
+    }
+  ],
+  "notes": "Tutorial gameplay is running on the supported North American retail release; full-game correctness and networking are not yet established."
+}

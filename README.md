@@ -59,9 +59,12 @@ This is an experimental Windows release for the North American retail game:
 - Tutorial gameplay is running, but full-game correctness is not established.
 - Networking is not supported.
 - Asset-format research for a future Blender importer has decoded the
-  resource bundles, the name hash, and the complete binary-XML descriptor
-  and schema formats; `tools\assets.py` decodes every descriptor on the
-  disc. Mesh, texture, and animation payloads are not decoded yet, and no
+  resource bundles, name hash, and complete binary-XML descriptor and schema
+  formats. Validation covers all 7 schemas, 759 nonempty descriptors, and
+  806 compressed blocks; `tools\assets.py` decodes every descriptor on the
+  disc. The decoded texture descriptors contain 12,647 sized entries whose
+  aligned ranges and sizes match Xbox mip-chain expectations except for two
+  entries. Mesh, texture, and animation payloads are not decoded yet, and no
   importer exists.
 - Internal-resolution scaling retains a 4:3 picture; true widescreen is not
   implemented.

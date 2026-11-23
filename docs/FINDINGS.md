@@ -10,6 +10,32 @@ asset formats and importer research in
 in [RENDERING.md](./RENDERING.md), and general framework contributions are
 in [UPSTREAM.md](./UPSTREAM.md).
 
+## 2026-11-23 complete BXML and BXSD decode
+
+Static analysis of the retail executable and the 56 local `data\*.tgz`
+bundles, with no runtime change. The game's BXML reader (`0x254860`,
+element loop `0x255330`, value reader `0x254C60`) stores the structure as
+16-bit tokens compressed with a word-oriented LZSS: blocks of
+`u16 length, u32 output count, payload`, with 16-bit flag words,
+back-references `offset = w & 0x1FF, length = (w >> 9) + 2` into a 512-word
+ring, and blocks read on demand from the same cursor as the values. Token
+kinds are start `0x0`, marker `0x9`, attribute `0xA`, empty `0xB`, end
+`0xC` and value `0xD`. Value encodings come from the BXSD schema types,
+which resolve to built-in codes with sizes from the table at `0x4063D0`;
+`stringid` values are u32 hashes and `enum-value` values are LEB128
+indices plus one. The BXSD grammar (loader `0x281FE0`) is a recursive list
+of `u16 flags, QName name, QName base, children`.
+
+`python tools\assets.py verify` decodes all 7 schemas and all 759 nonempty
+descriptors with no byte or token word left over, and every one of the 806
+blocks emits exactly its declared word count. Synthetic coverage is in
+`tests/test_assets.py`. Decoded texture descriptors put all 12,647 sized
+entries at 128-byte-aligned offsets inside their `.tex` files, with sizes
+that match Xbox `D3DFORMAT` mip chains for every non-negative format except
+two entries. Details and evidence levels are in
+[ASSETFORMATS.md](./ASSETFORMATS.md). No payload decoder or importer is
+claimed.
+
 ## 2026-11-22 asset name hash and BXML headers
 
 Static analysis of the retail executable and the 56 local `data\*.tgz`

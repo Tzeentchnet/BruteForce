@@ -24,7 +24,7 @@ Each statement below uses one of these labels:
 | **Unknown** | Not yet investigated, or investigated without a result. |
 
 All observations come from the single North American retail disc identified
-by [retail.json](../fingerprints/retail.json), inspected on 2026-11-22. The
+by [retail.json](../fingerprints/retail.json), inspected on 2026-11-22 and 2026-11-23. The
 executable hash does not authenticate the other disc files; other releases
 may differ. Code references are to the recompiled generation
 `20261121-005939-bc768cc6`, whose function names are the original guest
@@ -38,7 +38,7 @@ The importer should eventually bring three kinds of content into Blender:
 
 | Target | Descriptor files (BXML) | Payload files | Status |
 | --- | --- | --- | --- |
-| Props and weapons | `objects-*`, `materials-*`, `textures-*`, `objecttypes-*` | `objects-*.ipn`, `objects-*.ivd`, `textures-*.tex` | Descriptors are partly decoded; payloads are unknown. |
+| Props and weapons | `objects-*`, `materials-*`, `textures-*`, `objecttypes-*` | `objects-*.ipn`, `objects-*.ivd`, `textures-*.tex` | Descriptors decode fully; payloads are unknown. |
 | Characters | The props set plus `animations-*` and `characters/ms_*` | Also `animations-*.chnl` | Skeleton, skinning, and animation encoding are unknown. |
 | Levels | `levels-*`, plus each referenced library | All of the above | The level vocabulary is recovered; terrain and placement encodings are unknown. |
 
@@ -188,132 +188,198 @@ rather than committed.
 
 ## Layer 3: BXML descriptors (`.xmb`)
 
-### Header and namespace table
+**Verified.** On 2026-11-23 the format was traced through the game's own
+reader and checked by decoding all 759 nonempty BXML members against the
+seven BXSD schemas. Every member decodes with no byte left over, no token
+word left unread, and every token block emitting exactly the word count its
+header declares (`python tools\assets.py verify`). The reader routines are:
 
-**Verified for all 759 nonempty BXML members:**
+| Guest VA | Role |
+| --- | --- |
+| `0x254860` | Header, namespace table, name table, root element. |
+| `0x255330` | Element loop (recursive); dispatches on the token kind. |
+| `0x254C60` | Reads one value. |
+| `0x281CC0`, `0x281BF0`, `0x281D30` | Token-stream setup, block loader, and LZSS decoder. |
+| `0x252CA0` | Unsigned LEB128. |
+| `0x232A40` | A namespace name: a raw u32 hash, or a hashed string. |
+
+### Header and tables
 
 | Offset | Size | Field |
 | --- | --- | --- |
-| `0x00` | 4 | Magic `BXML`. |
-| `0x04` | 4 | Bytes `01 01 07 00` in every file. Probably version fields; **Unknown** meaning. |
-| `0x08` | u32 | Offset of the name table, always `0x11 + 8 * N`. |
-| `0x0C` | u32 | Always zero. |
-| `0x10` | u8 | `N`, the namespace count. |
-| `0x11` | `N` × 8 | Namespace pairs: u32 prefix hash, then u32 namespace-URI hash. A prefix hash of zero is the default namespace. |
+| `0x00` | 4 | Magic `BXML`, checked byte by byte. |
+| `0x04` | 1, 1 | Version: the reader accepts `b5 * 0.1 + b4 <= 1.1`. Every file has `01 01` (1.1). |
+| `0x06` | u8 | Flags, `07` in every file. Bit 0: namespace names are raw u32 hashes rather than strings. Bits 0-1: enable the `stringid` and `enum-value` encodings below. |
+| `0x07` | u8 | Zero. **Unknown.** |
+| `0x08` | u32 | Offset of the name table; the reader seeks there after the namespaces. |
+| `0x0C` | u32 | Zero; not read. |
+| `0x10` | LEB128 | Namespace count `N`. |
+| `0x11` | `N` x 8 | Namespace pairs: u32 prefix hash, then u32 URI hash. Prefix zero is the default namespace. |
+| name table | LEB128, then u32s | Name count, then that many name hashes. Tokens index this table. |
 
-All integers are little-endian. Every file declares
-`xsi` = `http://www.w3.org/2001/XMLSchema-instance`: as the last pair in
-753 files, and as the first pair in the six `common/stringtable` files.
+The name table can list names a document does not use; all 60 nonempty
+`objects-*.xmb` and 61 `materials-*.xmb` members carry one identical
+110-name table.
 
-**Verified** namespace declarations per descriptor family:
+Every file declares `xsi` = `http://www.w3.org/2001/XMLSchema-instance`.
+The asset families (`objects`, `materials`, `textures`, `animations`) use
+`acg=acg`, default=`daxns`, `xsi`; the game families (`levels`,
+`objecttypes`, `characters/ms_*`) use default=`bfns`, `acg=acg`,
+`daxns=daxns`, `xsi`. A format string in the executable writes
+`<texture-library ... xmlns="daxns" ...>`, so `daxns` is the asset namespace
+and `bfns` the game namespace; their schemas are `daxns.xsb` and `bfns.xsb`.
 
-| Family | Namespaces (prefix = URI) |
-| --- | --- |
-| `objects`, `materials`, `textures`, `animations` | `acg=acg`, default=`daxns`, `xsi` |
-| `levels`, `objecttypes`, `characters/ms_*` | default=`bfns`, `acg=acg`, `daxns=daxns`, `xsi` |
+### Compressed token stream
 
-This matches a format string in the executable that writes
-`<texture-library ... xmlns="daxns" ...>`. So `daxns` is the asset
-namespace (textures, materials, meshes, archetypes, animation channels), and
-`bfns` is the game namespace (levels, object types, motion sets). Matching
-binary schemas, `daxns.xsb` and `bfns.xsb`, are in `common/schemas`.
+The structure is a stream of 16-bit token words, compressed with a
+word-oriented LZSS and stored in blocks. The first block starts directly
+after the name table.
 
-### Name table
+- **Block:** `u16 total` (words, including this one), then the decompressed
+  word count, a u32 (low half first) for version 1.1 or a u16 otherwise,
+  then the payload. The reader's buffer holds at most `0x1200` words.
+- **Payload:** a flag word, then up to 16 items, repeated. Bit `i` of the
+  flag word, from bit 0, describes item `i`: clear means the item is a
+  literal token word; set means it is a back-reference `w`, which copies
+  `(w >> 9) + 2` words starting at position `w & 0x1FF` of a 512-word ring.
+  Every output word is written to the ring at the current position, which
+  starts at 1 in each block. A back-reference never spans blocks.
+- **Interleaving:** values are read from the same file cursor as the
+  blocks, and the next block is loaded only when the decoder needs another
+  word. A file is therefore `block 1, values of the tokens in block 1,
+  block 2, ...`. 36 of the 759 files use more than one block (806 blocks in
+  all); those are the 36 files whose first word was at least `0x1000`.
 
-**Verified.** At the offset given by the header field at `0x08`:
+The earlier header reading `A`, `B`, and a flag word is this block header:
+`A` is the block length, `B` and the next u16 are the decompressed count,
+and the "flags" are the first LZSS flag word. The earlier puzzles, such as
+all 16 token kinds and runs of `0xFExx` words, were compressed data.
 
-- An unsigned LEB128 count (seven bits per byte, low group first, high bit
-  set when another byte follows). Counts of up to 630 parse as two-byte
-  values and leave the following structure aligned.
-- `count` × u32 name hashes.
+### Tokens
 
-**Observed.** The table can list names that the document never uses:
-`default-playerstats.xmb` lists 17 names, of which two do not appear in its
-token stream. **Verified:** all 60 nonempty `objects-*.xmb` and 61
-`materials-*.xmb` members carry one identical 110-name table. **Hypothesis:** the table lists the schema vocabulary in scope rather
-than only the names a document uses. Element tokens refer to names by their
-index in this table.
+Each token word has a kind in its top four bits and an operand in the low
+12 bits:
 
-### Structure block and tokens
+| Kind | Meaning | Uses on the disc |
+| --- | --- | ---: |
+| `0x0` | Start a child element; operand = name index. | 4,174,242, plus 759 roots |
+| `0x9` | Marker: operand is an extended count (below), held for the next start element. | 510,545 |
+| `0xA` | Attribute; operand = name index. One value follows in the value stream. | 9,622,122 |
+| `0xB` | Empty child element; operand = name index. | 0 |
+| `0xC` | End the current element. | 4,175,001 |
+| `0xD` | Element value; operand = extended element count. | 282,218 |
+| others | Ignored by the game's loop. | 0 |
 
-**Partly verified.** Immediately after the name table:
+An **extended count** is the low 12 bits of the token. If bit 11 (`0x800`)
+is set, further token words follow, each contributing `w & 0x7FFF` at bit
+11, then bit 26, and so on, while bit 15 of the word is set. The reader ORs
+rather than replaces, so bit 11 of an extended count is always set.
 
-| Offset | Size | Field |
-| --- | --- | --- |
-| `+0` | u16 | `A`. In 677 of 759 files it is the length, in u16 words, of the block that starts here and ends with the first `0xC000` token. |
-| `+2` | u16 | `B`. **Unknown.** In the smallest files it equals the token count; in larger files it does not. |
-| `+4` | 4 | Flags or counts. **Unknown.** The most common values are `00 00 00 00`, `00 00 00 01`, and `00 00 00 80`. |
-| `+8` | u16 words | Token stream, starting with `0x0000`. |
+The document is one root start token, its contents, and its end token.
+**Observed:** in four bundles, 32,327 of 33,594 markers equal the number of
+consecutive same-named siblings that start at the marked element, and every
+run of more than one same-named sibling is marked; some lone elements carry
+a marker of 2. The game passes the marker to an optional handler along with
+the next element. **Hypothesis:** an array-size hint. It does not affect
+decoding.
 
-The 82 files that break the `A` rule are all 36 files with
-`A >= 0x1000` (26 sounds, 8 levels, and 2 animations descriptors) and 46
-others in which a `0xC000` word occurs earlier. **Unknown:** whether the
-high bits of `A` are flags, and whether the earlier `0xC000` words are
-tokens or data.
+### Values and types
 
-**Observed** in the small `default-global-bfdata.xmb`,
-`default-playerstats.xmb`, and `profiles/profile-default.xmb`. Each token
-is a u16 whose top four bits give a kind and whose low 12 bits are a
-name-table index:
+A value's encoding comes from the schema type of its element or attribute
+(see [Layer 4](#layer-4-bxsd-schemas-xsb)). Each type resolves through its
+base chain to a built-in type, with a code and an element size from the
+table at `0x4063D0`:
 
-| Top nibble | Reading in the small samples |
-| --- | --- |
-| `0x0` | Start element *n*. The root is index 0. |
-| `0xA` | Attribute *n* of the current element; its value is in the value area. |
-| `0xC` | End element *n*. The stream ends with `0xC000`. |
-| `0x9`, `0x1`, `0xE`, `0xF`, others | **Unknown.** All 16 kinds occur in larger files. Runs of `0xFExx`/`0xFFxx` words with steadily increasing low bytes in `textures-common.xmb` suggest packed tables or offsets rather than tokens. |
+| Code | Built-in types (registration table at `0x406CB8`) | Bytes per element |
+| ---: | --- | ---: |
+| 1 | `xs:boolean` | 1 |
+| 3, 4 | `xs:byte`, `xs:unsignedByte` | 1 |
+| 5, 6 | `xs:short`, `xs:unsignedShort` | 2 |
+| 7 | `xs:int`, `daxns:user-typedef` | 4 |
+| 8 | `xs:unsignedInt` | 4 |
+| 9, 10 | Not registered by name | 8 |
+| 11 | `xs:float` | 4 |
+| 12 | `xs:double` | 8 |
+| 13 | `xs:string`, `daxns:stringid`, `daxns:enum-value` | special |
+| 14 | `daxns:wstring` | special |
 
-For example, `profile-default.xmb` is one root element with 12 attributes:
-the tokens are `0000`, `A001` through `A00C`, and `C000`.
+- **Numeric codes:** an attribute reads one element; an element value reads
+  the token's count of elements, little-endian.
+- **Codes 13 and 14:** with header flag bits 0-1 set, the reader walks the
+  type's base chain. A type derived from `daxns:stringid` is a u32 name
+  hash. One derived from `daxns:enum-value`, and not from `stringid`, is a
+  LEB128 holding the enumeration index plus one. Any other string is a
+  LEB128 byte length followed by the bytes, UTF-16LE for `wstring`.
 
-### Value area
+Across the disc, the value reads are 3,615,138 `stringid`, 2,791,030 float,
+1,556,232 int, 1,158,674 boolean, 579,816 enum, 74,445 short, 54,745
+unsigned short, 33,141 unsigned byte, 32,242 string, 7,569 wstring, and
+1,308 unsigned int values.
 
-**Observed.** Typed values follow the token stream. 32-bit little-endian
-IEEE floats appear (for example `1.0` as `00 00 80 3F`). A string is
-prefixed with its length: `textures-common.xmb` stores the 19-character
-data-file name preceded by the byte `0x13`. **Unknown:** how values are
-typed. **Hypothesis:** the value layout is schema-driven, so decoding values
-requires the matching BXSD type of each element and attribute, including
-the `stringid` type, which may store a hash rather than text.
+### Resolving names to declarations
 
-### Next steps for BXML
-
-The fastest authoritative route is to trace the game's own reader in the
-generated code, starting from callers of the name-hash function
-`sub_00238370` and from the code that checks the `BXML` magic. That reader
-defines the token kinds, the meaning of `A` and `B`, and the value
-encoding. Check each conclusion against all 759 files, not only the small
-samples.
+The root element resolves to the top-level declaration with its name in the
+document's default namespace. A child element or attribute resolves to the
+member with that name: first the parent declaration's own children, then
+those of the named type its base refers to, and so on along the base chain.
+Every lookup on the retail disc resolves this way. The game also
+special-cases the element name `#1b8535f0` with a global lookup; no file on
+this disc needs that path, and it is not modelled.
 
 ## Layer 4: BXSD schemas (`.xsb`)
 
-**Verified.** There are seven schemas, all in `common/schemas`: `bfens`,
-`bfns`, `daxns`, `gameflags`, `gameflags-downloadable`, `global-gameflags`,
-and `limp`. The header is `BXSD` followed by `01 00 01 00` and a u32 that
-varies by file. **Unknown:** that u32's meaning, and the full grammar.
+**Verified.** All seven schemas in `common/schemas` (`bfens`, `bfns`,
+`daxns`, `gameflags`, `gameflags-downloadable`, `global-gameflags`, and
+`limp`) parse to their last byte with this grammar, read by the loader at
+`0x281FE0` and the declaration reader at `0x281F10`/`0x254620`:
 
-**Observed** in `limp.xsb` and `daxns.xsb`:
+| Offset | Size | Field |
+| --- | --- | --- |
+| `0x00` | 4 | Magic `BXSD`. |
+| `0x04` | 1, 1 | Version, `01 00` (1.0); the reader accepts at most 1.0. |
+| `0x06` | u8 | `1` in every file: names are raw u32 hashes. With `0`, the loader reads a string table first; not observed. |
+| `0x08` | u32 | Offset of the declaration tree. |
+| `0x0C` | u32 | Zero. |
+| `0x10` | LEB128 | `1` in every file. **Unknown.** |
+| next | QName | Target namespace (a local name). |
+| next | LEB128, pairs | Namespace count, then u32 prefix and u32 URI hashes, as in BXML. |
+| tree | | A declaration list. |
 
-- `0x21` is followed by a u32 name hash: a declared name.
-- `0x22` is followed by a u32 namespace hash and a u32 local-name hash: a
-  qualified type reference, such as XML Schema `string` or a `daxns`
-  complex type.
-- Declarations are introduced by small codes such as `0x09`, `0x0A`, and
-  `0x19`. A `0x09` declaration ends with a small count (for example
-  `00 03`), which may be its number of children.
+A **declaration list** is a LEB128 count followed by that many
+declarations. A declaration is `u16 flags`, QName `name`, QName `base`, and
+its own declaration list. A **QName** is a tag byte: `00` for none; `21`
+followed by a u32 local hash in the schema's target namespace; or `22`
+followed by a u32 prefix hash and a u32 local hash.
 
-Name coverage per schema, counting `0x21` name tokens, is 153 of 297 for
-`daxns.xsb` and 1,320 of 2,580 for `bfns.xsb`. **Hypothesis:** the schemas
-give each BXML element and attribute its value type. That would make
-decoding `daxns.xsb` a prerequisite for reading asset values, and a curated
-source for confirming recovered names.
+The flag values found across the seven schemas, and how they read in the
+trees:
+
+| Flags | Count | Reading |
+| ---: | ---: | --- |
+| `0x0001` | 143 | Named complex type (top level). |
+| `0x0002` | 331 | Simple type, or a simple member of a `0x80` member. |
+| `0x0006` | 9 | List type, for example `float-array : xs:float`. |
+| `0x0009` | 409 | Member element with inline content. |
+| `0x000A` | 1,723 | Member with a simple type. |
+| `0x0018`, `0x0019` | 1, 624 | Member whose content is a named type. |
+| `0x0080` | 48 | A member named `#1b8535f0` whose members are simple values. |
+| `0x0101` | 97 | **Unknown** (only in `bfns.xsb`). |
+
+**Verified** from the loader: a declaration with flag bit 1 (`0x2`) takes
+its value code from the root of its base chain (`0x254530`). The other
+readings fit every decoded document, but are named by analogy with XML
+Schema rather than from the game's code. The built-in types above are
+registered before any schema, so the schemas' own declarations of
+`daxns:stringid`, `wstring`, `user-typedef`, and `enum-value` do not change
+their codes.
 
 ## Layer 5: asset families
 
 The element names in this section are curated recovered names from the
-`tutorial` and `common` bundles. Use them as vocabulary to look for, not as
-a schema: nesting, cardinality, and value types are **Unknown** until BXML
-and BXSD decoding is complete.
+`tutorial` and `common` bundles. Since 2026-11-23, every descriptor decodes
+to a typed tree (`python tools\assets.py dump`), so nesting and value types
+can be read directly; the meaning of each field still has to be established
+against its payload. Unresolved names are written as hashes.
 
 ### Textures (`textures-*.xmb`, `textures-*.tex`)
 
@@ -327,13 +393,35 @@ and BXSD decoding is complete.
 - **Observed:** `.tex` has no header signature. 21 of the 61 files begin
   with zero bytes, and others begin with repeated byte patterns typical of
   compressed or swizzled image blocks.
-- **Hypothesis:** each `image` or `texture` has an `offset` and a `size`
-  inside the `.tex` file, plus a `format`, `width`, and `height` that use
-  Xbox (NV2A/D3D8) texture format codes. Linear formats would then be
-  swizzled, and DXT formats stored as blocks. `u0`/`v0`/`u1`/`v1` would be
-  sub-rectangles for animated or atlas textures.
-- **Unknown:** the format-code mapping, mip layout, cube maps, palettes,
-  and the meaning of `optimized-texture`.
+- **Verified** from decoded descriptors: a `texture-library` holds a
+  `#1b8535f0` member whose `data-file` names the `.tex` and whose
+  `data-size` equals its size (61 of 61), then `optimized-texture`
+  elements. Each texture's `#1b8535f0` member has `name` (a `stringid`),
+  `format`, `#120336ef`, `width`, `height`, `reference`, `offset`, and
+  `size`. All 12,647 entries with a format and width have an `offset` that
+  is a multiple of 128 and lies, with its `size`, inside the `.tex` file.
+- **Observed:** for every entry with a non-negative `format`, `size` equals
+  a full mip chain of `#120336ef` levels at the bit depth of the Xbox
+  Direct3D format with that number, except two format-7 entries:
+
+  | `format` | Entries | Matches the size of |
+  | ---: | ---: | --- |
+  | 0 | 19 | `L8`, 8 bits per pixel |
+  | 6, 7 | 4, 26 | `A8R8G8B8`, `X8R8G8B8`, 32 bits per pixel |
+  | 11 | 2,486 | `P8`, 8 bits per pixel |
+  | 12 | 152 | `DXT1`, 4 bits per pixel, 4x4 blocks |
+  | 14, 15 | 8,229, 137 | `DXT2/3`, `DXT4/5`, 8 bits per pixel, 4x4 blocks |
+  | 18, 46 | 3, 1 | Linear 32-bit formats |
+  | 25 | 1,490 | `A8`, 8 bits per pixel |
+
+  100 entries have negative formats (-12, -14, -1000) and match no size
+  rule. **Hypothesis:** `#120336ef` is the mip-level count, the format is
+  the Xbox `D3DFORMAT` value, and swizzled formats are stored swizzled.
+  `u0`/`v0`/`u1`/`v1` would be sub-rectangles for animated or atlas
+  textures.
+- **Unknown:** pixel data has not been decoded yet, so swizzling, palettes
+  for `P8`, cube maps, the negative formats, and the meaning of
+  `optimized-texture` are open.
 
 The renderer already decodes NV2A texture formats and swizzling at runtime;
 see [RENDERING.md](./RENDERING.md). An importer can reuse that knowledge, and
@@ -378,16 +466,27 @@ renderer sees, without capturing or committing any images.
 - **Observed:** the size ratio varies. In the six `mp_common` sets, `.ivd`
   is 11 to 56 times larger than `.ipn`; in `common`, `e01`, and `m01_a`, it
   is 1.4 to 13.5 times larger.
+- **Verified** from decoded descriptors: in all 60 nonempty
+  `objects-*.xmb` members, the `mesh-library` element's `data-file` names
+  the `.ivd` and its `#ed4c66fd` attribute equals the `.ivd` size; a second
+  library, `#104db1cd`, names the `.ipn` with `#ed4c66fd` equal to its size.
+  So `.ivd` belongs to the meshes and `.ipn` to `#104db1cd`, whose entries
+  are a `name` and one integer `#e9e44859` that increases from 0 (in
+  `tutorial`: 0, 1184, 1600, ...).
+- **Observed** in `objects-tutorial.xmb`: each `geoset` has a float
+  `#1ab09530` and a three-float child `#e99750a9` (**Hypothesis:** a
+  bounding sphere's radius and centre), and a descendant carrying
+  `vertex-type` (a `stringid`) and several integers, one of which
+  (`#0cdffa25`) increases through the `.ivd` like an offset.
 - **Hypothesis:** a `mesh` is split into `geoset`s, one per material, each
   pointing at a range of a vertex buffer with a given `vertex-type`, and a
   range of an index buffer, drawn as triangle strips. An `archetype` is a
   hierarchy of `part`s, each referring to a mesh, joined at named
   hardpoints. `lod-switch` selects between detail levels.
-- **Unknown:** which file holds vertices and which holds indices (the
-  strip-like prefix argues that `.ivd` holds at least some indices), the
-  vertex layouts and packed normal formats, index width beyond the u16
-  prefix, primitive types other than strips, bounding volumes, and the
-  coordinate system.
+- **Unknown:** how the `.ivd` splits into vertices and indices, the
+  vertex layouts and packed normal formats, the index width beyond the u16
+  prefix, primitive types other than strips, what `#104db1cd` and the
+  `.ipn` describe, and the coordinate system.
 
 Blender mapping, once proved: one mesh object per `mesh`, with one material
 slot per geoset; parts as a parent-child object hierarchy, or as a single
@@ -500,86 +599,80 @@ intermediate representation and Blender, never inside the parsers.
 
 ## Importer architecture and milestones
 
-Keep the format code independent of Blender:
+Keep the format code independent of Blender. Layers 1-3 exist in
+[tools/bfassets](../tools/bfassets), as pure Python with no third-party
+dependencies, so they run both in Blender's bundled interpreter and in the
+project's test runner:
 
 1. **`bundle`:** safe tar access by member name; see
-   [Layer 1](#layer-1-bundles).
-2. **`names`:** the name hash, and a curated name map rebuilt locally from
-   the user's own executable and disc.
+   [Layer 1](#layer-1-bundles). Done.
+2. **`names`:** the name hash, plus a local candidate map rebuilt from the
+   user's own executable and disc by `tools\assets.py names`. The hash is
+   done; the candidates still need curating.
 3. **`bxml` and `bxsd`:** decode into a generic tree of elements,
-   attributes, and typed values. Keep unresolved names as `#xxxxxxxx` and
-   raw values next to typed ones.
+   attributes, and typed values, keeping unresolved names as hashes. Done.
 4. **`model`:** typed asset objects (texture, material, mesh, archetype,
    animation, level) built from the trees, with every cross-reference and
    payload range checked.
 5. **Blender add-on:** a thin layer that turns `model` objects into Blender
    data, and holds the coordinate conversion.
 
-Layers 1-4 should be pure Python with no third-party dependencies, so they
-run in Blender's bundled interpreter and in the project's test runner.
 A command-line dump, for example a JSON tree, a glTF file, or PNG textures,
 written to a local, untracked directory, lets each layer be validated
 without Blender.
 
 Milestones, each gated on its own evidence:
 
-| Milestone | Delivers | Gate |
-| --- | --- | --- |
-| M0 | Name hash, curated names, BXML/BXSD tree dump | Every nonempty `.xmb` and `.xsb` parses to its end with no unexplained bytes; the token grammar matches the game's reader. |
-| M1 | Textures | At least two formats decode, and match runtime texture data for the same images in two bundles. |
-| M2 | Static meshes | One known prop imports with correct shape, normals, UVs, and materials, numerically checked against a CPU-renderer capture, then repeated with a second bundle. |
-| M3 | Props with parts, hardpoints, and LODs | One multi-part archetype assembles correctly. |
-| M4 | Levels | Tutorial terrain and object placement match a reviewed in-game view; then a second level. |
-| M5 | Characters and animation | One character's hierarchy, bind pose, and one animation match the running game. |
+| Milestone | Delivers | Gate | Status |
+| --- | --- | --- | --- |
+| M0 | Name hash, curated names, BXML/BXSD tree dump | Every nonempty `.xmb` and `.xsb` parses to its end with no unexplained bytes; the token grammar matches the game's reader. | Gate met on 2026-11-23; name curation remains. |
+| M1 | Textures | At least two formats decode, and match runtime texture data for the same images in two bundles. | Descriptor fields located; pixels not decoded. |
+| M2 | Static meshes | One known prop imports with correct shape, normals, UVs, and materials, numerically checked against a CPU-renderer capture, then repeated with a second bundle. | Not started. |
+| M3 | Props with parts, hardpoints, and LODs | One multi-part archetype assembles correctly. | Not started. |
+| M4 | Levels | Tutorial terrain and object placement match a reviewed in-game view; then a second level. | Not started. |
+| M5 | Characters and animation | One character's hierarchy, bind pose, and one animation match the running game. | Not started. |
 
 Synthetic fixtures must cover empty, truncated, oversized, and malformed
-members for every parser. Tests that use the user's disc run locally only,
-and nothing decoded from it is committed.
+members for every parser; [tests/test_assets.py](../tests/test_assets.py)
+does this for the bundle, schema, and descriptor layers. Tests that use the
+user's disc run locally only, and nothing decoded from it is committed.
 
 ## Reproduce the observations
 
 From the repository root, after the
 [build workflow](./USER_GUIDE.md#requirements-and-build-workflow) has
-extracted an owned disc. This script prints each nonempty BXML member's
-namespace pairs and name count, reading archives without extracting them.
-Combine it with the `name_hash` function above to label hashes.
+extracted an owned disc to `game\disc`. The tool reads the bundles in place
+and writes only under the untracked `build\assets` directory.
 
 ```powershell
-@'
-import struct, tarfile
-from pathlib import Path
+# M0 gate: decode all 7 schemas and all 759 nonempty descriptors exactly.
+python tools\assets.py verify
 
-def leb128(data, i):
-    value = shift = 0
-    while True:
-        b = data[i]; i += 1
-        value |= (b & 0x7F) << shift; shift += 7
-        if b < 0x80:
-            return value, i
+# Uncurated name-hash candidates from the executable and bundles.
+python tools\assets.py names
 
-for path in sorted(Path(r"game\disc\data").glob("*.tgz")):
-    with tarfile.open(path, "r:gz") as archive:
-        for member in archive:
-            if not (member.isfile() and member.size and member.name.endswith(".xmb")):
-                continue
-            data = archive.extractfile(member).read()
-            assert data[:4] == b"BXML"
-            n = data[0x10]
-            assert struct.unpack_from("<I", data, 8)[0] == 0x11 + 8 * n
-            pairs = list(struct.iter_unpack("<II", data[0x11:0x11 + 8 * n]))
-            count, _ = leb128(data, 0x11 + 8 * n)
-            print(member.name, [f"{p:08x}={u:08x}" for p, u in pairs], count)
-'@ | python -
+# One descriptor as a JSON tree, labelled with the candidates.
+python tools\assets.py dump tutorial.tgz tutorial/textures-tutorial.xmb `
+  --names build\assets\name-candidates.json
 ```
+
+`verify` takes about 30 seconds and exits nonzero if any member fails.
+`--data` selects a different `data` directory. Candidate names are
+unreviewed: a hash can have several candidates, and some are chance
+collisions.
 
 ## Open questions
 
-- BXML: token kinds other than start, attribute, and end; the meaning of
-  `A`, `B`, and the flag word; files with `A >= 0x1000`; value typing.
-- BXSD: the full declaration grammar and the header field at `0x08`.
-- Which of `.ipn` and `.ivd` holds vertices, indices, or both, and the
-  vertex layouts.
-- `.tex` format codes, swizzling, and mip layout.
+- BXML: the marker token's purpose; the unused kind `0xB`; the game's
+  global lookup for members of `#1b8535f0`, which no retail file needs.
+- BXSD: the meaning of flags `0x0101`, the LEB128 field at `0x10`, and the
+  text-name form (header byte `0x06` = 0), which is not observed.
+- Names: curating the candidate map; names for hashes such as `#1b8535f0`,
+  `#120336ef`, and `#ed4c66fd`.
+- The `.ivd` layout (vertices, indices, and their split), and what the
+  `.ipn` and its `#104db1cd` library describe.
+- `.tex` pixel layout: swizzling, `P8` palettes, cube maps, and the
+  negative format codes.
 - `.chnl` channel encoding and compression; whether characters are skinned
   or rigid.
 - Terrain block layout, transform encoding, coordinate system, and units.

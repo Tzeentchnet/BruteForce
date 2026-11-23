@@ -59,9 +59,10 @@ This is an experimental Windows release for the North American retail game:
 - Tutorial gameplay is running, but full-game correctness is not established.
 - Networking is not supported.
 - Asset-format research for a future Blender importer has decoded the
-  resource bundles, the binary-XML name hash, and descriptor headers. Mesh,
-  texture, and animation payloads are not decoded yet, and no importer
-  exists.
+  resource bundles, the name hash, and the complete binary-XML descriptor
+  and schema formats; `tools\assets.py` decodes every descriptor on the
+  disc. Mesh, texture, and animation payloads are not decoded yet, and no
+  importer exists.
 - Internal-resolution scaling retains a 4:3 picture; true widescreen is not
   implemented.
 - Experimental rendering and performance options remain default-off unless

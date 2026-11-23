@@ -207,8 +207,8 @@ the decoded structure behind each row.
 
 | Resource | Observation | Remaining uncertainty |
 | --- | --- | --- |
-| `.xmb` | All 759 nonempty `.xmb` members begin with `BXML`. Names include `objects`, `levels`, `materials`, `textures`, `animations`, and character/game configuration. The header, namespace table and name-hash table are decoded; element and attribute names are stored as 32-bit case-insensitive CRC-style hashes that are now reproducible. | The body token grammar and value encoding are only partly decoded; see [ASSETFORMATS.md](./ASSETFORMATS.md#layer-3-bxml-descriptors-xmb). |
-| `.xsb` | The seven `common/schemas/*.xsb` members begin with `BXSD` and use the same name hashes as BXML. In contrast, disc files `cdxmedia\cdx.xsb` and `media\Sound.xsb` begin with `SDBK`. | The extension identifies at least two different content families here. Do not feed the `BXSD` schema-named files to a sound-bank parser solely because of their suffix. The BXSD declaration grammar is only partly observed, and `SDBK` is not decoded. |
+| `.xmb` | All 759 nonempty `.xmb` members begin with `BXML`. Names include `objects`, `levels`, `materials`, `textures`, `animations`, and character/game configuration. Names are stored as 32-bit case-insensitive CRC-style hashes. The format, including its LZSS-compressed token stream and schema-typed values, is decoded: all 759 decode exactly against the BXSD schemas. | Many names are still unresolved hashes, and field meanings must be established against their payloads; see [ASSETFORMATS.md](./ASSETFORMATS.md#layer-3-bxml-descriptors-xmb). |
+| `.xsb` | The seven `common/schemas/*.xsb` members begin with `BXSD` and use the same name hashes as BXML. In contrast, disc files `cdxmedia\cdx.xsb` and `media\Sound.xsb` begin with `SDBK`. | The extension identifies at least two different content families here. Do not feed the `BXSD` schema-named files to a sound-bank parser solely because of their suffix. The BXSD grammar is decoded and all seven schemas parse exactly; `SDBK` is not decoded. |
 | `.ipn`, `.ivd` | `objects-<bundle>.xmb` names both files, and its recovered vocabulary includes `mesh`, `geoset`, `vertex-type`, `vertex-buffer` and `index-buffer`. The start of `objects-tutorial.ivd` reads as triangle-strip-like 16-bit indices. | Which file holds vertices or indices, element types, strides, offsets, topology, and compression are unverified. |
 | `.tex`, `.xmb` | `textures-<bundle>.xmb` names its `textures-<bundle>.tex` and has `format`, `width`, `height`, `offset` and `size` names. The `.tex` file has no header signature. | Format codes, dimensions, mipmaps, and any Xbox swizzle or tiling are unknown. Do not assume the `.tex` payload is DDS. |
 | `.chnl`, `.xmb` | `animations-<bundle>.xmb` names its `animations-<bundle>.chnl` and has `channel`, `num-frames`, `frame-type`, `compressed`, `offset` and `size` names. | Animation channels, skeleton representation, timing, and transforms are unverified. |
@@ -263,9 +263,9 @@ game-derived data and should stay local.
 ## Future Blender importer
 
 The importer investigation, its evidence, and its milestones are now
-maintained in [ASSETFORMATS.md](./ASSETFORMATS.md). As of 2026-11-22, the
-bundle layer, the name hash, and the BXML header, namespace and name tables
-are verified across the local disc. The BXML token grammar, value typing,
-and every geometry, texture and animation payload layout remain open. No
-Blender importer or validated mesh, material, texture, or animation decoder
-exists in this project yet.
+maintained in [ASSETFORMATS.md](./ASSETFORMATS.md). As of 2026-11-23, the
+bundle layer, the name hash, and the complete BXML and BXSD formats are
+verified across the local disc, and `tools\assets.py` decodes every
+descriptor to a typed tree. Every geometry, texture and animation payload
+layout remains open. No Blender importer or validated mesh, material,
+texture, or animation decoder exists in this project yet.

@@ -32,6 +32,17 @@ over-8/255 component accounting has focused coverage:
 python -m pytest -q tests\test_compare_frames.py
 ```
 
+The asset-format readers in `tools\bfassets` (bundle safety, name hash,
+BXSD schemas, and BXML descriptors with LZSS back-references, multiple
+blocks and interleaved values) have synthetic coverage, including
+truncated, trailing, and malformed inputs. The owned-disc check,
+`python tools\assets.py verify`, is described in
+[ASSETFORMATS.md](./ASSETFORMATS.md#reproduce-the-observations).
+
+```powershell
+python -m pytest -q tests\test_assets.py
+```
+
 The Vulkan source build uses pinned Vulkan-Headers and DXC dependencies.
 `build.py setup` installs both along with the framework; verify them without
 network or modification with:

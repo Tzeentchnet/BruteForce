@@ -1455,23 +1455,29 @@ migration; the CPU reference and D3D11 comparison path still work; and any
 performance result follows the same-generation A/B/A protocol with distinct
 world frames reported separately from flips.
 
-## G. Asset formats and Blender importer (name hash decoded)
+## G. Asset formats and Blender importer (descriptor formats decoded)
 
 Goal: a Blender importer for characters, props and levels from the
 user's own disc. The evidence, open questions and milestones M0-M5 are in
 [ASSETFORMATS.md](ASSETFORMATS.md#importer-architecture-and-milestones).
-As of 2026-11-22, the bundle layer, the name hash, and the BXML header,
-namespace and name tables are verified on the local disc; about half of the
-2,019 name hashes have candidate names, and those still need curating.
 
-- G1 (next): finish M0 by tracing the game's BXML reader from callers of
-  `sub_00238370`, then decode every token kind, the structure-block header
-  and value typing, using BXSD where needed. Gate: every nonempty `.xmb`
-  and `.xsb` parses to its end.
-- G2: build the local name-map script and the Blender-independent
-  bundle/BXML/BXSD parsers, with synthetic malformed-input fixtures.
-- G3-G6: textures, static meshes, multi-part props, levels and characters
-  in the ASSETFORMATS milestone order, each validated against runtime or
+- G1 (done 2026-11-23): traced the game's BXML reader (`0x254860`,
+  `0x255330`, `0x254C60`) and BXSD loader (`0x281FE0`). The token stream
+  is word-oriented LZSS in blocks interleaved with the values, and value
+  encodings come from the schema types. Gate met: `tools\assets.py verify`
+  decodes all 7 schemas and all 759 nonempty descriptors exactly, with
+  every block emitting its declared word count.
+- G2 (partly done): the stdlib-only `bundle`, `names`, `bxsd` and `bxml`
+  layers in `tools/bfassets`, a JSON `dump`, and a local candidate
+  name-map builder exist, with synthetic malformed-input fixtures in
+  `tests/test_assets.py`. Remaining: curate the candidate names (858 of
+  2,286 hashes have uncurated candidates) into a reviewed local map.
+- G3 (next): textures (M1). The descriptor fields are located, and every
+  texture's size matches a mip chain in an Xbox `D3DFORMAT`. Decode P8 and
+  DXT pixels, including swizzle and palettes, and compare them with the
+  runtime's guest texture data in two bundles.
+- G4-G7: static meshes, multi-part props, levels and characters in the
+  ASSETFORMATS milestone order, each validated against runtime or
   reference captures that stay local.
 
 This work is independent of the renderer and audio workstreams and does not
@@ -1579,7 +1585,7 @@ Still open: access to a native 4K display. Optional 5.1 output is deferred.
    audio-heavy scene.
 7. Continue D's compatibility work without weakening audio or GPU ordering.
 8. Advance G's asset-format milestones independently of the runtime work,
-   starting with G1's complete BXML decode.
+   starting with G3's texture decode.
 
 Update FINDINGS, UPSTREAM, PERFPLAN, ARCHITECTURE, ASSETFORMATS and the
 README in the same change as each milestone, as AGENTS requires.

@@ -416,11 +416,11 @@ semantics do not establish original-hardware reset state or retail parity.
 Vulkan consumes the same renderer-neutral
 [render_scale.c](../src/gpu/render_scale.c) authority as D3D11, so a fixed
 numeric `RECOMP_GPU_SCALE` selects the same physical sizes, including the
-folded-out guest AA factor. `RECOMP_GPU_SCALE=native` fails closed before
-Vulkan startup with an invalid-configuration result: Vulkan has no live
-scale epoch, resource migration or provider-driven output size yet. Scale 1
-keeps every Vulkan resource at its previous logical size and skips all
-resolve passes.
+folded-out guest AA factor. `RECOMP_GPU_SCALE=native` starts at scale 2
+(or the `RECOMP_GPU_OUTPUT` picture) and, with `RECOMP_VULKAN_PRESENT=1`,
+follows the presentation provider's output picture through scale epochs, as
+described below. Scale 1 keeps every Vulkan resource at its previous logical
+size and skips all resolve passes.
 
 At a fixed scale, each tracked color surface keeps its logical layout and a
 physical `pw/ph`. The color image and any attached depth/stencil image are
@@ -428,9 +428,9 @@ physical. Guest vertices and shader constants stay logical; only the
 viewport, render area, surface scissor, clear rectangles and window-clip
 rectangles become physical. Those edges use the D3D11 backend's
 `scale_edge` rounding, so inclusive window-clip bounds round the exclusive
-logical edge before subtracting one. A surface whose physical size would
-change after creation still stops with the existing layout-change
-diagnostic; it is not migrated.
+logical edge before subtracting one. A guest layout or AA change after
+creation still stops with the existing layout-change diagnostic; only a
+scale epoch migrates a surface.
 
 A per-surface logical image serves both directions of guest exchange. A
 clean CPU/PVIDEO guest write is decoded, uploaded at logical size and
@@ -443,6 +443,23 @@ The physical image remains GPU-authoritative after readback. Full-surface
 render-target aliases sample the physical image with unchanged normalized
 coordinates. Self-alias snapshots are physical, and subregion aliases copy
 the rounded physical rectangle, keeping at least one physical texel.
+
+In native mode the backend asks the registered provider for its output size
+at each flip readback, before the readback and source publication. The
+provider returns the client area fitted to the aspect of the last presented
+guest frame; for Brute Force's 640x480 frame that is the same 4:3 picture
+D3D11 uses. `gpu_scale_prepare_output` validates the size and scale. When
+the scale changes, every replacement color and depth/stencil image is
+allocated first; any allocation failure discards the candidates and keeps
+the prior scale, epoch and images, and a later flip retries. After
+`gpu_scale_commit_output`, one submission resamples each color surface from
+its old physical image (box when shrinking, bilinear when growing), because
+color is GPU-authoritative and guest memory can be stale. Resized
+depth/stencil images are cleared to depth 1 and stencil 0 and require guest
+reinitialization; D3D11 has the same limitation. The submission is waited on
+before old images and self-alias snapshots are destroyed. Without a
+registered provider, and with a fixed `RECOMP_GPU_OUTPUT`, the scale stays
+at its initial value, matching D3D11 without its shared presenter.
 
 Visibility queries record a per-query divisor of the guest AA factor times
 the physical-to-logical area ratio, so counts remain guest-screen pixels.
@@ -699,7 +716,8 @@ remain open.
    window-clip state with cross-vendor synthetic coverage. Fixed numeric
    render scaling now renders physical color/depth images, resolves guest
    readback and hands physical sources to native presentation, with
-   cross-vendor scale-2 synthetic coverage; native-mode scaling fails closed.
+   cross-vendor scale-2 synthetic coverage; native-mode scale epochs pass
+   cross-vendor synthetic migration fixtures.
    The first no-capture D3D11/Vulkan sequence was invalidated by a recurring
    pre-movie guest-worker poll on run 3. A default-off framework zero-delay
    backoff now passes its focused fixture and three no-retry D3D11 startup
@@ -1433,9 +1451,9 @@ replace matched gameplay or original-hardware validation.
   Two audio-off
   observations skipped the opening movies; a bounded audio-on trace opened
   both Bink files and produced changing CPU-owned native-route frames. It
-  still lacks physical movie review, `RECOMP_GPU_SCALE=native` resizing and
-  direct raw guest-stream vertex fetch. Fixed numeric render scaling passes
-  scale-2 synthetic fixtures on both vendors but has no retail run. Surface
+  still lacks physical movie review and direct raw guest-stream vertex
+  fetch. Fixed numeric and native-mode render scaling pass synthetic
+  fixtures on both vendors but have no retail run. Surface
   layout changes after creation fail rather
   than migrate. In one matched Basic Controls capture, 134 of
   307,200 pixels

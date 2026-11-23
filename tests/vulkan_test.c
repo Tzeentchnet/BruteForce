@@ -1,4 +1,5 @@
 #include <windows.h>
+#include <math.h>
 #include <process.h>
 #include <stdint.h>
 #include <stdio.h>
@@ -12,6 +13,7 @@
 #include "gpu/vulkan_present.h"
 #include "video/gpu_present.h"
 #include "video/present_provider.h"
+#include "gpu/render_scale.h"
 
 typedef void (*recomp_func_t)(void);
 recomp_func_t recomp_lookup(uint32_t va) { (void)va; return NULL; }
@@ -1353,7 +1355,8 @@ static int run_scaled_tests(const char *xbe_path)
     return 1;
 }
 
-static int run_scaled_child(const char *xbe_path)
+static int run_child(const char *xbe_path, const char *scale,
+                     const char *flag, const char *name)
 {
     char executable[MAX_PATH];
     char quoted_executable[MAX_PATH + 2];
@@ -1365,15 +1368,217 @@ static int run_scaled_child(const char *xbe_path)
     CHECK(strlen(xbe_path) < MAX_PATH, "synthetic XBE path fits");
     snprintf(quoted_executable, sizeof quoted_executable, "\"%s\"", executable);
     snprintf(quoted_xbe, sizeof quoted_xbe, "\"%s\"", xbe_path);
-    CHECK(_putenv_s("RECOMP_GPU_SCALE", "2") == 0, "select render scale 2");
+    CHECK(_putenv_s("RECOMP_GPU_SCALE", scale) == 0, "select the child render scale");
     code = _spawnl(_P_WAIT, executable, quoted_executable, quoted_xbe,
-                   "--scaled", NULL);
+                   flag, NULL);
     CHECK(_putenv_s("RECOMP_GPU_SCALE", "") == 0, "clear render scale");
     if (code == 77) {
-        fputs("SKIP: scaled Vulkan fixture found no device\n", stderr);
+        fprintf(stderr, "SKIP: %s Vulkan fixture found no device\n", name);
         return 1;
     }
-    CHECK(code == 0, "scaled Vulkan fixture passes in its own process");
+    if (code != 0)
+        fprintf(stderr, "FAIL: %s Vulkan fixture exited with %d\n", name, (int)code);
+    CHECK(code == 0, "Vulkan child fixture passes in its own process");
+    return 1;
+}
+
+static int red_dominant(uint32_t pixel)
+{
+    return ((pixel >> 16) & 0xFFu) >= 0x80u && ((pixel >> 8) & 0xFFu) < 0x80u;
+}
+
+static int half_red_picture(const uint32_t *pixels)
+{
+    unsigned x;
+    unsigned y;
+    for (y = 0; y < SCALED_SIZE; ++y)
+        for (x = 0; x < SCALED_SIZE; ++x) {
+            uint32_t pixel = pixels[y * SCALED_SIZE + x];
+            if (x < 3 && pixel != SCALED_RED)
+                return 0;
+            if (x > 4 && pixel != SCALED_BLACK)
+                return 0;
+            if ((x == 3) != red_dominant(pixel) && x >= 3 && x <= 4)
+                return 0;
+        }
+    return 1;
+}
+
+/*
+ * Runs in a child process with RECOMP_GPU_SCALE=native. Output changes are
+ * driven directly and through the presentation provider. A scale epoch must
+ * resample GPU-authoritative color without reseeding from guest memory, clear
+ * resized depth, and leave everything unchanged when allocation fails.
+ */
+static int run_native_render_test(void)
+{
+    const uint32_t color_va = XBOX_CONTIG_BASE + 0x74000;
+    const uint32_t depth_va = XBOX_CONTIG_BASE + 0x75000;
+    Nv2aSurface surface;
+    Nv2aRenderState state = default_state();
+    Nv2aVertex quad[6];
+    Nv2aBatch batch;
+    uint32_t *pixels =
+        (uint32_t *)((uintptr_t)color_va + xbox_GetMemoryOffset());
+    uint32_t width;
+    uint32_t height;
+    unsigned epoch;
+    unsigned i;
+
+    CHECK(gpu_scale_native() && fabsf(gpu_scale_value() - 2.0f) < 0.001f &&
+          gpu_scale_epoch() == 0,
+          "native mode starts at scale 2 in epoch 0");
+    memset(&surface, 0, sizeof surface);
+    surface.color_va = color_va;
+    surface.width = SCALED_SIZE;
+    surface.height = SCALED_SIZE;
+    surface.pitch = SCALED_SIZE * 4;
+    surface.bytes_per_pixel = 4;
+    surface.aa_sx = surface.aa_sy = 1;
+    memset(pixels, 0, SCALED_SIZE * SCALED_SIZE * 4);
+    memset(&batch, 0, sizeof batch);
+    batch.vertices = quad;
+    batch.count = 6;
+    batch.state = &state;
+    set_clear_rect(0, 0, 0x1000, 0x1000);
+
+    state.zeta_va = depth_va;
+    state.depth_test_enable = 1;
+    state.depth_write = 1;
+    state.depth_func = 0x201;
+    bruteforce_vulkan_test_clear(&surface, &state, 0xF1, SCALED_BLACK,
+                                 0xFFFFFF00);
+    make_quad(quad, 0.0f, 0.0f, 4.0f, 8.0f, 16777215.0f * 0.25f, SCALED_RED);
+    bruteforce_vulkan_test_draw(&surface, &batch);
+    CHECK(bruteforce_vulkan_test_readback(color_va),
+          "read back the initial native-scale picture");
+    CHECK(scaled_pixels_match(pixels, 4, SCALED_RED, SCALED_BLACK),
+          "initial native scale renders the exact logical picture");
+    CHECK(bruteforce_vulkan_test_surface_size(color_va, &width, &height) &&
+          width == 16 && height == 16, "initial color surface is 2x physical");
+    CHECK(bruteforce_vulkan_test_depth_size(depth_va, &width, &height) &&
+          width == 16 && height == 16, "initial depth surface is 2x physical");
+
+    /* Same scale, different width: committed without a new epoch. */
+    CHECK(bruteforce_vulkan_test_native_output(1280, 960),
+          "commit a same-scale native output");
+    CHECK(gpu_scale_epoch() == 0 && fabsf(gpu_scale_value() - 2.0f) < 0.001f,
+          "same-scale output keeps the epoch");
+
+    /*
+     * Make guest memory stale: migration must resample the GPU picture, not
+     * reseed it from guest bytes. Guest memory holds black; only the GPU
+     * image holds the red half.
+     */
+    bruteforce_vulkan_test_clear(&surface, &state, 0xF1, SCALED_BLACK,
+                                 0xFFFFFF00);
+    CHECK(bruteforce_vulkan_test_readback(color_va),
+          "read back a black picture before the GPU-only draw");
+    for (i = 0; i < SCALED_SIZE * SCALED_SIZE; ++i)
+        CHECK(pixels[i] == SCALED_BLACK, "guest memory holds black");
+    make_quad(quad, 0.0f, 0.0f, 4.0f, 8.0f, 16777215.0f * 0.25f, SCALED_RED);
+    bruteforce_vulkan_test_draw(&surface, &batch);
+
+    CHECK(_putenv_s("BRUTEFORCE_VULKAN_TEST_FAIL", "native-color") == 0,
+          "inject a native color allocation failure");
+    CHECK(!bruteforce_vulkan_test_native_output(1920, 1440),
+          "failed color allocation rejects the output change");
+    CHECK(_putenv_s("BRUTEFORCE_VULKAN_TEST_FAIL", "native-depth") == 0,
+          "inject a native depth allocation failure");
+    CHECK(!bruteforce_vulkan_test_native_output(1920, 1440),
+          "failed depth allocation rejects the output change");
+    CHECK(_putenv_s("BRUTEFORCE_VULKAN_TEST_FAIL", "") == 0,
+          "clear native failure injection");
+    CHECK(gpu_scale_epoch() == 0 && fabsf(gpu_scale_value() - 2.0f) < 0.001f,
+          "failed output changes keep the scale and epoch");
+    CHECK(bruteforce_vulkan_test_surface_size(color_va, &width, &height) &&
+          width == 16 && height == 16,
+          "failed output changes keep the color surface");
+    CHECK(!bruteforce_vulkan_test_native_output(100, 100),
+          "reject an output below the supported native scale");
+    CHECK(gpu_scale_epoch() == 0, "rejected output keeps the epoch");
+
+    CHECK(bruteforce_vulkan_test_native_output(1920, 1440),
+          "migrate to native scale 3");
+    CHECK(gpu_scale_epoch() == 1 && fabsf(gpu_scale_value() - 3.0f) < 0.001f,
+          "scale 3 starts epoch 1");
+    CHECK(bruteforce_vulkan_test_surface_size(color_va, &width, &height) &&
+          width == 24 && height == 24, "color surface migrated to 3x");
+    CHECK(bruteforce_vulkan_test_depth_size(depth_va, &width, &height) &&
+          width == 24 && height == 24, "depth surface recreated at 3x");
+    CHECK(bruteforce_vulkan_test_readback(color_va),
+          "read back the migrated color surface");
+    CHECK(half_red_picture(pixels),
+          "migration resamples the GPU picture instead of guest memory");
+
+    /* Resized depth is cleared to the far plane; drawing resumes at 3x. */
+    make_quad(quad, 0.0f, 0.0f, 8.0f, 8.0f, 16777215.0f * 0.75f, SCALED_GREEN);
+    bruteforce_vulkan_test_draw(&surface, &batch);
+    CHECK(bruteforce_vulkan_test_readback(color_va),
+          "read back a depth-tested draw after migration");
+    for (i = 0; i < SCALED_SIZE * SCALED_SIZE; ++i)
+        CHECK(pixels[i] == SCALED_GREEN,
+              "recreated depth passes a draw nearer than the far plane");
+    make_quad(quad, 0.0f, 0.0f, 4.0f, 8.0f, 16777215.0f * 0.9f, SCALED_RED);
+    bruteforce_vulkan_test_draw(&surface, &batch);
+    CHECK(bruteforce_vulkan_test_readback(color_va),
+          "read back a rejected draw after migration");
+    for (i = 0; i < SCALED_SIZE * SCALED_SIZE; ++i)
+        CHECK(pixels[i] == SCALED_GREEN,
+              "recreated depth keeps writing and rejecting at 3x");
+
+    state = default_state();
+    bruteforce_vulkan_test_clear(&surface, &state, 0xF0, SCALED_BLACK, 0);
+    make_quad(quad, 0.0f, 0.0f, 4.0f, 8.0f, 0.0f, SCALED_RED);
+    bruteforce_vulkan_test_draw(&surface, &batch);
+    CHECK(bruteforce_vulkan_test_readback(color_va),
+          "read back a 3x half-surface quad");
+    CHECK(scaled_pixels_match(pixels, 4, SCALED_RED, SCALED_BLACK),
+          "3x draw resolves to the exact logical picture");
+
+    CHECK(bruteforce_vulkan_test_native_output(640, 480),
+          "migrate to native scale 1");
+    CHECK(gpu_scale_epoch() == 2 && fabsf(gpu_scale_value() - 1.0f) < 0.001f,
+          "scale 1 starts epoch 2");
+    CHECK(bruteforce_vulkan_test_surface_size(color_va, &width, &height) &&
+          width == 8 && height == 8, "color surface migrated to logical size");
+    CHECK(bruteforce_vulkan_test_readback(color_va),
+          "read back the unscaled migrated surface");
+    CHECK(half_red_picture(pixels),
+          "box-downsampled migration keeps the picture");
+
+    /* The live path: the provider's fitted 4:3 picture drives the epoch. */
+    epoch = gpu_scale_epoch();
+    CHECK(run_presentation_test(),
+          "run Vulkan presentation fixture with native output");
+    CHECK(gpu_scale_epoch() > epoch,
+          "provider output changes advance the native scale epoch");
+    return 1;
+}
+
+static int run_native_tests(const char *xbe_path)
+{
+    BruteforceRendererStartupResult result;
+    if (!initialize_memory(xbe_path))
+        return 0;
+    CHECK(_putenv_s("RECOMP_VULKAN_PRESENT", "1") == 0 &&
+          _putenv_s("RECOMP_PRESENT_VSYNC", "1") == 0 &&
+          _putenv_s("RECOMP_PRESENT_FILTER", "point") == 0,
+          "enable native presentation for the native-scale fixture");
+    result = bruteforce_vulkan_install(NULL);
+    if (result.status == BRUTEFORCE_RENDERER_STARTUP_UNAVAILABLE) {
+        fprintf(stderr, "SKIP: Vulkan unavailable at %s: %s\n",
+                result.stage, result.reason);
+        xbox_MemoryLayoutShutdown();
+        return 77;
+    }
+    CHECK(result.status == BRUTEFORCE_RENDERER_STARTUP_SUCCESS, result.reason);
+    CHECK(run_native_render_test(), "run native-scale Vulkan fixture");
+    CHECK(bruteforce_vulkan_test_validation_errors() == 0,
+          "native-scale Vulkan rendering reported no validation errors");
+    bruteforce_vulkan_shutdown();
+    xbox_MemoryLayoutShutdown();
+    puts("Vulkan native-scale migration/presentation: ok");
     return 1;
 }
 
@@ -1403,13 +1608,15 @@ static int run_tests(const char *xbe_path)
           "invalid Vulkan presentation option does not register");
     CHECK(_putenv_s("RECOMP_VULKAN_PRESENT", "") == 0,
           "clear invalid Vulkan presentation option");
-    CHECK(_putenv_s("RECOMP_GPU_SCALE", "native") == 0,
-          "request native render scale");
+    CHECK(_putenv_s("RECOMP_GPU_SCALE", "native") == 0 &&
+          _putenv_s("RECOMP_GPU_OUTPUT", "100x100") == 0,
+          "request a native output below the supported scale");
     result = bruteforce_vulkan_install(NULL);
     CHECK(result.status == BRUTEFORCE_RENDERER_STARTUP_INVALID_CONFIGURATION,
-          "native render scale fails closed before Vulkan startup");
+          "unsupported native output fails before Vulkan startup");
     CHECK(!bruteforce_vulkan_test_installed(),
-          "native render scale does not register");
+          "unsupported native output does not register");
+    CHECK(_putenv_s("RECOMP_GPU_OUTPUT", "") == 0, "clear native output");
     CHECK(_putenv_s("RECOMP_GPU_SCALE", "11") == 0,
           "request an out-of-range render scale");
     result = bruteforce_vulkan_install(NULL);
@@ -1495,7 +1702,10 @@ static int run_tests(const char *xbe_path)
     CHECK(_putenv_s("RECOMP_GPU_MIPS", "") == 0,
           "clear Vulkan mip sampling");
     puts("Vulkan clear/draw/readback: ok");
-    CHECK(run_scaled_child(xbe_path), "run scaled Vulkan fixture");
+    CHECK(run_child(xbe_path, "2", "--scaled", "scaled"),
+          "run scaled Vulkan fixture");
+    CHECK(run_child(xbe_path, "native", "--native", "native-scale"),
+          "run native-scale Vulkan fixture");
     return 1;
 }
 
@@ -1504,8 +1714,10 @@ int main(int argc, char **argv)
     int result;
     if (argc == 3 && strcmp(argv[2], "--scaled") == 0)
         result = run_scaled_tests(argv[1]);
+    else if (argc == 3 && strcmp(argv[2], "--native") == 0)
+        result = run_native_tests(argv[1]);
     else if (argc != 2) {
-        fprintf(stderr, "usage: vulkan_test <synthetic.xbe> [--scaled]\n");
+        fprintf(stderr, "usage: vulkan_test <synthetic.xbe> [--scaled|--native]\n");
         return 2;
     } else
         result = run_tests(argv[1]);

@@ -7,6 +7,9 @@ status. Update them in the same change as the work, not afterward:
 
 - `docs/NEXTSTEPS.md`: active workstreams, ordering, settled decisions, and
   completion gates.
+- `docs/COMPLETED.md`: completed and closed work moved out of NEXTSTEPS:
+  finished campaigns, generations, fixed defects, closed candidates, and
+  completed milestone steps. Move work here when it finishes.
 - `docs/UPSTREAM.md`: selected and filed upstream work, contribution
   candidates, overlap, tests, and remaining follow-up.
 - `docs/FINDINGS.md`: Brute Force-specific executable, runtime, and bring-up

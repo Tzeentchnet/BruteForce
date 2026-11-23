@@ -908,7 +908,8 @@ CPU-transformed extended draws, precise visibility, register combiners, exact
 one state-matched NVIDIA retail tutorial capture, gathered-input GPU vertex
 programs, clean CPU/PVIDEO surface preservation and one completely reviewed
 D3D11/Vulkan movement pair. It does not have direct raw-stream vertex fetch,
-scale, complete retail native-presentation coverage, broad menu/movie/fade
+retail-validated scale (fixed and native scaling pass synthetic fixtures only),
+complete retail native-presentation coverage, broad menu/movie/fade
 coverage or the complete ordering matrix. M2 now has a default-inactive, versioned
 host presentation-provider seam with explicit framebuffer-thread lifecycle,
 concurrent output-size queries, CPU-required routing, frame identity, pacing

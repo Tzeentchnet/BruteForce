@@ -24,6 +24,11 @@ int bruteforce_vulkan_test_vsh_readback(Nv2aXVsOut *output,
                                         uint32_t vertex_count);
 int bruteforce_vulkan_test_readback(uint32_t color_va);
 int bruteforce_vulkan_test_flip_readback(uint32_t color_va);
+int bruteforce_vulkan_test_native_output(uint32_t width, uint32_t height);
+int bruteforce_vulkan_test_surface_size(uint32_t color_va, uint32_t *width,
+                                        uint32_t *height);
+int bruteforce_vulkan_test_depth_size(uint32_t zeta_va, uint32_t *width,
+                                      uint32_t *height);
 int bruteforce_vulkan_test_texture_aliases_surface(const Nv2aTexture *texture);
 void bruteforce_vulkan_test_texture_cache_stats(uint64_t *hits, uint64_t *uploads,
                                                 uint64_t *rewrites);

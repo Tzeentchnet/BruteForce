@@ -808,6 +808,38 @@ also divides by the guest AA sample factor and has done so since precise
 visibility was added. Which convention matches NV2A sample counting with AA
 enabled has not been verified.
 
+### Vulkan native-mode scaling (2026-11-23)
+
+Vulkan now accepts `RECOMP_GPU_SCALE=native`. With
+`RECOMP_VULKAN_PRESENT=1`, each flip readback reads the patch-0048
+provider's `output_size` and commits a new scale epoch through the shared
+render-scale authority. No framework change was needed: the existing
+callback is documented as callable from a renderer thread. Replacement
+images are allocated before the commit, color is resampled from the old
+physical image after it, and resized depth/stencil is recreated cleared.
+
+A game-data-free `--native` child process covers a same-scale output
+change, injected color and depth allocation failures, an out-of-range
+picture, migration from scale 2 to 3 and from 3 to 1, a picture present only
+in GPU memory surviving migration, depth tests against the recreated depth
+buffer, and two provider-driven epochs from the presentation fixture's
+window. With `RECOMP_VULKAN_VALIDATION=1` the parent and both children pass
+with zero validation errors on the NVIDIA GeForce RTX 5070 (API 1.4.357,
+driver `0x9B460000`) and AMD Radeon(TM) Graphics (API 1.4.315, driver
+`0x00800161`) adapters listed above. The D3D11 scale and native subset still
+reports 44 passed and 26 skipped.
+
+Observation: the provider fits the client area to the aspect of the last
+presented frame, not a fixed 4:3 picture. The synthetic 4x4 frame therefore
+produced a 240x240 output and scale 0.5 in a 320x240 window. For Brute
+Force's 640x480 frame the two rules agree; a title with a non-4:3 frame
+would get a different native scale from the D3D11 path.
+
+These are synthetic semantics. No scaled or native Vulkan retail run,
+matched-frame comparison or performance measurement has been made, and
+whether a cleared depth buffer after a scale epoch is ever visible in play
+is unverified.
+
 ## Earlier v0.17 integrated synthetic validation boundary
 
 The complete 43-patch v0.17 framework stack independently replayed to tree

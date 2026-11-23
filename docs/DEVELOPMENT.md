@@ -110,15 +110,25 @@ block-compressed, paletted, mip, cube and rejected declarations. These tests
 establish the game-data-free WSI ownership boundary, not retail native
 presentation, broader retail parity, or performance.
 
-The Vulkan fixture also rejects `RECOMP_GPU_SCALE=native` and an out-of-range
-scale before startup. Because the scale configuration is committed once per
-process, it then re-runs itself with `--scaled` and `RECOMP_GPU_SCALE=2`. That
+The Vulkan fixture also rejects an unsupported `RECOMP_GPU_OUTPUT` and an
+out-of-range scale before startup. Because the scale configuration is
+committed once per process, it then re-runs itself with `--scaled` and
+`RECOMP_GPU_SCALE=2`, and with `--native` and `RECOMP_GPU_SCALE=native`. That
 child checks physical-resolution rendering through a half-guest-pixel quad;
 exact clears, draws, CPU-written seeding, window clipping, clear rectangles
 and depth testing at scale; guest-pixel visibility counts; full and
 subregion render-target aliases; and the native presentation fixture with
 physical sources. The child inherits `RECOMP_VULKAN_VALIDATION` and
-`RECOMP_VULKAN_DEVICE`, and the parent fails if the child fails.
+`RECOMP_VULKAN_DEVICE`, and the parent fails if either child fails.
+
+The native child draws through a depth buffer at the initial scale 2, makes
+guest memory stale, and drives output changes directly: a same-scale width
+change keeps epoch 0; injected color and depth allocation failures and an
+out-of-range picture keep the scale, epoch and images; 1920x1440 migrates to
+24x24 color and depth and must resample the GPU-only picture; the recreated
+depth must accept a nearer draw and reject a farther one; 640x480 migrates
+back to logical size. It then repeats the presentation fixture so that the
+provider's fitted window picture advances the epoch at flip readback.
 
 After changing the xboxrecomp base, selected commits, or local framework
 patches, verify the reproducible checkout and run its recompiler suite:

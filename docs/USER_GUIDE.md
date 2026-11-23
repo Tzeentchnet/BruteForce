@@ -523,8 +523,8 @@ slow diagnostic and is inactive unless requested.
 
 Vulkan's native presentation and window clipping remain explicit,
 default-off bring-up paths. Vulkan accepts fixed numeric `RECOMP_GPU_SCALE`
-values; `RECOMP_GPU_SCALE=native` stops Vulkan startup with an
-invalid-configuration error. Vulkan has no direct raw guest-stream vertex
+values and `RECOMP_GPU_SCALE=native`; native mode follows window changes
+only with `RECOMP_VULKAN_PRESENT=1`. Vulkan has no direct raw guest-stream vertex
 fetch. Surface layout
 changes after creation and incompatible render-target overlaps fail
 explicitly. The retained matched tutorial capture predates the GPU-VSH path,
@@ -709,11 +709,14 @@ device recovery have not been validated.
 inside the output window. A numeric value selects physical pixels per
 640x480 guest pixel; the launcher presets are `1`, `1.5`, `2.25`, `3` and
 `4.5`. Numeric values from 0.5 through 10 are accepted when their resulting
-resources fit the 16384-pixel dimension limit. With `RECOMP_GPU=vulkan`, only
-numeric values are supported: Vulkan renders at the selected size, returns a
-box-downsampled 4:3 guest picture, and with `RECOMP_VULKAN_PRESENT=1`
-presents the physical image. Scaled Vulkan rendering has passed synthetic
-fixtures but has not been validated in retail play.
+resources fit the 16384-pixel dimension limit. With `RECOMP_GPU=vulkan`,
+Vulkan renders at the selected size, returns a box-downsampled 4:3 guest
+picture, and with `RECOMP_VULKAN_PRESENT=1` presents the physical image.
+Vulkan native mode follows the native presentation window; with CPU
+presentation it stays at its initial scale of 2. A native scale change
+clears depth/stencil surfaces until the game redraws them, as on D3D11.
+Scaled Vulkan rendering has passed synthetic fixtures but has not been
+validated in retail play.
 `RECOMP_GPU_OUTPUT=WxH` can provide a fixed diagnostic output only with
 `RECOMP_GPU_SCALE=native`; otherwise native mode follows window and
 fullscreen changes through a scale epoch. Use decimal dimensions with a

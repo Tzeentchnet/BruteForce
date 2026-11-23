@@ -23,7 +23,8 @@ This is an experimental Windows release for the North American retail game:
   the base and CPU-transformed extended draw contracts, four texture stages,
   register combiners, cube maps, default-off supplied mip chains, exact
   texture caching, compatible color render-target aliases, precise visibility,
-  depth/stencil, opt-in window clipping, fixed numeric render scaling,
+  depth/stencil, opt-in window clipping, fixed numeric and native render
+  scaling (synthetic only),
   bounded submission, RGB565 conversion, and mandatory guest readback. An additional default-off host-owned Vulkan presentation path now
   has a bounded completed-image queue, Win32 surface and swap chain, resize,
   aspect-fit blit, VSync selection, and required CPU fallback. Eligible
@@ -124,6 +125,8 @@ benchmarking, and save isolation are documented in the
 - [Current findings](docs/FINDINGS.md): observed runtime behavior,
   measurements, and validation limits.
 - [Next steps](docs/NEXTSTEPS.md): active work and completion gates.
+- [Completed work](docs/COMPLETED.md): finished campaigns, fixed defects,
+  and completed milestone steps moved out of next steps.
 - [Architecture](docs/ARCHITECTURE.md): executable, game data, runtime, and
   asset organization.
 - [Asset formats](docs/ASSETFORMATS.md): decoded resource formats and the

@@ -2306,8 +2306,14 @@ own GPU back end, an extended interface for it, and its own pacing fixes.
     and shared by both backends. Downstream fixed-scale Vulkan rendering hands
     physical completed images to the unchanged patch-0048 provider, whose
     fitted blit presents them; this is synthetic evidence that the host seam,
-    not a D3D11 keyed-mutex source, can carry scaled native output. Native-mode
-    scaling still needs a provider-to-backend output-size and epoch path.
+    not a D3D11 keyed-mutex source, can carry scaled native output.
+    Downstream native-mode scaling (2026-11-23) needed no new seam: the
+    renderer polls the provider's existing `output_size` callback at flip
+    readback and owns the epoch and migration itself. That callback fits the
+    client area to the last presented frame's aspect, whereas the D3D11
+    shared path uses a fixed 4:3 picture; the two agree for 640x480 frames,
+    and any upstream render-scale proposal should state which rule it
+    adopts.
     A wider-scene profile then attributed
     58.7% of NV2A-thread samples to CPU vertex-program interpretation. The
     existing optional `draw_vsh` contract was sufficient for a Vulkan static

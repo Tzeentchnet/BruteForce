@@ -39,6 +39,7 @@
 #include "vulkan_present.h"
 #include "vulkan_shaders.h"
 #include "video/gpu_present.h"
+#include "video/present_provider.h"
 
 #define VULKAN_COMMAND_SLOTS 8
 #define VULKAN_MAX_SURFACES 64
@@ -248,6 +249,8 @@ typedef struct VulkanPerfStats {
 typedef struct VulkanSurface {
     uint32_t va;
     GpuSurfaceLayout layout;
+    uint32_t aa_sx;
+    uint32_t aa_sy;
     uint32_t pw;
     uint32_t ph;
     VulkanImage image;
@@ -265,6 +268,11 @@ typedef struct VulkanDepth {
     uint32_t va;
     uint32_t width;
     uint32_t height;
+    /* Logical color layout the physical size was derived from. */
+    uint32_t logical_width;
+    uint32_t logical_height;
+    uint32_t aa_sx;
+    uint32_t aa_sy;
     VulkanImage image;
 } VulkanDepth;
 
@@ -422,6 +430,7 @@ typedef struct VulkanState {
     VkSampler white_sampler;
     VkSampler resolve_sampler;
     uint64_t scale_resolves;
+    uint64_t scale_migrations;
     VulkanSurface surfaces[VULKAN_MAX_SURFACES];
     unsigned surface_count;
     VulkanDepth depths[VULKAN_MAX_DEPTHS];
@@ -1756,6 +1765,8 @@ static VulkanSurface *get_surface(const Nv2aSurface *input, VulkanCommandSlot *s
     memset(surface, 0, sizeof *surface);
     surface->va = input->color_va;
     surface->layout = layout;
+    surface->aa_sx = aa_sx;
+    surface->aa_sy = aa_sy;
     surface->pw = pw;
     surface->ph = ph;
     surface->guest_shadow_bytes = layout.span_bytes;
@@ -1830,6 +1841,10 @@ static VulkanDepth *get_depth(const Nv2aRenderState *state,
     depth->va = state->zeta_va;
     depth->width = surface->pw;
     depth->height = surface->ph;
+    depth->logical_width = surface->layout.width;
+    depth->logical_height = surface->layout.height;
+    depth->aa_sx = surface->aa_sx;
+    depth->aa_sy = surface->aa_sy;
     if (!create_image(depth->width, depth->height, format,
                       VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT |
                       VK_IMAGE_USAGE_TRANSFER_DST_BIT,
@@ -4718,10 +4733,187 @@ static int vulkan_readback(uint32_t color_va)
     return vulkan_readback_internal(color_va, 0);
 }
 
+static int physical_size_for(float scale, uint32_t width, uint32_t height,
+                             uint32_t aa_sx, uint32_t aa_sy,
+                             uint32_t *pw, uint32_t *ph)
+{
+    return gpu_scale_surface_size_for(scale, width, height, aa_sx, aa_sy,
+                                      pw, ph) &&
+           *pw <= s_vk.properties.limits.maxImageDimension2D &&
+           *ph <= s_vk.properties.limits.maxImageDimension2D;
+}
+
+/*
+ * Commit a native-mode output picture. A scale change prepares every
+ * replacement image first; allocation failure discards the candidates and
+ * keeps the prior scale, epoch and resources. After the commit, color
+ * surfaces are resampled from their old physical images (they are
+ * GPU-authoritative, so guest memory may be stale) and depth/stencil
+ * surfaces are recreated cleared, as D3D11 does. The migration submission
+ * is waited on before any old image is destroyed.
+ */
+static int apply_native_output(uint32_t width, uint32_t height)
+{
+    GpuScaleUpdate update;
+    VulkanImage colors[VULKAN_MAX_SURFACES];
+    VulkanImage depths[VULKAN_MAX_DEPTHS];
+    uint32_t color_w[VULKAN_MAX_SURFACES], color_h[VULKAN_MAX_SURFACES];
+    uint32_t depth_w[VULKAN_MAX_DEPTHS], depth_h[VULKAN_MAX_DEPTHS];
+    unsigned recreated_colors = 0, recreated_depths = 0;
+    VulkanCommandSlot *slot;
+    VkClearDepthStencilValue clear = { 1.0f, 0 };
+    VkImageSubresourceRange range;
+    unsigned i;
+
+    claim_device_thread();
+    if (!gpu_scale_prepare_output(width, height, &update))
+        return 0;
+    if (!update.changed)
+        return 1;
+    memset(colors, 0, sizeof colors);
+    memset(depths, 0, sizeof depths);
+    if (update.scale_changed) {
+        for (i = 0; i < s_vk.surface_count; ++i) {
+            VulkanSurface *surface = &s_vk.surfaces[i];
+            if (!physical_size_for(update.scale, surface->layout.width,
+                                   surface->layout.height, surface->aa_sx,
+                                   surface->aa_sy, &color_w[i], &color_h[i]))
+                goto failed;
+            if (color_w[i] == surface->pw && color_h[i] == surface->ph)
+                continue;
+            if (test_failure("native-color") ||
+                !create_image(color_w[i], color_h[i], surface->image.format,
+                              VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT |
+                              VK_IMAGE_USAGE_TRANSFER_SRC_BIT |
+                              VK_IMAGE_USAGE_TRANSFER_DST_BIT |
+                              VK_IMAGE_USAGE_SAMPLED_BIT,
+                              VK_IMAGE_ASPECT_COLOR_BIT, &colors[i]))
+                goto failed;
+            recreated_colors++;
+        }
+        for (i = 0; i < s_vk.depth_count; ++i) {
+            VulkanDepth *depth = &s_vk.depths[i];
+            if (!physical_size_for(update.scale, depth->logical_width,
+                                   depth->logical_height, depth->aa_sx,
+                                   depth->aa_sy, &depth_w[i], &depth_h[i]))
+                goto failed;
+            if (depth_w[i] == depth->width && depth_h[i] == depth->height)
+                continue;
+            if (test_failure("native-depth") ||
+                !create_image(depth_w[i], depth_h[i], depth->image.format,
+                              VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT |
+                              VK_IMAGE_USAGE_TRANSFER_DST_BIT,
+                              depth->image.aspect, &depths[i]))
+                goto failed;
+            recreated_depths++;
+        }
+    }
+    if (!gpu_scale_commit_output(&update))
+        goto failed;
+    if (!recreated_colors && !recreated_depths)
+        return 1;
+
+    slot = begin_commands();
+    for (i = 0; i < s_vk.surface_count; ++i) {
+        VulkanSurface *surface = &s_vk.surfaces[i];
+        VkImageLayout old_layout = surface->image.layout;
+        if (!colors[i].image || old_layout == VK_IMAGE_LAYOUT_UNDEFINED)
+            continue;
+        image_barrier(slot->command, &surface->image,
+                      VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+                      image_layout_stage(old_layout),
+                      VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT,
+                      image_layout_access(old_layout),
+                      VK_ACCESS_SHADER_READ_BIT);
+        record_scale_blit(slot, &surface->image, surface->pw, surface->ph,
+                          &colors[i], color_w[i], color_h[i]);
+    }
+    memset(&range, 0, sizeof range);
+    range.levelCount = 1;
+    range.layerCount = 1;
+    for (i = 0; i < s_vk.depth_count; ++i) {
+        if (!depths[i].image)
+            continue;
+        range.aspectMask = depths[i].aspect;
+        image_barrier(slot->command, &depths[i],
+                      VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+                      VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT,
+                      VK_PIPELINE_STAGE_TRANSFER_BIT,
+                      0, VK_ACCESS_TRANSFER_WRITE_BIT);
+        s_vk.fn.CmdClearDepthStencilImage(slot->command, depths[i].image,
+                                          VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+                                          &clear, 1, &range);
+        image_barrier(slot->command, &depths[i],
+                      VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL,
+                      VK_PIPELINE_STAGE_TRANSFER_BIT,
+                      VK_PIPELINE_STAGE_EARLY_FRAGMENT_TESTS_BIT |
+                      VK_PIPELINE_STAGE_LATE_FRAGMENT_TESTS_BIT,
+                      VK_ACCESS_TRANSFER_WRITE_BIT,
+                      VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_READ_BIT |
+                      VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT);
+    }
+    slot->operation_count++;
+    /* The fence follows queue order: every earlier use of an old image is done. */
+    submit_commands(slot, 1);
+    for (i = 0; i < s_vk.surface_count; ++i) {
+        VulkanSurface *surface = &s_vk.surfaces[i];
+        if (!colors[i].image)
+            continue;
+        destroy_image(&surface->image);
+        destroy_image(&surface->sample_copy);
+        surface->image = colors[i];
+        surface->pw = color_w[i];
+        surface->ph = color_h[i];
+    }
+    for (i = 0; i < s_vk.depth_count; ++i) {
+        VulkanDepth *depth = &s_vk.depths[i];
+        if (!depths[i].image)
+            continue;
+        destroy_image(&depth->image);
+        depth->image = depths[i];
+        depth->width = depth_w[i];
+        depth->height = depth_h[i];
+    }
+    s_vk.scale_migrations++;
+    fprintf(stderr, "[GPU-SCALE] Vulkan migrated %u color surface(s) at"
+                    " epoch %u", recreated_colors, update.epoch);
+    if (recreated_depths)
+        fprintf(stderr, "; %u resized depth/stencil surface(s) were cleared"
+                        " and require guest reinitialization (depth/stencil"
+                        " migration is not implemented)", recreated_depths);
+    fputc('\n', stderr);
+    return 1;
+
+failed:
+    for (i = 0; i < VULKAN_MAX_SURFACES; ++i)
+        destroy_image(&colors[i]);
+    for (i = 0; i < VULKAN_MAX_DEPTHS; ++i)
+        destroy_image(&depths[i]);
+    fprintf(stderr, "[GPU-SCALE] output picture %ux%u not committed;"
+                    " retaining scale %.3f, epoch %u and prior Vulkan"
+                    " resources\n",
+            width, height, gpu_scale_value(), gpu_scale_epoch());
+    return 0;
+}
+
+/* Native mode follows the fitted 4:3 picture of the host presentation provider. */
+static void update_native_output(void)
+{
+    uint32_t width;
+    uint32_t height;
+    if (gpu_scale_native() && !gpu_scale_fixed_output(NULL, NULL) &&
+        s_vk.present_registered &&
+        recomp_present_provider_output_size(&width, &height) == 1)
+        apply_native_output(width, height);
+}
+
 static int vulkan_flip_readback(uint32_t color_va)
 {
-    int tracked = find_surface(color_va) != NULL;
-    int result = vulkan_readback_internal(color_va, 1);
+    int tracked;
+    int result;
+    update_native_output();
+    tracked = find_surface(color_va) != NULL;
+    result = vulkan_readback_internal(color_va, 1);
     if (tracked && !result) {
         fprintf(stderr, "[GPU-Vulkan] cannot make tracked color surface %08X guest-visible;"
                         " stopping before presentation\n", color_va);
@@ -4815,6 +5007,7 @@ static void vulkan_flip(void)
                         " %llu submissions, %llu fence waits, max batch %llu,"
                         " %llu upload buffers, %llu descriptor pools,"
                         " %u samplers, %llu scale resolves,"
+                        " %llu scale migrations, epoch %u,"
                         " interval %llu flips in %.3f ms"
                         " (%.3f flips/s)\n",
                 (unsigned long long)s_vk.flips,
@@ -4843,6 +5036,8 @@ static void vulkan_flip(void)
                 (unsigned long long)s_vk.descriptor_pool_creates,
                 s_vk.sampler_count,
                 (unsigned long long)s_vk.scale_resolves,
+                (unsigned long long)s_vk.scale_migrations,
+                gpu_scale_epoch(),
                 (unsigned long long)interval_flips,
                 interval_ms,
                 interval_ms > 0.0
@@ -5538,11 +5733,6 @@ BruteforceRendererStartupResult bruteforce_vulkan_install(void *context)
         return startup_result(BRUTEFORCE_RENDERER_STARTUP_INVALID_CONFIGURATION,
                               "configuration", VK_SUCCESS,
                               "RECOMP_GPU_SCALE or RECOMP_GPU_OUTPUT is invalid");
-    if (scale.native)
-        return startup_result(BRUTEFORCE_RENDERER_STARTUP_INVALID_CONFIGURATION,
-                              "configuration", VK_SUCCESS,
-                              "RECOMP_GPU_SCALE=native is not implemented for"
-                              " Vulkan; use a fixed numeric scale");
     s_vk.zpass_async = zpass && strcmp(zpass, "async") == 0;
     s_vk.vsh_verify.enabled = vsh_verify && atoi(vsh_verify) > 0;
     if (test_failure("loader"))
@@ -5773,6 +5963,11 @@ BruteforceRendererStartupResult bruteforce_vulkan_install(void *context)
             BRUTEFORCE_VULKAN_DXC_ID, s_vk.validation ? "on" : "off",
             s_vk.texture_mips ? "on" : "off",
             s_vk.native_present ? "native" : "cpu", gpu_scale_value());
+    if (gpu_scale_native() && !gpu_scale_fixed_output(NULL, NULL) &&
+        !s_vk.present_registered)
+        fprintf(stderr, "[GPU-SCALE] Vulkan native scale follows the"
+                        " RECOMP_VULKAN_PRESENT=1 output picture; with CPU"
+                        " presentation it stays at %.3f\n", gpu_scale_value());
     if (s_vk.texture_mips)
         fprintf(stderr, "[GPU-MIPS] Vulkan guest mip chains enabled;"
                         " linear textures and render-target aliases remain"
@@ -5849,6 +6044,37 @@ int bruteforce_vulkan_test_readback(uint32_t color_va)
 int bruteforce_vulkan_test_flip_readback(uint32_t color_va)
 {
     return vulkan_flip_readback(color_va);
+}
+
+int bruteforce_vulkan_test_native_output(uint32_t width, uint32_t height)
+{
+    return apply_native_output(width, height);
+}
+
+int bruteforce_vulkan_test_surface_size(uint32_t color_va, uint32_t *width,
+                                        uint32_t *height)
+{
+    VulkanSurface *surface = find_surface(color_va);
+    if (!surface)
+        return 0;
+    *width = surface->pw;
+    *height = surface->ph;
+    return surface->image.width == surface->pw &&
+           surface->image.height == surface->ph;
+}
+
+int bruteforce_vulkan_test_depth_size(uint32_t zeta_va, uint32_t *width,
+                                      uint32_t *height)
+{
+    unsigned i;
+    for (i = 0; i < s_vk.depth_count; ++i)
+        if (s_vk.depths[i].va == zeta_va) {
+            *width = s_vk.depths[i].width;
+            *height = s_vk.depths[i].height;
+            return s_vk.depths[i].image.width == *width &&
+                   s_vk.depths[i].image.height == *height;
+        }
+    return 0;
 }
 
 int bruteforce_vulkan_test_texture_aliases_surface(const Nv2aTexture *texture)

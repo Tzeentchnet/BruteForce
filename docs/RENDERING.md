@@ -103,7 +103,9 @@ and [packed-alias investigation](./FINDINGS.md#packed-depthstencil-aliases-and-s
 | D3D11 device, surfaces, state, draws, queries and readback | [d3d11_backend.c](../src/gpu/d3d11_backend.c) |
 | Vulkan loader, device, surfaces, base/extended/VSH draws, combiners, queries and readback | [vulkan_backend.c](../src/gpu/vulkan_backend.c), [vulkan_base.hlsl](../src/gpu/vulkan_base.hlsl) |
 | Transactional renderer startup and checked surface layout | [renderer_startup.c](../src/gpu/renderer_startup.c), [surface_layout.c](../src/gpu/surface_layout.c) |
-| Render-scale authority and GPU seed/readback/final resolves | [render_scale.c](../src/gpu/render_scale.c), [render_scale.h](../src/gpu/render_scale.h) |
+| Renderer-neutral render-scale authority | [render_scale.c](../src/gpu/render_scale.c), [render_scale.h](../src/gpu/render_scale.h) |
+| D3D11 seed/readback/final resolves | [render_scale_d3d11.c](../src/gpu/render_scale_d3d11.c), [render_scale_d3d11.h](../src/gpu/render_scale_d3d11.h) |
+| Vulkan fixed-scale surfaces and seed/readback resolves | [vulkan_backend.c](../src/gpu/vulkan_backend.c), [vulkan_base.hlsl](../src/gpu/vulkan_base.hlsl) |
 | Texture layout, decode and sampling | [texture_layout.c](../src/gpu/texture_layout.c), [texture_filter.c](../src/gpu/texture_filter.c), [texture_decode.c](../src/gpu/texture_decode.c), [texture_sampler.c](../src/gpu/texture_sampler.c), [d3d11_backend.c](../src/gpu/d3d11_backend.c), [vulkan_backend.c](../src/gpu/vulkan_backend.c) |
 | Generated vertex and combiner shaders | [vsh_hlsl.c](../src/gpu/vsh_hlsl.c), [rc_hlsl.c](../src/gpu/rc_hlsl.c), [shader_cache.c](../src/gpu/shader_cache.c) |
 | Null renderer and surface-read probe | [null_backend.c](../src/gpu/null_backend.c) |
@@ -409,6 +411,50 @@ clear isolation, suppressed depth writes, and base, extended and GPU-VSH
 draws. `RECOMP_WINDOW_CLIP` remains default-off because those synthetic
 semantics do not establish original-hardware reset state or retail parity.
 
+### Vulkan render scaling
+
+Vulkan consumes the same renderer-neutral
+[render_scale.c](../src/gpu/render_scale.c) authority as D3D11, so a fixed
+numeric `RECOMP_GPU_SCALE` selects the same physical sizes, including the
+folded-out guest AA factor. `RECOMP_GPU_SCALE=native` fails closed before
+Vulkan startup with an invalid-configuration result: Vulkan has no live
+scale epoch, resource migration or provider-driven output size yet. Scale 1
+keeps every Vulkan resource at its previous logical size and skips all
+resolve passes.
+
+At a fixed scale, each tracked color surface keeps its logical layout and a
+physical `pw/ph`. The color image and any attached depth/stencil image are
+physical. Guest vertices and shader constants stay logical; only the
+viewport, render area, surface scissor, clear rectangles and window-clip
+rectangles become physical. Those edges use the D3D11 backend's
+`scale_edge` rounding, so inclusive window-clip bounds round the exclusive
+logical edge before subtracting one. A surface whose physical size would
+change after creation still stops with the existing layout-change
+diagnostic; it is not migrated.
+
+A per-surface logical image serves both directions of guest exchange. A
+clean CPU/PVIDEO guest write is decoded, uploaded at logical size and
+bilinear-seeded into the physical target. Mandatory readback box-downsamples
+the physical target into the logical image and copies that image to guest
+memory, so the guest always receives a 4:3 logical picture. The resolve
+shaders are SPIR-V ports of the Blood Wake-derived D3D11 bilinear and box
+passes; both directions choose box filtering only when the source is larger.
+The physical image remains GPU-authoritative after readback. Full-surface
+render-target aliases sample the physical image with unchanged normalized
+coordinates. Self-alias snapshots are physical, and subregion aliases copy
+the rounded physical rectangle, keeping at least one physical texel.
+
+Visibility queries record a per-query divisor of the guest AA factor times
+the physical-to-logical area ratio, so counts remain guest-screen pixels.
+Native presentation receives the physical image unchanged through the
+existing completed-image queue; the provider's fitted blit performs the final
+scaling. The validation-enabled NVIDIA and AMD fixture runs a scale-2 child
+process covering clears, exact half-surface coverage, sub-guest-pixel
+coverage, CPU-written seeding, window clipping, normalized visibility,
+physical depth testing, full and subregion aliases, clear rectangles and the
+native presentation routes. It establishes synthetic backend semantics, not
+scaled retail parity or performance.
+
 ### Extended combiners, GPU vertex programs, and visibility
 
 The existing `Nv2aBackendExt.draw` seam supplies `Nv2aXVertex` data after the
@@ -650,7 +696,10 @@ remain open.
    review into a later required validation rather than scheduling a separate
    operator boot; physical fullscreen review remains open. The Vulkan base,
    CPU-transformed extended and gathered GPU-VSH paths now share the opt-in
-   window-clip state with cross-vendor synthetic coverage.
+   window-clip state with cross-vendor synthetic coverage. Fixed numeric
+   render scaling now renders physical color/depth images, resolves guest
+   readback and hands physical sources to native presentation, with
+   cross-vendor scale-2 synthetic coverage; native-mode scaling fails closed.
    The first no-capture D3D11/Vulkan sequence was invalidated by a recurring
    pre-movie guest-worker poll on run 3. A default-off framework zero-delay
    backoff now passes its focused fixture and three no-retry D3D11 startup
@@ -1384,8 +1433,9 @@ replace matched gameplay or original-hardware validation.
   Two audio-off
   observations skipped the opening movies; a bounded audio-on trace opened
   both Bink files and produced changing CPU-owned native-route frames. It
-  still lacks physical movie review, a native-resolution render-surface
-  handoff and direct raw guest-stream vertex fetch. Surface
+  still lacks physical movie review, `RECOMP_GPU_SCALE=native` resizing and
+  direct raw guest-stream vertex fetch. Fixed numeric render scaling passes
+  scale-2 synthetic fixtures on both vendors but has no retail run. Surface
   layout changes after creation fail rather
   than migrate. In one matched Basic Controls capture, 134 of
   307,200 pixels

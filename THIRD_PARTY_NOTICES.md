@@ -74,10 +74,13 @@ Generic code adapted from bloodwake-recomp at commit
   `src/gpu/texture_decode.c`
   follows the framework's swizzle and colour-conversion semantics; Blood
   Wake's `fast_texture` is prior art for bypassing per-texel CPU decoding.
-- `src/gpu/render_scale.c` and `render_scale.h`, from the generic render-scale,
-  surface-size and full-screen resolve portions of `src/gpu/bw_vfx.c` and
-  `src/gpu/bw_vfx_post.c` (bilinear seed, box downsample and Catmull-Rom
-  upscale). Blood Wake-specific visual effects, hooks and assets are not used.
+- `src/gpu/render_scale.c` and `render_scale.h`, from the generic render-scale
+  and surface-size portions of `src/gpu/bw_vfx.c`, and
+  `src/gpu/render_scale_d3d11.c` and `render_scale_d3d11.h`, from the
+  full-screen resolve portions of `src/gpu/bw_vfx_post.c` (bilinear seed, box
+  downsample and Catmull-Rom upscale). The `resolve_*` entry points in
+  `src/gpu/vulkan_base.hlsl` port the same bilinear and box passes to Vulkan.
+  Blood Wake-specific visual effects, hooks and assets are not used.
 - `src/gpu/rc_hlsl.c` and `rc_hlsl.h`, from `src/gpu/bw_rc_hlsl.c` and `.h`
   (pixel shaders from register-combiner state).
 - `src/gpu/vsh_hlsl.c` and `vsh_hlsl.h`, from `src/gpu/bw_vsh_hlsl.c` and `.h`

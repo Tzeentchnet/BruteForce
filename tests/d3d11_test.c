@@ -26,7 +26,7 @@
 #include "gpu/d3d11_backend.h"
 #include "gpu/d3d11_device_status.h"
 #include "gpu/null_backend.h"
-#include "gpu/render_scale.h"
+#include "gpu/render_scale_d3d11.h"
 #include "gpu/texture_decode.h"
 #include "perf_counters.h"
 #include "video/gpu_present.h"

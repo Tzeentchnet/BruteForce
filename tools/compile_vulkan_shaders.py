@@ -20,6 +20,9 @@ SHADERS = (
     ("bruteforce_vk_vsh_vs", "vsh_vs", "vs_6_0"),
     ("bruteforce_vk_vsh_gs", "vsh_gs", "gs_6_0"),
     ("bruteforce_vk_vsh_verify_cs", "vsh_verify_cs", "cs_6_0"),
+    ("bruteforce_vk_resolve_vs", "resolve_vs", "vs_6_0"),
+    ("bruteforce_vk_resolve_bilinear_ps", "resolve_bilinear_ps", "ps_6_0"),
+    ("bruteforce_vk_resolve_box_ps", "resolve_box_ps", "ps_6_0"),
 )
 
 

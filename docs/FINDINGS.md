@@ -754,15 +754,16 @@ observation.
 base and extended shaders. The static register-combiner interpreter has a
 near-matched stationary retail result, but shared generated raw vertex HLSL
 has not been shown equivalent across SPIR-V and DXIL. Surface/texture layouts,
-checked guest snapshots, texture filter/LOD decoding and the default combiner
-constructor are extracted; scale, cross-backend cache-key and shader-input
-policy are not. The host-service provider lifecycle and forced CPU route are
+checked guest snapshots, texture filter/LOD decoding, the default combiner
+constructor and the render-scale authority are extracted; cross-backend
+cache-key and shader-input policy are not. The host-service provider lifecycle and forced CPU route are
 implemented, and the downstream Vulkan module owns the Win32 surface/swap
 chain and bounded completed-image handoff in synthetic tests. That
 API-specific handoff is not accepted upstream. One retail native route reaches
 visible Basic Controls, and an audio-on trace carries changing Bink frames
 through its CPU fallback. Physical movie review remains open. Raw GPU vertex
-programs, render scaling, complete retail native presentation,
+programs, native-mode and retail-validated render scaling, complete retail
+native presentation,
 reviewed target-scene mip parity, wider matched-retail parity and stability,
 Intel coverage, real device-loss recovery, D3D12 and automatic fallback
 remain open.
@@ -771,6 +772,41 @@ No measured result predicts that Vulkan or D3D12 will improve cadence. The
 dominant recorded G3 PFB flush wait is upstream of the host graphics API.
 Future performance claims remain behind correctness and same-generation
 A/B/A gates, with distinct world frames reported separately from flips.
+
+### Vulkan fixed render scaling (2026-11-23)
+
+The render-scale authority was split from its D3D11 resolve passes so that
+Vulkan can share configuration and physical sizing without linking D3D11.
+The unchanged D3D11 suite then reported 244 passed and 150 skipped on WARP.
+Vulkan now accepts fixed numeric `RECOMP_GPU_SCALE` values and rejects
+`native` and out-of-range values before startup.
+
+A game-data-free child process at scale 2 renders an 8x8 guest surface into
+16x16 physical images. Edges on even physical pixels make each checked guest
+pixel exact after the box downsample. A half-guest-pixel quad yields a red
+channel between `0x70` and `0x90`, which a guest-resolution renderer cannot
+produce, and confirms physical rasterization. The fixture also checks an
+exact full clear, half-surface quad, CPU-written seeding away from color
+edges, a 2x2 inclusive window clip, visibility counts of 64 and 32 guest
+pixels, a far quad rejected by the physical depth buffer, full and offset
+subregion render-target aliases and a 4x4 clear rectangle. It then repeats
+the native presentation fixture with physical sources. With
+`RECOMP_VULKAN_VALIDATION=1`, the unscaled parent and scaled child both pass
+with zero validation errors on:
+
+- NVIDIA GeForce RTX 5070, Vulkan API 1.4.357, driver `0x9B460000`.
+- AMD Radeon(TM) Graphics, Vulkan API 1.4.315, driver `0x00800161`.
+
+These are synthetic backend semantics. No scaled retail run, matched-frame
+comparison or performance measurement has been made. Native-mode scaling,
+surface migration across a scale change, and point size or line width at
+scale remain open; Vulkan draws only triangles.
+
+One pre-existing visibility difference was noticed but not changed. D3D11
+normalizes queries only by the physical-to-logical area ratio, while Vulkan
+also divides by the guest AA sample factor and has done so since precise
+visibility was added. Which convention matches NV2A sample counting with AA
+enabled has not been verified.
 
 ## Earlier v0.17 integrated synthetic validation boundary
 
@@ -3836,8 +3872,9 @@ with settings and frame counts recorded.
 
 The renderer now adopts the generic physical-resolution architecture from
 the pinned Blood Wake commit rather than continuing as isolated scale fixes.
-`src/gpu/render_scale.c` is the single scale authority and contains the
-adapted bilinear seed, box downsample and Catmull-Rom upscale passes. Tracked
+`src/gpu/render_scale.c` is the single scale authority; the adapted
+bilinear seed, box downsample and Catmull-Rom upscale passes now live in
+`src/gpu/render_scale_d3d11.c`. Tracked
 colour surfaces retain logical and physical dimensions, depth follows the
 physical target, and native output changes advance a scale epoch. Guest
 geometry and texture coordinates remain logical; viewports are physical,

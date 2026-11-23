@@ -2301,7 +2301,14 @@ own GPU back end, an extended interface for it, and its own pacing fixes.
     and mandatory readback without putting Vulkan objects in the executor or
     presenter. Checked surface/texture layouts, allocation-stable guest
     snapshots, texture filter/LOD decoding and the default combiner constructor
-    are proven D3D11/Vulkan extractions. A wider-scene profile then attributed
+    are proven D3D11/Vulkan extractions. The render-scale configuration and
+    physical-size authority is now separated from its D3D11 resolve passes
+    and shared by both backends. Downstream fixed-scale Vulkan rendering hands
+    physical completed images to the unchanged patch-0048 provider, whose
+    fitted blit presents them; this is synthetic evidence that the host seam,
+    not a D3D11 keyed-mutex source, can carry scaled native output. Native-mode
+    scaling still needs a provider-to-backend output-size and epoch path.
+    A wider-scene profile then attributed
     58.7% of NV2A-thread samples to CPU vertex-program interpretation. The
     existing optional `draw_vsh` contract was sufficient for a Vulkan static
     interpreter over gathered float inputs: post-change profiling removes the
@@ -2437,7 +2444,13 @@ own GPU back end, an extended interface for it, and its own pacing fixes.
     The ordered-visibility fixture now forces a pre-deadline report poll,
     verifies that it neither submits nor publishes, then ages the report and
     verifies exact ordered completion. The validation-enabled fixture passes
-    this case on both available hardware vendors.
+    this case on both available hardware vendors. A scale-2 child process
+    additionally covers physical rendering, box-resolved readback, bilinear
+    guest seeding, physical clip/clear rounding, guest-pixel visibility,
+    physical depth, render-target aliases and physical provider sources on
+    both vendors with zero validation errors. No framework patch changed;
+    the 2026-11-21 upstream refresh above was not repeated for this
+    downstream-only work.
     *Overlap:* refreshed read-only on 2026-11-21 across all 500 available
     upstream pull-request records, tracking index
     [#184](https://github.com/sp00nznet/xboxrecomp/pull/184), #306, merged

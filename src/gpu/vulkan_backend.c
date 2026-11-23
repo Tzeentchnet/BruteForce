@@ -30,6 +30,7 @@
 #include "xbox_memory_layout.h"
 #include "combiner_state.h"
 #include "guest_snapshot.h"
+#include "render_scale.h"
 #include "renderer_startup.h"
 #include "surface_layout.h"
 #include "texture_filter.h"
@@ -191,7 +192,7 @@ typedef struct VulkanCommandSlot {
     unsigned texture_capacity;
     VkDescriptorPool descriptor_pool;
     unsigned descriptor_count;
-    uint32_t zpass_divisors[VULKAN_BATCH_OPERATIONS];
+    double zpass_divisors[VULKAN_BATCH_OPERATIONS];
     uint64_t zpass_sequences[VULKAN_BATCH_OPERATIONS];
     unsigned zpass_count;
 } VulkanCommandSlot;
@@ -247,7 +248,10 @@ typedef struct VulkanPerfStats {
 typedef struct VulkanSurface {
     uint32_t va;
     GpuSurfaceLayout layout;
+    uint32_t pw;
+    uint32_t ph;
     VulkanImage image;
+    VulkanImage logical;
     VulkanImage sample_copy;
     uint8_t *guest_shadow;
     size_t guest_shadow_bytes;
@@ -319,6 +323,7 @@ typedef struct VulkanPipelineKey {
     uint8_t clear_shader;
     uint8_t extended_shader;
     uint8_t vsh_shader;
+    uint8_t resolve_shader;
 } VulkanPipelineKey;
 
 typedef struct VulkanPipeline {
@@ -407,11 +412,16 @@ typedef struct VulkanState {
     VkShaderModule vsh_vs;
     VkShaderModule vsh_gs;
     VkShaderModule vsh_verify_cs;
+    VkShaderModule resolve_vs;
+    VkShaderModule resolve_bilinear_ps;
+    VkShaderModule resolve_box_ps;
     VkPipeline vsh_verify_pipeline;
     VulkanVshVerification vsh_verify;
     VulkanImage white;
     VulkanImage white_cube;
     VkSampler white_sampler;
+    VkSampler resolve_sampler;
+    uint64_t scale_resolves;
     VulkanSurface surfaces[VULKAN_MAX_SURFACES];
     unsigned surface_count;
     VulkanDepth depths[VULKAN_MAX_DEPTHS];
@@ -931,6 +941,25 @@ static void image_barrier(VkCommandBuffer command, VulkanImage *image,
     image->layout = new_layout;
 }
 
+/* Round a logical edge to physical pixels exactly as the D3D11 backend does. */
+static uint32_t scale_edge(uint32_t value, uint32_t logical, uint32_t physical)
+{
+    return logical
+        ? (uint32_t)(((uint64_t)value * physical + logical / 2) / logical)
+        : 0;
+}
+
+static int surface_scaled(const VulkanSurface *surface)
+{
+    return surface->pw != surface->layout.width ||
+           surface->ph != surface->layout.height;
+}
+
+static void record_scale_blit(VulkanCommandSlot *slot, VulkanImage *source,
+                              uint32_t source_width, uint32_t source_height,
+                              VulkanImage *target,
+                              uint32_t target_width, uint32_t target_height);
+
 static void resolve_zpass_query(VulkanCommandSlot *slot)
 {
     uint64_t counts[VULKAN_BATCH_OPERATIONS];
@@ -947,9 +976,10 @@ static void resolve_zpass_query(VulkanCommandSlot *slot)
     if (result != VK_SUCCESS)
         runtime_failure("reading a visibility query", result);
     for (i = 0; i < slot->zpass_count; ++i) {
-        uint32_t divisor = slot->zpass_divisors[i]
-                         ? slot->zpass_divisors[i] : 1;
-        uint64_t count = (counts[i] + divisor / 2) / divisor;
+        double divisor = slot->zpass_divisors[i] > 0.0
+                       ? slot->zpass_divisors[i] : 1.0;
+        uint64_t count = divisor == 1.0 ? counts[i]
+                       : (uint64_t)((double)counts[i] / divisor + 0.5);
         if (s_vk.zpass_async) {
             uint64_t expected =
                 s_vk.zpass_result_base + s_vk.zpass_result_count;
@@ -1528,6 +1558,21 @@ static int decode_surface_guest(VulkanSurface *surface)
     return 1;
 }
 
+static void ensure_surface_logical(VulkanSurface *surface)
+{
+    if (surface->logical.image)
+        return;
+    if (!create_image(surface->layout.width, surface->layout.height,
+                      VK_FORMAT_B8G8R8A8_UNORM,
+                      VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT |
+                      VK_IMAGE_USAGE_TRANSFER_SRC_BIT |
+                      VK_IMAGE_USAGE_TRANSFER_DST_BIT |
+                      VK_IMAGE_USAGE_SAMPLED_BIT,
+                      VK_IMAGE_ASPECT_COLOR_BIT, &surface->logical))
+        runtime_failure("creating a logical color resolve surface",
+                        VK_ERROR_OUT_OF_DEVICE_MEMORY);
+}
+
 static int upload_surface_guest(VulkanSurface *surface,
                                 VulkanCommandSlot *slot)
 {
@@ -1536,6 +1581,35 @@ static int upload_surface_guest(VulkanSurface *surface,
 
     if (!decode_surface_guest(surface))
         return 0;
+    if (surface_scaled(surface)) {
+        /*
+         * Guest memory holds the logical picture. Upload it at guest size and
+         * resample it into the physical target, as the D3D11 seed does.
+         */
+        ensure_surface_logical(surface);
+        old_layout = surface->logical.layout;
+        if (old_layout != VK_IMAGE_LAYOUT_UNDEFINED)
+            image_barrier(slot->command, &surface->logical,
+                          VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+                          image_layout_stage(old_layout),
+                          VK_PIPELINE_STAGE_TRANSFER_BIT,
+                          image_layout_access(old_layout),
+                          VK_ACCESS_TRANSFER_WRITE_BIT);
+        upload_to_image(slot, &surface->logical, s_vk.surface_decode,
+                        texels * sizeof *s_vk.surface_decode);
+        image_barrier(slot->command, &surface->logical,
+                      VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+                      VK_PIPELINE_STAGE_TRANSFER_BIT,
+                      VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT,
+                      VK_ACCESS_TRANSFER_WRITE_BIT,
+                      VK_ACCESS_SHADER_READ_BIT);
+        record_scale_blit(slot, &surface->logical,
+                          surface->layout.width, surface->layout.height,
+                          &surface->image, surface->pw, surface->ph);
+        surface->guest_pending_upload = 0;
+        s_vk.guest_surface_uploads++;
+        return 1;
+    }
     if (old_layout != VK_IMAGE_LAYOUT_UNDEFINED)
         image_barrier(slot->command, &surface->image,
                       VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
@@ -1633,6 +1707,10 @@ static VulkanSurface *get_surface(const Nv2aSurface *input, VulkanCommandSlot *s
     GpuSurfaceLayout layout;
     VulkanSurface *surface = find_surface(input ? input->color_va : 0);
     GuestSpanIdentity identity;
+    uint32_t aa_sx;
+    uint32_t aa_sy;
+    uint32_t pw;
+    uint32_t ph;
 
     if (!input || !input->color_va || !gpu_surface_layout(input, &layout) ||
         input->pitch % layout.bytes_per_pixel != 0 ||
@@ -1640,11 +1718,24 @@ static VulkanSurface *get_surface(const Nv2aSurface *input, VulkanCommandSlot *s
         fprintf(stderr, "[GPU-Vulkan] invalid color surface layout\n");
         abort();
     }
+    aa_sx = input->aa_sx > 1 ? input->aa_sx : 1;
+    aa_sy = input->aa_sy > 1 ? input->aa_sy : 1;
+    if (!gpu_scale_surface_size(layout.width, layout.height, aa_sx, aa_sy,
+                                &pw, &ph) ||
+        pw > s_vk.properties.limits.maxImageDimension2D ||
+        ph > s_vk.properties.limits.maxImageDimension2D) {
+        fprintf(stderr, "[GPU-Vulkan] color surface %08X (%ux%u, AA %ux%u)"
+                        " has no supported physical size at render scale"
+                        " %.3f\n", input->color_va, layout.width,
+                layout.height, aa_sx, aa_sy, gpu_scale_value());
+        abort();
+    }
     if (surface) {
         if (surface->layout.width != layout.width ||
             surface->layout.height != layout.height ||
             surface->layout.pitch != layout.pitch ||
-            surface->layout.bytes_per_pixel != layout.bytes_per_pixel) {
+            surface->layout.bytes_per_pixel != layout.bytes_per_pixel ||
+            surface->pw != pw || surface->ph != ph) {
             fprintf(stderr, "[GPU-Vulkan] color surface %08X changed layout during"
                             " bring-up; safe migration is not implemented\n",
                     input->color_va);
@@ -1665,6 +1756,8 @@ static VulkanSurface *get_surface(const Nv2aSurface *input, VulkanCommandSlot *s
     memset(surface, 0, sizeof *surface);
     surface->va = input->color_va;
     surface->layout = layout;
+    surface->pw = pw;
+    surface->ph = ph;
     surface->guest_shadow_bytes = layout.span_bytes;
     surface->guest_shadow = malloc(surface->guest_shadow_bytes);
     if (!surface->guest_shadow ||
@@ -1674,7 +1767,7 @@ static VulkanSurface *get_surface(const Nv2aSurface *input, VulkanCommandSlot *s
         abort();
     }
     remember_surface_guest(surface, &identity);
-    if (!create_image(layout.width, layout.height, VK_FORMAT_B8G8R8A8_UNORM,
+    if (!create_image(pw, ph, VK_FORMAT_B8G8R8A8_UNORM,
                       VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT |
                       VK_IMAGE_USAGE_TRANSFER_SRC_BIT |
                       VK_IMAGE_USAGE_TRANSFER_DST_BIT |
@@ -1718,8 +1811,8 @@ static VulkanDepth *get_depth(const Nv2aRenderState *state,
         format == VK_FORMAT_D32_SFLOAT_S8_UINT)
         aspect |= VK_IMAGE_ASPECT_STENCIL_BIT;
     if (depth) {
-        if (depth->width != surface->layout.width ||
-            depth->height != surface->layout.height ||
+        if (depth->width != surface->pw ||
+            depth->height != surface->ph ||
             depth->image.format != format) {
             fprintf(stderr, "[GPU-Vulkan] depth surface %08X changed layout during"
                             " bring-up; safe migration is not implemented\n",
@@ -1735,8 +1828,8 @@ static VulkanDepth *get_depth(const Nv2aRenderState *state,
     depth = &s_vk.depths[s_vk.depth_count++];
     memset(depth, 0, sizeof *depth);
     depth->va = state->zeta_va;
-    depth->width = surface->layout.width;
-    depth->height = surface->layout.height;
+    depth->width = surface->pw;
+    depth->height = surface->ph;
     if (!create_image(depth->width, depth->height, format,
                       VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT |
                       VK_IMAGE_USAGE_TRANSFER_DST_BIT,
@@ -1951,10 +2044,12 @@ static VkPipeline create_pipeline(const VulkanPipelineKey *key, VkResult *creati
     memset(stages, 0, sizeof stages);
     stages[0].sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
     stages[0].stage = VK_SHADER_STAGE_VERTEX_BIT;
-    stages[0].module = key->vsh_shader ? s_vk.vsh_vs :
+    stages[0].module = key->resolve_shader ? s_vk.resolve_vs :
+                       key->vsh_shader ? s_vk.vsh_vs :
                        key->clear_shader ? s_vk.clear_vs :
                        key->extended_shader ? s_vk.extended_vs : s_vk.base_vs;
-    stages[0].pName = key->vsh_shader ? "vsh_vs" :
+    stages[0].pName = key->resolve_shader ? "resolve_vs" :
+                      key->vsh_shader ? "vsh_vs" :
                       key->clear_shader ? "clear_vs" :
                       key->extended_shader ? "extended_vs" : "base_vs";
     if (key->vsh_shader) {
@@ -1966,12 +2061,16 @@ static VkPipeline create_pipeline(const VulkanPipelineKey *key, VkResult *creati
     stages[fragment_stage].sType =
         VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
     stages[fragment_stage].stage = VK_SHADER_STAGE_FRAGMENT_BIT;
-    stages[fragment_stage].module = key->clear_shader ? s_vk.clear_ps :
-                                    key->extended_shader
-                                        ? s_vk.extended_ps : s_vk.base_ps;
-    stages[fragment_stage].pName = key->clear_shader ? "clear_ps" :
-                                   key->extended_shader
-                                       ? "extended_ps" : "base_ps";
+    stages[fragment_stage].module =
+        key->resolve_shader == 2 ? s_vk.resolve_box_ps :
+        key->resolve_shader ? s_vk.resolve_bilinear_ps :
+        key->clear_shader ? s_vk.clear_ps :
+        key->extended_shader ? s_vk.extended_ps : s_vk.base_ps;
+    stages[fragment_stage].pName =
+        key->resolve_shader == 2 ? "resolve_box_ps" :
+        key->resolve_shader ? "resolve_bilinear_ps" :
+        key->clear_shader ? "clear_ps" :
+        key->extended_shader ? "extended_ps" : "base_ps";
 
     memset(&binding, 0, sizeof binding);
     binding.binding = 0;
@@ -2016,7 +2115,7 @@ static VkPipeline create_pipeline(const VulkanPipelineKey *key, VkResult *creati
         attributes[2].format = VK_FORMAT_R32G32_SFLOAT;
         attributes[2].offset = offsetof(VulkanVertex, uv);
     }
-    if (!key->clear_shader && !key->vsh_shader) {
+    if (!key->clear_shader && !key->vsh_shader && !key->resolve_shader) {
         vertices.vertexBindingDescriptionCount = 1;
         vertices.pVertexBindingDescriptions = &binding;
         vertices.vertexAttributeDescriptionCount = key->extended_shader ? 8 : 3;
@@ -2123,9 +2222,9 @@ static void set_viewport_scissor(VkCommandBuffer command,
     VkViewport viewport;
     VkRect2D scissor;
     memset(&viewport, 0, sizeof viewport);
-    viewport.width = (float)surface->layout.width;
-    viewport.height = -(float)surface->layout.height;
-    viewport.y = (float)surface->layout.height;
+    viewport.width = (float)surface->pw;
+    viewport.height = -(float)surface->ph;
+    viewport.y = (float)surface->ph;
     viewport.minDepth = 0.0f;
     viewport.maxDepth = 1.0f;
     if (override) {
@@ -2133,18 +2232,23 @@ static void set_viewport_scissor(VkCommandBuffer command,
     } else {
         scissor.offset.x = 0;
         scissor.offset.y = 0;
-        scissor.extent.width = input->width < surface->layout.width
-                             ? input->width : surface->layout.width;
-        scissor.extent.height = input->height < surface->layout.height
-                              ? input->height : surface->layout.height;
+        scissor.extent.width = scale_edge(
+            input->width < surface->layout.width
+                ? input->width : surface->layout.width,
+            surface->layout.width, surface->pw);
+        scissor.extent.height = scale_edge(
+            input->height < surface->layout.height
+                ? input->height : surface->layout.height,
+            surface->layout.height, surface->ph);
     }
     s_vk.fn.CmdSetViewport(command, 0, 1, &viewport);
     s_vk.fn.CmdSetScissor(command, 0, 1, &scissor);
 }
 
-static void begin_rendering(VkCommandBuffer command,
-                            VulkanSurface *surface,
-                            const VulkanDepth *depth)
+static void begin_rendering_image(VkCommandBuffer command,
+                                  VulkanImage *image,
+                                  uint32_t width, uint32_t height,
+                                  const VulkanDepth *depth)
 {
     VkRenderingAttachmentInfo color = {
         VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO
@@ -2154,16 +2258,16 @@ static void begin_rendering(VkCommandBuffer command,
     };
     VkRenderingInfo info = { VK_STRUCTURE_TYPE_RENDERING_INFO };
 
-    if (surface->image.layout != VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL) {
+    if (image->layout != VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL) {
         VkPipelineStageFlags source_stage =
-            surface->image.layout == VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL
+            image->layout == VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL
             ? VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT
             : VK_PIPELINE_STAGE_ALL_COMMANDS_BIT;
         VkAccessFlags source_access =
-            surface->image.layout == VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL
+            image->layout == VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL
             ? VK_ACCESS_SHADER_READ_BIT
             : VK_ACCESS_MEMORY_READ_BIT | VK_ACCESS_MEMORY_WRITE_BIT;
-        image_barrier(command, &surface->image,
+        image_barrier(command, image,
                       VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
                       source_stage,
                       VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT,
@@ -2171,12 +2275,12 @@ static void begin_rendering(VkCommandBuffer command,
                       VK_ACCESS_COLOR_ATTACHMENT_READ_BIT |
                       VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT);
     }
-    color.imageView = surface->image.view;
+    color.imageView = image->view;
     color.imageLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
     color.loadOp = VK_ATTACHMENT_LOAD_OP_LOAD;
     color.storeOp = VK_ATTACHMENT_STORE_OP_STORE;
-    info.renderArea.extent.width = surface->layout.width;
-    info.renderArea.extent.height = surface->layout.height;
+    info.renderArea.extent.width = width;
+    info.renderArea.extent.height = height;
     info.layerCount = 1;
     info.colorAttachmentCount = 1;
     info.pColorAttachments = &color;
@@ -2192,6 +2296,14 @@ static void begin_rendering(VkCommandBuffer command,
     s_vk.fn.CmdBeginRendering(command, &info);
 }
 
+static void begin_rendering(VkCommandBuffer command,
+                            VulkanSurface *surface,
+                            const VulkanDepth *depth)
+{
+    begin_rendering_image(command, &surface->image, surface->pw, surface->ph,
+                          depth);
+}
+
 static VkRect2D clear_rectangle(const Nv2aSurface *input,
                                 const VulkanSurface *surface)
 {
@@ -2201,8 +2313,8 @@ static VkRect2D clear_rectangle(const Nv2aSurface *input,
     uint32_t sy = input->aa_sy > 1 ? 2 : 1;
 
     result.offset.x = result.offset.y = 0;
-    result.extent.width = surface->layout.width;
-    result.extent.height = surface->layout.height;
+    result.extent.width = surface->pw;
+    result.extent.height = surface->ph;
     if (nv2a_backend_clear_rect(bounds)) {
         uint32_t x0 = bounds[0] * sx;
         uint32_t y0 = bounds[1] * sy;
@@ -2212,6 +2324,10 @@ static VkRect2D clear_rectangle(const Nv2aSurface *input,
         if (y0 > surface->layout.height) y0 = surface->layout.height;
         if (x1 > surface->layout.width) x1 = surface->layout.width;
         if (y1 > surface->layout.height) y1 = surface->layout.height;
+        x0 = scale_edge(x0, surface->layout.width, surface->pw);
+        y0 = scale_edge(y0, surface->layout.height, surface->ph);
+        x1 = scale_edge(x1, surface->layout.width, surface->pw);
+        y1 = scale_edge(y1, surface->layout.height, surface->ph);
         result.offset.x = (int32_t)x0;
         result.offset.y = (int32_t)y0;
         result.extent.width = x1 > x0 ? x1 - x0 : 0;
@@ -2288,8 +2404,8 @@ static void vulkan_clear(const Nv2aSurface *input, const Nv2aRenderState *state,
     full_color_clear =
         (flags & 0xF0u) == 0xF0u &&
         rectangle.offset.x == 0 && rectangle.offset.y == 0 &&
-        rectangle.extent.width == surface->layout.width &&
-        rectangle.extent.height == surface->layout.height;
+        rectangle.extent.width == surface->pw &&
+        rectangle.extent.height == surface->ph;
     begin_rendering(slot->command, surface, depth);
     memset(attachments, 0, sizeof attachments);
     memset(&clear_rect, 0, sizeof clear_rect);
@@ -2842,8 +2958,25 @@ static VkImageView copy_surface_texture_region(VulkanCommandSlot *slot,
     VkImageCopy copy;
     VkImageLayout old_layout = alias->image.layout;
     VulkanImage *copy_image = slot_texture(slot);
+    uint32_t px0 = scale_edge(x, alias->layout.width, alias->pw);
+    uint32_t py0 = scale_edge(y, alias->layout.height, alias->ph);
+    uint32_t px1 = scale_edge(x + texture->width, alias->layout.width,
+                              alias->pw);
+    uint32_t py1 = scale_edge(y + texture->height, alias->layout.height,
+                              alias->ph);
 
-    if (!create_image(texture->width, texture->height, alias->image.format,
+    /* A downscaled sliver keeps at least one physical texel. */
+    if (px1 <= px0) {
+        if (px0 >= alias->pw)
+            px0 = alias->pw - 1;
+        px1 = px0 + 1;
+    }
+    if (py1 <= py0) {
+        if (py0 >= alias->ph)
+            py0 = alias->ph - 1;
+        py1 = py0 + 1;
+    }
+    if (!create_image(px1 - px0, py1 - py0, alias->image.format,
                       VK_IMAGE_USAGE_TRANSFER_DST_BIT |
                       VK_IMAGE_USAGE_SAMPLED_BIT,
                       VK_IMAGE_ASPECT_COLOR_BIT, copy_image))
@@ -2863,12 +2996,12 @@ static VkImageView copy_surface_texture_region(VulkanCommandSlot *slot,
     memset(&copy, 0, sizeof copy);
     copy.srcSubresource.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
     copy.srcSubresource.layerCount = 1;
-    copy.srcOffset.x = (int32_t)x;
-    copy.srcOffset.y = (int32_t)y;
+    copy.srcOffset.x = (int32_t)px0;
+    copy.srcOffset.y = (int32_t)py0;
     copy.dstSubresource.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
     copy.dstSubresource.layerCount = 1;
-    copy.extent.width = texture->width;
-    copy.extent.height = texture->height;
+    copy.extent.width = px1 - px0;
+    copy.extent.height = py1 - py0;
     copy.extent.depth = 1;
     s_vk.fn.CmdCopyImage(slot->command, alias->image.image,
                          VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
@@ -2929,7 +3062,7 @@ static VkImageView prepare_surface_texture(VulkanCommandSlot *slot,
             ? 0 : VK_ACCESS_SHADER_READ_BIT;
 
         if (!alias->sample_copy.image &&
-            !create_image(alias->layout.width, alias->layout.height,
+            !create_image(alias->pw, alias->ph,
                           alias->image.format,
                           VK_IMAGE_USAGE_TRANSFER_DST_BIT |
                           VK_IMAGE_USAGE_SAMPLED_BIT,
@@ -2953,8 +3086,8 @@ static VkImageView prepare_surface_texture(VulkanCommandSlot *slot,
         copy.srcSubresource.layerCount = 1;
         copy.dstSubresource.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
         copy.dstSubresource.layerCount = 1;
-        copy.extent.width = alias->layout.width;
-        copy.extent.height = alias->layout.height;
+        copy.extent.width = alias->pw;
+        copy.extent.height = alias->ph;
         copy.extent.depth = 1;
         s_vk.fn.CmdCopyImage(slot->command, alias->image.image,
                              VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
@@ -3305,6 +3438,80 @@ static VkDescriptorSet create_descriptor_set(VulkanCommandSlot *slot,
     return set;
 }
 
+/*
+ * Resample one complete color image into another with the Blood Wake-derived
+ * bilinear seed (upscale) or box downsample (downscale). The source must be
+ * in SHADER_READ_ONLY layout; the target is left as a color attachment with
+ * its writes visible to later attachment and transfer work.
+ */
+static void record_scale_blit(VulkanCommandSlot *slot, VulkanImage *source,
+                              uint32_t source_width, uint32_t source_height,
+                              VulkanImage *target,
+                              uint32_t target_width, uint32_t target_height)
+{
+    VulkanPipelineKey key;
+    VulkanPushConstants constants;
+    VulkanUpload window;
+    VkDescriptorSet descriptors;
+    VkPipeline pipeline;
+    VkViewport viewport;
+    VkRect2D scissor;
+
+    if (!pipeline_key(NULL, target->format, VK_FORMAT_UNDEFINED, 0, 0, &key))
+        runtime_failure("mapping render-scale resolve state",
+                        VK_ERROR_FORMAT_NOT_SUPPORTED);
+    key.resolve_shader = source_width > target_width ||
+                         source_height > target_height ? 2 : 1;
+    pipeline = get_pipeline(&key);
+    window = slot_upload(
+        slot, sizeof(VulkanWindowClipConstants),
+        s_vk.properties.limits.minUniformBufferOffsetAlignment);
+    memset(window.mapped, 0, sizeof(VulkanWindowClipConstants));
+    descriptors = create_descriptor_set(
+        slot, source->view, s_vk.resolve_sampler, window.buffer, window.offset);
+    memset(&constants, 0, sizeof constants);
+    constants.geometry[0] = (float)source_width;
+    constants.geometry[1] = (float)source_height;
+    constants.geometry[2] = 1.0f / source_width;
+    constants.geometry[3] = 1.0f / source_height;
+    constants.texture_info[0] = (float)target_width;
+    constants.texture_info[1] = (float)target_height;
+    constants.texture_info[2] = 1.0f / target_width;
+    constants.texture_info[3] = 1.0f / target_height;
+    memset(&viewport, 0, sizeof viewport);
+    viewport.width = (float)target_width;
+    viewport.height = (float)target_height;
+    viewport.maxDepth = 1.0f;
+    scissor.offset.x = scissor.offset.y = 0;
+    scissor.extent.width = target_width;
+    scissor.extent.height = target_height;
+    begin_rendering_image(slot->command, target, target_width, target_height,
+                          NULL);
+    s_vk.fn.CmdSetViewport(slot->command, 0, 1, &viewport);
+    s_vk.fn.CmdSetScissor(slot->command, 0, 1, &scissor);
+    s_vk.fn.CmdBindPipeline(slot->command, VK_PIPELINE_BIND_POINT_GRAPHICS,
+                            pipeline);
+    s_vk.fn.CmdBindDescriptorSets(slot->command, VK_PIPELINE_BIND_POINT_GRAPHICS,
+                                  s_vk.pipeline_layout, 0, 1, &descriptors,
+                                  0, NULL);
+    s_vk.fn.CmdPushConstants(slot->command, s_vk.pipeline_layout,
+                             VK_SHADER_STAGE_VERTEX_BIT |
+                             VK_SHADER_STAGE_FRAGMENT_BIT,
+                             0, sizeof constants, &constants);
+    s_vk.fn.CmdDraw(slot->command, 3, 1, 0, 0);
+    s_vk.fn.CmdEndRendering(slot->command);
+    image_barrier(slot->command, target,
+                  VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
+                  VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT,
+                  VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT |
+                  VK_PIPELINE_STAGE_TRANSFER_BIT,
+                  VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT,
+                  VK_ACCESS_COLOR_ATTACHMENT_READ_BIT |
+                  VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT |
+                  VK_ACCESS_TRANSFER_READ_BIT);
+    s_vk.scale_resolves++;
+}
+
 static VkDescriptorSet create_extended_descriptor_set(
     VulkanCommandSlot *slot, const VkImageView views[4],
     const VkImageView cube_views[4], const VkSampler samplers[4],
@@ -3472,25 +3679,34 @@ static void start_zpass_query(VulkanCommandSlot *slot, int query_index)
 }
 
 static void end_zpass_query(VulkanCommandSlot *slot,
-                            const Nv2aSurface *surface, int query_index)
+                            const Nv2aSurface *surface,
+                            const VulkanSurface *target, int query_index)
 {
-    uint64_t divisor;
+    double divisor;
     uint32_t query;
     if (query_index < 0)
         return;
     query = (uint32_t)(slot - s_vk.slots) * VULKAN_BATCH_OPERATIONS +
             (uint32_t)query_index;
     s_vk.fn.CmdEndQuery(slot->command, s_vk.zpass_query_pool, query);
-    divisor = (uint64_t)(surface->aa_sx ? surface->aa_sx : 1) *
+    /*
+     * Count guest-screen pixels: undo the guest AA sample factor and the
+     * physical-to-logical render-scale area ratio of this target.
+     */
+    divisor = (double)(surface->aa_sx ? surface->aa_sx : 1) *
               (surface->aa_sy ? surface->aa_sy : 1);
+    if (target->pw != target->layout.width ||
+        target->ph != target->layout.height)
+        divisor *= ((double)target->pw * target->ph) /
+                   ((double)target->layout.width * target->layout.height);
     slot->zpass_sequences[slot->zpass_count] = s_vk.zpass_queries;
-    slot->zpass_divisors[slot->zpass_count++] =
-        divisor > UINT32_MAX ? UINT32_MAX : (uint32_t)divisor;
+    slot->zpass_divisors[slot->zpass_count++] = divisor;
     s_vk.zpass_queries++;
 }
 
 static void fill_window_clip_constants(
-    VulkanWindowClipConstants *constants, const Nv2aSurface *surface);
+    VulkanWindowClipConstants *constants, const Nv2aSurface *surface,
+    const VulkanSurface *target);
 
 static void vulkan_draw(const Nv2aSurface *input, const Nv2aBatch *batch)
 {
@@ -3542,7 +3758,7 @@ static void vulkan_draw(const Nv2aSurface *input, const Nv2aBatch *batch)
     window = slot_upload(
         slot, sizeof(VulkanWindowClipConstants),
         s_vk.properties.limits.minUniformBufferOffsetAlignment);
-    fill_window_clip_constants(window.mapped, input);
+    fill_window_clip_constants(window.mapped, input, surface);
     if (perf_start)
         s_vk.perf.vertex_bytes += vertex_bytes;
     vulkan_perf_finish(perf_start, &s_vk.perf.vertex_ticks);
@@ -3590,7 +3806,7 @@ static void vulkan_draw(const Nv2aSurface *input, const Nv2aBatch *batch)
                              VK_SHADER_STAGE_FRAGMENT_BIT,
                              0, sizeof constants, &constants);
     s_vk.fn.CmdDraw(slot->command, batch->count, 1, 0, 0);
-    end_zpass_query(slot, input, count_zpass);
+    end_zpass_query(slot, input, surface, count_zpass);
     s_vk.fn.CmdEndRendering(slot->command);
     finish_commands(slot);
     vulkan_perf_finish(perf_start, &s_vk.perf.command_ticks);
@@ -3601,7 +3817,8 @@ static void vulkan_draw(const Nv2aSurface *input, const Nv2aBatch *batch)
 }
 
 static void fill_window_clip_constants(
-    VulkanWindowClipConstants *constants, const Nv2aSurface *surface)
+    VulkanWindowClipConstants *constants, const Nv2aSurface *surface,
+    const VulkanSurface *target)
 {
     unsigned count;
     unsigned i;
@@ -3619,12 +3836,19 @@ static void fill_window_clip_constants(
     for (i = 0; i < count; ++i) {
         uint32_t horizontal = surface->window_clip.horizontal[i];
         uint32_t vertical = surface->window_clip.vertical[i];
-        constants->rect[i][0] = (horizontal & 0xFFFu) * sx;
+        uint32_t x0 = (horizontal & 0xFFFu) * sx;
+        uint32_t x1 = (((horizontal >> 16) & 0xFFFu) + 1) * sx;
+        uint32_t y0 = (vertical & 0xFFFu) * sy;
+        uint32_t y1 = (((vertical >> 16) & 0xFFFu) + 1) * sy;
+        /* Inclusive logical bounds become inclusive physical bounds. */
+        constants->rect[i][0] =
+            scale_edge(x0, target->layout.width, target->pw);
         constants->rect[i][1] =
-            (((horizontal >> 16) & 0xFFFu) + 1) * sx - 1;
-        constants->rect[i][2] = (vertical & 0xFFFu) * sy;
+            scale_edge(x1, target->layout.width, target->pw) - 1;
+        constants->rect[i][2] =
+            scale_edge(y0, target->layout.height, target->ph);
         constants->rect[i][3] =
-            (((vertical >> 16) & 0xFFFu) + 1) * sy - 1;
+            scale_edge(y1, target->layout.height, target->ph) - 1;
     }
 }
 
@@ -3742,7 +3966,7 @@ static void vulkan_xdraw(const Nv2aSurface *input, const Nv2aXBatch *batch)
     window = slot_upload(
         slot, sizeof(VulkanWindowClipConstants),
         s_vk.properties.limits.minUniformBufferOffsetAlignment);
-    fill_window_clip_constants(window.mapped, input);
+    fill_window_clip_constants(window.mapped, input, surface);
     if (perf_start)
         s_vk.perf.vertex_bytes += vertex_bytes;
     vulkan_perf_finish(perf_start, &s_vk.perf.vertex_ticks);
@@ -3797,7 +4021,7 @@ static void vulkan_xdraw(const Nv2aSurface *input, const Nv2aXBatch *batch)
                                   0, NULL);
     s_vk.fn.CmdSetBlendConstants(slot->command, blend);
     s_vk.fn.CmdDraw(slot->command, batch->count, 1, 0, 0);
-    end_zpass_query(slot, input, count_zpass);
+    end_zpass_query(slot, input, surface, count_zpass);
     s_vk.fn.CmdEndRendering(slot->command);
     finish_commands(slot);
     vulkan_perf_finish(perf_start, &s_vk.perf.command_ticks);
@@ -3920,7 +4144,7 @@ static int vulkan_xdraw_vsh(const Nv2aSurface *input,
     window = slot_upload(
         slot, sizeof(VulkanWindowClipConstants),
         s_vk.properties.limits.minUniformBufferOffsetAlignment);
-    fill_window_clip_constants(window.mapped, input);
+    fill_window_clip_constants(window.mapped, input, surface);
     constants->vsh_data[0] = 0;
     constants->vsh_data[1] = (uint32_t)program_bytes;
     constants->vsh_data[2] =
@@ -4015,7 +4239,7 @@ static int vulkan_xdraw_vsh(const Nv2aSurface *input,
     s_vk.fn.CmdSetBlendConstants(slot->command, blend);
     s_vk.fn.CmdDrawIndexed(
         slot->command, batch->nindices, 1, 0, 0, 0);
-    end_zpass_query(slot, input, count_zpass);
+    end_zpass_query(slot, input, surface, count_zpass);
     s_vk.fn.CmdEndRendering(slot->command);
     finish_commands(slot);
     vulkan_perf_finish(perf_start, &s_vk.perf.command_ticks);
@@ -4338,7 +4562,7 @@ static int vulkan_readback_internal(uint32_t color_va, int publish_source)
             s_vk.present_sources_suppressed++;
         else
             present_source = bruteforce_vulkan_present_begin_source(
-                surface->layout.width, surface->layout.height,
+                surface->pw, surface->ph,
                 xbox_FramebufferWindowNextFrameId());
     }
     if (!surface->gpu_dirty) {
@@ -4378,21 +4602,56 @@ static int vulkan_readback_internal(uint32_t color_va, int publish_source)
     bytes = row * surface->layout.height;
     slot = begin_commands();
     readback = slot_readback(slot, bytes);
-    image_barrier(slot->command, &surface->image,
-                  VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
-                  VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT,
-                  VK_PIPELINE_STAGE_TRANSFER_BIT,
-                  VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT,
-                  VK_ACCESS_TRANSFER_READ_BIT);
     memset(&copy, 0, sizeof copy);
     copy.imageSubresource.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
     copy.imageSubresource.layerCount = 1;
     copy.imageExtent.width = surface->layout.width;
     copy.imageExtent.height = surface->layout.height;
     copy.imageExtent.depth = 1;
-    s_vk.fn.CmdCopyImageToBuffer(slot->command, surface->image.image,
-                                 VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
-                                 readback->buffer, 1, &copy);
+    if (surface_scaled(surface)) {
+        VkImageLayout old_layout = surface->image.layout;
+        /*
+         * Guest memory receives the logical picture: box-downsample (or
+         * bilinear-upsample) the physical target into the logical image.
+         * The physical target remains authoritative for later GPU work.
+         */
+        ensure_surface_logical(surface);
+        image_barrier(slot->command, &surface->image,
+                      VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+                      image_layout_stage(old_layout),
+                      VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT,
+                      image_layout_access(old_layout),
+                      VK_ACCESS_SHADER_READ_BIT);
+        record_scale_blit(slot, &surface->image, surface->pw, surface->ph,
+                          &surface->logical,
+                          surface->layout.width, surface->layout.height);
+        image_barrier(slot->command, &surface->logical,
+                      VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+                      VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT |
+                      VK_PIPELINE_STAGE_TRANSFER_BIT,
+                      VK_PIPELINE_STAGE_TRANSFER_BIT,
+                      VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT,
+                      VK_ACCESS_TRANSFER_READ_BIT);
+        s_vk.fn.CmdCopyImageToBuffer(slot->command, surface->logical.image,
+                                     VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+                                     readback->buffer, 1, &copy);
+        image_barrier(slot->command, &surface->image,
+                      VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+                      VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT,
+                      VK_PIPELINE_STAGE_TRANSFER_BIT,
+                      VK_ACCESS_SHADER_READ_BIT,
+                      VK_ACCESS_TRANSFER_READ_BIT);
+    } else {
+        image_barrier(slot->command, &surface->image,
+                      VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+                      VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT,
+                      VK_PIPELINE_STAGE_TRANSFER_BIT,
+                      VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT,
+                      VK_ACCESS_TRANSFER_READ_BIT);
+        s_vk.fn.CmdCopyImageToBuffer(slot->command, surface->image.image,
+                                     VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+                                     readback->buffer, 1, &copy);
+    }
     if (present_source)
         bruteforce_vulkan_present_record_source(
             present_source, slot->command, surface->image.image);
@@ -4555,7 +4814,8 @@ static void vulkan_flip(void)
                         " %llu deferred report polls,"
                         " %llu submissions, %llu fence waits, max batch %llu,"
                         " %llu upload buffers, %llu descriptor pools,"
-                        " %u samplers, interval %llu flips in %.3f ms"
+                        " %u samplers, %llu scale resolves,"
+                        " interval %llu flips in %.3f ms"
                         " (%.3f flips/s)\n",
                 (unsigned long long)s_vk.flips,
                 (unsigned long long)s_vk.draws,
@@ -4582,6 +4842,7 @@ static void vulkan_flip(void)
                 (unsigned long long)s_vk.upload_buffer_creates,
                 (unsigned long long)s_vk.descriptor_pool_creates,
                 s_vk.sampler_count,
+                (unsigned long long)s_vk.scale_resolves,
                 (unsigned long long)interval_flips,
                 interval_ms,
                 interval_ms > 0.0
@@ -4652,8 +4913,10 @@ static void destroy_state(void)
         if (s_vk.vsh_verify_pipeline)
             s_vk.fn.DestroyPipeline(
                 s_vk.device, s_vk.vsh_verify_pipeline, NULL);
-        for (i = 0; i < s_vk.surface_count; ++i)
+        for (i = 0; i < s_vk.surface_count; ++i) {
             destroy_image(&s_vk.surfaces[i].sample_copy);
+            destroy_image(&s_vk.surfaces[i].logical);
+        }
         for (i = 0; i < s_vk.surface_count; ++i) {
             destroy_image(&s_vk.surfaces[i].image);
             free(s_vk.surfaces[i].guest_shadow);
@@ -4662,6 +4925,8 @@ static void destroy_state(void)
             destroy_image(&s_vk.depths[i].image);
         if (s_vk.white_sampler)
             s_vk.fn.DestroySampler(s_vk.device, s_vk.white_sampler, NULL);
+        if (s_vk.resolve_sampler)
+            s_vk.fn.DestroySampler(s_vk.device, s_vk.resolve_sampler, NULL);
         destroy_image(&s_vk.white_cube);
         destroy_image(&s_vk.white);
         if (s_vk.base_vs) s_vk.fn.DestroyShaderModule(s_vk.device, s_vk.base_vs, NULL);
@@ -4675,6 +4940,14 @@ static void destroy_state(void)
         if (s_vk.vsh_verify_cs)
             s_vk.fn.DestroyShaderModule(
                 s_vk.device, s_vk.vsh_verify_cs, NULL);
+        if (s_vk.resolve_vs)
+            s_vk.fn.DestroyShaderModule(s_vk.device, s_vk.resolve_vs, NULL);
+        if (s_vk.resolve_bilinear_ps)
+            s_vk.fn.DestroyShaderModule(
+                s_vk.device, s_vk.resolve_bilinear_ps, NULL);
+        if (s_vk.resolve_box_ps)
+            s_vk.fn.DestroyShaderModule(
+                s_vk.device, s_vk.resolve_box_ps, NULL);
         if (s_vk.pipeline_layout)
             s_vk.fn.DestroyPipelineLayout(s_vk.device, s_vk.pipeline_layout, NULL);
         if (s_vk.descriptor_layout)
@@ -5056,6 +5329,17 @@ static BruteforceRendererStartupResult create_device_objects(void)
                            BRUTEFORCE_VK_VSH_VERIFY_CS_SIZE,
                            &s_vk.vsh_verify_cs);
     if (result.status != BRUTEFORCE_RENDERER_STARTUP_SUCCESS) return result;
+    result = create_shader(bruteforce_vk_resolve_vs,
+                           BRUTEFORCE_VK_RESOLVE_VS_SIZE, &s_vk.resolve_vs);
+    if (result.status != BRUTEFORCE_RENDERER_STARTUP_SUCCESS) return result;
+    result = create_shader(bruteforce_vk_resolve_bilinear_ps,
+                           BRUTEFORCE_VK_RESOLVE_BILINEAR_PS_SIZE,
+                           &s_vk.resolve_bilinear_ps);
+    if (result.status != BRUTEFORCE_RENDERER_STARTUP_SUCCESS) return result;
+    result = create_shader(bruteforce_vk_resolve_box_ps,
+                           BRUTEFORCE_VK_RESOLVE_BOX_PS_SIZE,
+                           &s_vk.resolve_box_ps);
+    if (result.status != BRUTEFORCE_RENDERER_STARTUP_SUCCESS) return result;
     compute.stage.sType =
         VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
     compute.stage.stage = VK_SHADER_STAGE_COMPUTE_BIT;
@@ -5193,6 +5477,14 @@ static BruteforceRendererStartupResult create_white_texture(void)
         return startup_result(BRUTEFORCE_RENDERER_STARTUP_INITIALIZATION_FAILED,
                               "probe-pipeline", result,
                               "cannot create the default texture sampler");
+    sampler.magFilter = VK_FILTER_LINEAR;
+    sampler.minFilter = VK_FILTER_LINEAR;
+    result = s_vk.fn.CreateSampler(s_vk.device, &sampler, NULL,
+                                   &s_vk.resolve_sampler);
+    if (result != VK_SUCCESS)
+        return startup_result(BRUTEFORCE_RENDERER_STARTUP_INITIALIZATION_FAILED,
+                              "probe-pipeline", result,
+                              "cannot create the render-scale resolve sampler");
     return startup_result(BRUTEFORCE_RENDERER_STARTUP_SUCCESS, "probe-pipeline",
                           VK_SUCCESS, "default texture resources are ready");
 }
@@ -5229,6 +5521,7 @@ BruteforceRendererStartupResult bruteforce_vulkan_install(void *context)
     int best_score = -1;
     float priority = 1.0f;
     VkResult vk_result;
+    GpuScaleConfig scale;
     uint32_t i;
     (void)context;
 
@@ -5241,6 +5534,15 @@ BruteforceRendererStartupResult bruteforce_vulkan_install(void *context)
         !parse_bool_option("RECOMP_VULKAN_PRESENT", 0, &s_vk.native_present, &result) ||
         !parse_device_option(&requested_device, &requested, &result))
         return result;
+    if (!gpu_scale_prepare_config(&scale))
+        return startup_result(BRUTEFORCE_RENDERER_STARTUP_INVALID_CONFIGURATION,
+                              "configuration", VK_SUCCESS,
+                              "RECOMP_GPU_SCALE or RECOMP_GPU_OUTPUT is invalid");
+    if (scale.native)
+        return startup_result(BRUTEFORCE_RENDERER_STARTUP_INVALID_CONFIGURATION,
+                              "configuration", VK_SUCCESS,
+                              "RECOMP_GPU_SCALE=native is not implemented for"
+                              " Vulkan; use a fixed numeric scale");
     s_vk.zpass_async = zpass && strcmp(zpass, "async") == 0;
     s_vk.vsh_verify.enabled = vsh_verify && atoi(vsh_verify) > 0;
     if (test_failure("loader"))
@@ -5449,13 +5751,19 @@ BruteforceRendererStartupResult bruteforce_vulkan_install(void *context)
             goto failed;
         s_vk.present_registered = 1;
     }
+    if (!gpu_scale_configured() && !gpu_scale_commit_config(&scale)) {
+        result = startup_result(BRUTEFORCE_RENDERER_STARTUP_INVALID_CONFIGURATION,
+                                "configuration", VK_SUCCESS,
+                                "cannot commit the render-scale configuration");
+        goto failed;
+    }
     nv2a_backend_ext_register(&s_backend_ext);
     nv2a_backend_register(&s_backend);
     s_vk.installed = 1;
     fprintf(stderr, "[GPU] Vulkan backend registered (RECOMP_GPU=vulkan)\n");
     fprintf(stderr, "[GPU-Vulkan] device=\"%s\" vendor=0x%04X device=0x%04X"
                     " api=%u.%u.%u driver=0x%08X queue=%u DXC=%s"
-                    " validation=%s mips=%s presentation=%s\n",
+                    " validation=%s mips=%s presentation=%s scale=%.3f\n",
             s_vk.properties.deviceName, s_vk.properties.vendorID,
             s_vk.properties.deviceID,
             VK_API_VERSION_MAJOR(s_vk.properties.apiVersion),
@@ -5464,7 +5772,7 @@ BruteforceRendererStartupResult bruteforce_vulkan_install(void *context)
             s_vk.properties.driverVersion, s_vk.queue_family,
             BRUTEFORCE_VULKAN_DXC_ID, s_vk.validation ? "on" : "off",
             s_vk.texture_mips ? "on" : "off",
-            s_vk.native_present ? "native" : "cpu");
+            s_vk.native_present ? "native" : "cpu", gpu_scale_value());
     if (s_vk.texture_mips)
         fprintf(stderr, "[GPU-MIPS] Vulkan guest mip chains enabled;"
                         " linear textures and render-target aliases remain"

@@ -756,7 +756,8 @@ back down to its own size. MSAA, anisotropic filtering and the other effects
 are separate switches and are not part of this item.
 
 **Current milestone.** The Blood Wake-derived generic scale system now lives
-in `src/gpu/render_scale.c`. Colour surfaces retain logical and physical
+in `src/gpu/render_scale.c`, with its D3D11 passes in
+`src/gpu/render_scale_d3d11.c`. Colour surfaces retain logical and physical
 dimensions; depth follows the physical target; scale epochs resize native
 output; GPU passes seed resized targets, resolve guest-sized readback and
 produce exact/box/Catmull-Rom shared output. Patch 0028 lets the existing
@@ -1297,7 +1298,9 @@ for live backend switching is outside this workstream.
    the host presentation service. Checked surface layouts, immutable texture
    storage/span calculations and allocation-stable guest snapshots are now
    shared by D3D11/Vulkan. The default stage-zero-times-diffuse combiner
-   constructor is also shared. Focused texture-layout coverage and the
+   constructor is also shared, and the render-scale configuration and size
+   authority is now separated from the D3D11 resolve passes and consumed by
+   both backends. Focused texture-layout coverage and the
    unchanged D3D11 regression suite guard the extractions. Cache resources
    and synchronization remain backend-specific.
 4. **Pin shared shader and API dependencies (complete for the current Vulkan shaders).** Use one pinned DXC version to
@@ -1324,8 +1327,11 @@ for live backend switching is outside this workstream.
    Basic Controls and capture a near-matched frame without validation or
    renderer errors. Clean CPU/PVIDEO surface writes now survive readback, and
    reviewed movement captures retain the same tutorial scene and scripted
-   camera route on D3D11 and Vulkan. Direct raw-stream fetch, render scaling,
-   complete native-presentation parity and wider parity remain F7 scope.
+   camera route on D3D11 and Vulkan. Fixed numeric `RECOMP_GPU_SCALE`
+   now renders physical color/depth images with box-resolved guest readback
+   and bilinear guest seeding; `native` fails closed. Native-mode scaling,
+   direct raw-stream fetch, complete native-presentation parity and wider
+   parity remain F7 scope.
 6. **Prototype host-owned Vulkan presentation (retail bring-up in
    progress).** Local framework patch 0048 adds a versioned, copied
    `RecompPresentProvider` registration that is default-inactive and separate
@@ -1420,7 +1426,11 @@ for live backend switching is outside this workstream.
    another manual run. Synthetic borderless-fullscreen enter/restore and
    fail-stop surface loss now pass on both vendors. Test-only final
    swap-chain-image readback now proves native, both CPU and fullscreen
-   compositions on both vendors without claiming physical scanout. Close the
+   compositions on both vendors without claiming physical scanout. Fixed
+   numeric render scaling now passes a validation-enabled scale-2 child
+   fixture on both vendors, including physical native-presentation sources.
+   Native-mode scaling (live epoch, migration and provider output size) is
+   the next scaling step. Close the
    remaining automatable renderer-state gaps next; reserve a multi-run A/B/A campaign for M5,
    and only when its acceptance evidence is actionable.
    Continue covering menus,

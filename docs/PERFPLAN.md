@@ -943,8 +943,10 @@ for native, forced-CPU, source-allowed CPU and fullscreen routes, including
 the fitted opaque-black bars, on both available vendors. This is final-image
 composition evidence, not physical compositor scanout. Vulkan window clipping
 now also passes focused validation-enabled NVIDIA and AMD fixtures for base,
-extended and GPU-VSH draws without a retail run. Continue with the remaining
-synthetic renderer-state gaps; no additional manual route is scheduled merely
+extended and GPU-VSH draws without a retail run. Fixed numeric Vulkan
+render scaling likewise passes a validation-enabled scale-2 synthetic child
+on both vendors without a retail run; it is not a performance result.
+Continue with the remaining synthetic renderer-state gaps; no additional manual route is scheduled merely
 to repeat the baseline.
 
 The retail captures are correctness bring-up evidence only. The final

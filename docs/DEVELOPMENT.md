@@ -110,6 +110,16 @@ block-compressed, paletted, mip, cube and rejected declarations. These tests
 establish the game-data-free WSI ownership boundary, not retail native
 presentation, broader retail parity, or performance.
 
+The Vulkan fixture also rejects `RECOMP_GPU_SCALE=native` and an out-of-range
+scale before startup. Because the scale configuration is committed once per
+process, it then re-runs itself with `--scaled` and `RECOMP_GPU_SCALE=2`. That
+child checks physical-resolution rendering through a half-guest-pixel quad;
+exact clears, draws, CPU-written seeding, window clipping, clear rectangles
+and depth testing at scale; guest-pixel visibility counts; full and
+subregion render-target aliases; and the native presentation fixture with
+physical sources. The child inherits `RECOMP_VULKAN_VALIDATION` and
+`RECOMP_VULKAN_DEVICE`, and the parent fails if the child fails.
+
 After changing the xboxrecomp base, selected commits, or local framework
 patches, verify the reproducible checkout and run its recompiler suite:
 

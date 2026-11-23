@@ -850,3 +850,43 @@ float4 extended_ps(ExtendedPixelInput input) : SV_Target
     }
     return color;
 }
+
+/*
+ * Full-screen render-scale resolves adapted from Blood Wake's bw_vfx_post.c
+ * (MIT; THIRD_PARTY_NOTICES.md). They match the D3D11 bilinear seed and box
+ * downsample in render_scale_d3d11.c. geometry holds the source size and its
+ * reciprocal; texture_info holds the destination size and its reciprocal.
+ */
+struct ResolveInput {
+    float4 position : SV_Position;
+    float2 uv : TEXCOORD0;
+};
+
+ResolveInput resolve_vs(uint vertex_id : SV_VertexID)
+{
+    ResolveInput output;
+    float2 uv = float2((vertex_id << 1) & 2, vertex_id & 2);
+    output.position = float4(uv * 2.0 - 1.0, 0.0, 1.0);
+    output.uv = uv;
+    return output;
+}
+
+float4 resolve_bilinear_ps(ResolveInput input) : SV_Target
+{
+    return texture0.SampleLevel(sampler0, input.uv, 0);
+}
+
+float4 resolve_box_ps(ResolveInput input) : SV_Target
+{
+    float2 factor = constants.geometry.xy * constants.texture_info.zw;
+    int nx = clamp((int)ceil(factor.x / 2.0), 1, 4);
+    int ny = clamp((int)ceil(factor.y / 2.0), 1, 4);
+    float2 origin = input.uv - 0.5 * constants.texture_info.zw;
+    float2 step = constants.texture_info.zw / float2(nx, ny);
+    float4 color = 0.0;
+    for (int y = 0; y < ny; ++y)
+        for (int x = 0; x < nx; ++x)
+            color += texture0.SampleLevel(
+                sampler0, origin + (float2(x, y) + 0.5) * step, 0);
+    return color / (nx * ny);
+}

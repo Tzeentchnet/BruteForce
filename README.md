@@ -23,8 +23,8 @@ This is an experimental Windows release for the North American retail game:
   the base and CPU-transformed extended draw contracts, four texture stages,
   register combiners, cube maps, default-off supplied mip chains, exact
   texture caching, compatible color render-target aliases, precise visibility,
-  depth/stencil, opt-in window clipping, bounded submission, RGB565 conversion,
-  and mandatory guest readback. An additional default-off host-owned Vulkan presentation path now
+  depth/stencil, opt-in window clipping, fixed numeric render scaling,
+  bounded submission, RGB565 conversion, and mandatory guest readback. An additional default-off host-owned Vulkan presentation path now
   has a bounded completed-image queue, Win32 surface and swap chain, resize,
   aspect-fit blit, VSync selection, and required CPU fallback. Eligible
   vertex-program batches now run through a static Vulkan interpreter from

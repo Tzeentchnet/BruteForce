@@ -1,4 +1,5 @@
 #include <windows.h>
+#include <process.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -1095,6 +1096,287 @@ static int run_presentation_test(void)
     return 1;
 }
 
+#define SCALED_SIZE 8
+#define SCALED_RED 0xFFFF0000u
+#define SCALED_GREEN 0xFF00FF00u
+#define SCALED_BLUE 0xFF0000FFu
+#define SCALED_BLACK 0xFF000000u
+
+static void make_quad(Nv2aVertex quad[6], float x0, float y0,
+                      float x1, float y1, float z, uint32_t color)
+{
+    static const int corners[6][2] = {
+        { 0, 0 }, { 1, 0 }, { 0, 1 }, { 1, 0 }, { 1, 1 }, { 0, 1 },
+    };
+    unsigned i;
+    memset(quad, 0, 6 * sizeof *quad);
+    for (i = 0; i < 6; ++i) {
+        quad[i].x = corners[i][0] ? x1 : x0;
+        quad[i].y = corners[i][1] ? y1 : y0;
+        quad[i].z = z;
+        quad[i].rhw = 1.0f;
+        quad[i].diffuse = color;
+        quad[i].u = quad[i].x;
+        quad[i].v = quad[i].y;
+    }
+}
+
+static int scaled_pixels_match(const uint32_t *pixels, uint32_t left,
+                               uint32_t inside, uint32_t outside)
+{
+    unsigned x;
+    unsigned y;
+    for (y = 0; y < SCALED_SIZE; ++y)
+        for (x = 0; x < SCALED_SIZE; ++x)
+            if (pixels[y * SCALED_SIZE + x] != (x < left ? inside : outside))
+                return 0;
+    return 1;
+}
+
+static void set_clear_rect(uint32_t x0, uint32_t y0, uint32_t x1, uint32_t y1)
+{
+    nv2a_pb_exec_method(0, 0x1D98, ((x1 - 1) << 16) | x0);
+    nv2a_pb_exec_method(0, 0x1D9C, ((y1 - 1) << 16) | y0);
+}
+
+/*
+ * Runs in a child process with RECOMP_GPU_SCALE=2: an 8x8 guest surface
+ * renders into a 16x16 physical image. Edges chosen on even physical pixels
+ * make every checked guest pixel exact after the box downsample.
+ */
+static int run_scaled_render_test(void)
+{
+    const uint32_t color_va = XBOX_CONTIG_BASE + 0x70000;
+    const uint32_t target_va = XBOX_CONTIG_BASE + 0x71000;
+    const uint32_t depth_va = XBOX_CONTIG_BASE + 0x72000;
+    Nv2aSurface surface;
+    Nv2aSurface target;
+    Nv2aRenderState state = default_state();
+    Nv2aVertex quad[6];
+    Nv2aTexture texture;
+    Nv2aBatch batch;
+    uint32_t *pixels =
+        (uint32_t *)((uintptr_t)color_va + xbox_GetMemoryOffset());
+    uint32_t *target_pixels =
+        (uint32_t *)((uintptr_t)target_va + xbox_GetMemoryOffset());
+    uint32_t red;
+    unsigned i;
+    unsigned x;
+    unsigned y;
+
+    memset(&surface, 0, sizeof surface);
+    surface.color_va = color_va;
+    surface.width = SCALED_SIZE;
+    surface.height = SCALED_SIZE;
+    surface.pitch = SCALED_SIZE * 4;
+    surface.bytes_per_pixel = 4;
+    surface.aa_sx = surface.aa_sy = 1;
+    target = surface;
+    target.color_va = target_va;
+    memset(pixels, 0, SCALED_SIZE * SCALED_SIZE * 4);
+    memset(target_pixels, 0, SCALED_SIZE * SCALED_SIZE * 4);
+    memset(&batch, 0, sizeof batch);
+    batch.vertices = quad;
+    batch.count = 6;
+    batch.state = &state;
+    set_clear_rect(0, 0, 0x1000, 0x1000);
+
+    bruteforce_vulkan_test_clear(&surface, &state, 0xF0, 0xFF336699, 0);
+    CHECK(bruteforce_vulkan_test_readback(color_va),
+          "read back scaled full clear");
+    for (i = 0; i < SCALED_SIZE * SCALED_SIZE; ++i)
+        CHECK(pixels[i] == 0xFF336699, "scaled full clear is exact");
+
+    bruteforce_vulkan_test_clear(&surface, &state, 0xF0, SCALED_BLACK, 0);
+    make_quad(quad, 0.0f, 0.0f, 4.0f, 8.0f, 0.0f, SCALED_RED);
+    bruteforce_vulkan_test_draw(&surface, &batch);
+    CHECK(bruteforce_vulkan_test_readback(color_va),
+          "read back scaled half-surface quad");
+    CHECK(scaled_pixels_match(pixels, 4, SCALED_RED, SCALED_BLACK),
+          "scaled draw resolves to the exact logical picture");
+
+    bruteforce_vulkan_test_clear(&surface, &state, 0xF0, SCALED_BLACK, 0);
+    make_quad(quad, 0.0f, 0.0f, 0.5f, 8.0f, 0.0f, SCALED_RED);
+    bruteforce_vulkan_test_draw(&surface, &batch);
+    CHECK(bruteforce_vulkan_test_readback(color_va),
+          "read back a half-guest-pixel quad");
+    red = (pixels[0] >> 16) & 0xFFu;
+    CHECK(red >= 0x70u && red <= 0x90u && (pixels[0] & 0xFFFFu) == 0 &&
+          pixels[1] == SCALED_BLACK,
+          "half-guest-pixel coverage proves physical-resolution rendering");
+
+    for (y = 0; y < SCALED_SIZE; ++y)
+        for (x = 0; x < SCALED_SIZE; ++x)
+            pixels[y * SCALED_SIZE + x] = x < 4 ? SCALED_BLUE : SCALED_GREEN;
+    CHECK(bruteforce_vulkan_test_readback(color_va),
+          "detect a CPU-written scaled surface");
+    make_quad(quad, 0.0f, 0.0f, 1.0f, 1.0f, 0.0f, SCALED_RED);
+    bruteforce_vulkan_test_draw(&surface, &batch);
+    CHECK(bruteforce_vulkan_test_readback(color_va),
+          "read back a draw over a seeded scaled surface");
+    CHECK(pixels[0] == SCALED_RED, "draw over the seeded surface is kept");
+    CHECK(pixels[1] == SCALED_BLUE && pixels[4 * SCALED_SIZE + 2] == SCALED_BLUE &&
+          pixels[6 * SCALED_SIZE + 1] == SCALED_BLUE,
+          "guest pixels seed the physical image away from color edges");
+    CHECK(pixels[4 * SCALED_SIZE + 6] == SCALED_GREEN &&
+          pixels[7 * SCALED_SIZE + 7] == SCALED_GREEN,
+          "guest pixels seed the second color region");
+
+    memset(&surface.window_clip, 0, sizeof surface.window_clip);
+    nv2a_window_clip_write(&surface.window_clip, 0, 0, 0x00010000);
+    nv2a_window_clip_write(&surface.window_clip, 1, 0, 0x00010000);
+    surface.window_clip_enabled = 1;
+    bruteforce_vulkan_test_clear(&surface, &state, 0xF0, SCALED_BLACK, 0);
+    make_quad(quad, 0.0f, 0.0f, 8.0f, 8.0f, 0.0f, SCALED_RED);
+    bruteforce_vulkan_test_draw(&surface, &batch);
+    CHECK(bruteforce_vulkan_test_readback(color_va),
+          "read back scaled window clip");
+    surface.window_clip_enabled = 0;
+    memset(&surface.window_clip, 0, sizeof surface.window_clip);
+    for (y = 0; y < SCALED_SIZE; ++y)
+        for (x = 0; x < SCALED_SIZE; ++x)
+            CHECK(pixels[y * SCALED_SIZE + x] ==
+                      (x < 2 && y < 2 ? SCALED_RED : SCALED_BLACK),
+                  "window clip bounds scale to whole physical pixels");
+
+    bruteforce_vulkan_test_zpass(NV2A_ZPASS_CLEAR);
+    bruteforce_vulkan_test_zpass(NV2A_ZPASS_BEGIN);
+    make_quad(quad, 0.0f, 0.0f, 8.0f, 8.0f, 0.0f, SCALED_RED);
+    bruteforce_vulkan_test_draw(&surface, &batch);
+    bruteforce_vulkan_test_zpass(NV2A_ZPASS_END);
+    CHECK(bruteforce_vulkan_test_zpass_count() == 64,
+          "scaled visibility counts guest pixels, not physical pixels");
+    bruteforce_vulkan_test_zpass(NV2A_ZPASS_CLEAR);
+    bruteforce_vulkan_test_zpass(NV2A_ZPASS_BEGIN);
+    make_quad(quad, 0.0f, 0.0f, 4.0f, 8.0f, 0.0f, SCALED_RED);
+    bruteforce_vulkan_test_draw(&surface, &batch);
+    bruteforce_vulkan_test_zpass(NV2A_ZPASS_END);
+    CHECK(bruteforce_vulkan_test_zpass_count() == 32,
+          "scaled visibility normalizes partial coverage");
+    bruteforce_vulkan_test_zpass(NV2A_ZPASS_CLEAR);
+
+    state.zeta_va = depth_va;
+    state.depth_test_enable = 1;
+    state.depth_write = 1;
+    state.depth_func = 0x201;
+    bruteforce_vulkan_test_clear(&surface, &state, 0xF1, SCALED_BLACK,
+                                 0xFFFFFF00);
+    make_quad(quad, 0.0f, 0.0f, 8.0f, 8.0f, 16777215.0f * 0.25f, SCALED_RED);
+    bruteforce_vulkan_test_draw(&surface, &batch);
+    make_quad(quad, 0.0f, 0.0f, 8.0f, 8.0f, 16777215.0f * 0.75f, SCALED_GREEN);
+    bruteforce_vulkan_test_draw(&surface, &batch);
+    CHECK(bruteforce_vulkan_test_readback(color_va),
+          "read back scaled depth test");
+    for (i = 0; i < SCALED_SIZE * SCALED_SIZE; ++i)
+        CHECK(pixels[i] == SCALED_RED,
+              "physical depth buffer rejects the far quad");
+    state = default_state();
+
+    bruteforce_vulkan_test_clear(&surface, &state, 0xF0, SCALED_BLACK, 0);
+    make_quad(quad, 0.0f, 0.0f, 4.0f, 8.0f, 0.0f, SCALED_RED);
+    bruteforce_vulkan_test_draw(&surface, &batch);
+    memset(&texture, 0, sizeof texture);
+    texture.offset = color_va;
+    texture.width = texture.height = SCALED_SIZE;
+    texture.pitch = SCALED_SIZE * 4;
+    texture.color = 0x12;
+    texture.addr_u = texture.addr_v = 3;
+    texture.levels = 1;
+    texture.filter = (1u << 16) | (1u << 24);
+    CHECK(bruteforce_vulkan_test_texture_aliases_surface(&texture),
+          "scaled render-target texture alias is detected");
+    batch.texture = &texture;
+    bruteforce_vulkan_test_clear(&target, &state, 0xF0, SCALED_BLACK, 0);
+    make_quad(quad, 0.0f, 0.0f, 8.0f, 8.0f, 0.0f, 0xFFFFFFFFu);
+    bruteforce_vulkan_test_draw(&target, &batch);
+    CHECK(bruteforce_vulkan_test_readback(target_va),
+          "read back scaled full-surface alias");
+    CHECK(scaled_pixels_match(target_pixels, 4, SCALED_RED, SCALED_BLACK),
+          "full-surface alias samples the physical image in guest texels");
+
+    texture.offset = color_va + 2 * 4;
+    texture.width = texture.height = 4;
+    bruteforce_vulkan_test_clear(&target, &state, 0xF0, SCALED_BLACK, 0);
+    make_quad(quad, 0.0f, 0.0f, 4.0f, 4.0f, 0.0f, 0xFFFFFFFFu);
+    bruteforce_vulkan_test_draw(&target, &batch);
+    CHECK(bruteforce_vulkan_test_readback(target_va),
+          "read back scaled subregion alias");
+    for (y = 0; y < 4; ++y)
+        for (x = 0; x < 4; ++x)
+            CHECK(target_pixels[y * SCALED_SIZE + x] ==
+                      (x < 2 ? SCALED_RED : SCALED_BLACK),
+                  "subregion alias copies the matching physical region");
+    CHECK(target_pixels[5 * SCALED_SIZE + 5] == SCALED_BLACK,
+          "subregion alias leaves the uncovered target unchanged");
+    batch.texture = NULL;
+
+    bruteforce_vulkan_test_clear(&surface, &state, 0xF0, SCALED_BLACK, 0);
+    set_clear_rect(2, 2, 6, 6);
+    bruteforce_vulkan_test_clear(&surface, &state, 0xF0, SCALED_GREEN, 0);
+    set_clear_rect(0, 0, 0x1000, 0x1000);
+    CHECK(bruteforce_vulkan_test_readback(color_va),
+          "read back scaled clear rectangle");
+    for (y = 0; y < SCALED_SIZE; ++y)
+        for (x = 0; x < SCALED_SIZE; ++x)
+            CHECK(pixels[y * SCALED_SIZE + x] ==
+                      (x >= 2 && x < 6 && y >= 2 && y < 6
+                           ? SCALED_GREEN : SCALED_BLACK),
+                  "clear rectangle scales to whole physical pixels");
+    return 1;
+}
+
+static int run_scaled_tests(const char *xbe_path)
+{
+    BruteforceRendererStartupResult result;
+    if (!initialize_memory(xbe_path))
+        return 0;
+    CHECK(_putenv_s("RECOMP_VULKAN_PRESENT", "1") == 0 &&
+          _putenv_s("RECOMP_PRESENT_VSYNC", "1") == 0 &&
+          _putenv_s("RECOMP_PRESENT_FILTER", "point") == 0,
+          "enable native presentation for the scaled fixture");
+    result = bruteforce_vulkan_install(NULL);
+    if (result.status == BRUTEFORCE_RENDERER_STARTUP_UNAVAILABLE) {
+        fprintf(stderr, "SKIP: Vulkan unavailable at %s: %s\n",
+                result.stage, result.reason);
+        xbox_MemoryLayoutShutdown();
+        return 77;
+    }
+    CHECK(result.status == BRUTEFORCE_RENDERER_STARTUP_SUCCESS, result.reason);
+    CHECK(run_scaled_render_test(), "run scaled Vulkan rendering fixture");
+    CHECK(run_presentation_test(),
+          "run Vulkan presentation fixture with physical sources");
+    CHECK(bruteforce_vulkan_test_validation_errors() == 0,
+          "scaled Vulkan rendering reported no validation errors");
+    bruteforce_vulkan_shutdown();
+    xbox_MemoryLayoutShutdown();
+    puts("Vulkan scaled clear/draw/readback/presentation: ok");
+    return 1;
+}
+
+static int run_scaled_child(const char *xbe_path)
+{
+    char executable[MAX_PATH];
+    char quoted_executable[MAX_PATH + 2];
+    char quoted_xbe[MAX_PATH + 2];
+    intptr_t code;
+    DWORD length = GetModuleFileNameA(NULL, executable, sizeof executable);
+    CHECK(length > 0 && length < sizeof executable,
+          "locate the Vulkan fixture executable");
+    CHECK(strlen(xbe_path) < MAX_PATH, "synthetic XBE path fits");
+    snprintf(quoted_executable, sizeof quoted_executable, "\"%s\"", executable);
+    snprintf(quoted_xbe, sizeof quoted_xbe, "\"%s\"", xbe_path);
+    CHECK(_putenv_s("RECOMP_GPU_SCALE", "2") == 0, "select render scale 2");
+    code = _spawnl(_P_WAIT, executable, quoted_executable, quoted_xbe,
+                   "--scaled", NULL);
+    CHECK(_putenv_s("RECOMP_GPU_SCALE", "") == 0, "clear render scale");
+    if (code == 77) {
+        fputs("SKIP: scaled Vulkan fixture found no device\n", stderr);
+        return 1;
+    }
+    CHECK(code == 0, "scaled Vulkan fixture passes in its own process");
+    return 1;
+}
+
 static int run_tests(const char *xbe_path)
 {
     BruteforceRendererStartupResult result;
@@ -1121,6 +1403,19 @@ static int run_tests(const char *xbe_path)
           "invalid Vulkan presentation option does not register");
     CHECK(_putenv_s("RECOMP_VULKAN_PRESENT", "") == 0,
           "clear invalid Vulkan presentation option");
+    CHECK(_putenv_s("RECOMP_GPU_SCALE", "native") == 0,
+          "request native render scale");
+    result = bruteforce_vulkan_install(NULL);
+    CHECK(result.status == BRUTEFORCE_RENDERER_STARTUP_INVALID_CONFIGURATION,
+          "native render scale fails closed before Vulkan startup");
+    CHECK(!bruteforce_vulkan_test_installed(),
+          "native render scale does not register");
+    CHECK(_putenv_s("RECOMP_GPU_SCALE", "11") == 0,
+          "request an out-of-range render scale");
+    result = bruteforce_vulkan_install(NULL);
+    CHECK(result.status == BRUTEFORCE_RENDERER_STARTUP_INVALID_CONFIGURATION,
+          "invalid render scale fails before Vulkan startup");
+    CHECK(_putenv_s("RECOMP_GPU_SCALE", "") == 0, "clear render scale");
     CHECK(_putenv_s("RECOMP_GPU_MIPS", "invalid") == 0,
           "set invalid mip option");
     result = bruteforce_vulkan_install(NULL);
@@ -1200,17 +1495,20 @@ static int run_tests(const char *xbe_path)
     CHECK(_putenv_s("RECOMP_GPU_MIPS", "") == 0,
           "clear Vulkan mip sampling");
     puts("Vulkan clear/draw/readback: ok");
+    CHECK(run_scaled_child(xbe_path), "run scaled Vulkan fixture");
     return 1;
 }
 
 int main(int argc, char **argv)
 {
     int result;
-    if (argc != 2) {
-        fprintf(stderr, "usage: vulkan_test <synthetic.xbe>\n");
+    if (argc == 3 && strcmp(argv[2], "--scaled") == 0)
+        result = run_scaled_tests(argv[1]);
+    else if (argc != 2) {
+        fprintf(stderr, "usage: vulkan_test <synthetic.xbe> [--scaled]\n");
         return 2;
-    }
-    result = run_tests(argv[1]);
+    } else
+        result = run_tests(argv[1]);
     if (result == 77)
         return 77;
     if (!result)

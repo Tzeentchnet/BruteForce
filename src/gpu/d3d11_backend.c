@@ -63,7 +63,7 @@
 #include "d3d11_device_status.h"
 #include "combiner_state.h"
 #include "guest_snapshot.h"
-#include "render_scale.h"
+#include "render_scale_d3d11.h"
 #include "rc_hlsl.h"
 #include "shader_cache.h"
 #include "surface_layout.h"

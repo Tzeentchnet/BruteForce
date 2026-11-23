@@ -4,10 +4,27 @@ Except where marked synthetic, these observations apply to the one locally
 supplied North American retail executable identified by
 [retail.json](../fingerprints/retail.json). Guest addresses and layouts must
 not be assumed valid for other revisions. Asset
-organization and importer research are tracked in
-[ARCHITECTURE.md](./ARCHITECTURE.md), the current rendering architecture is
+organization is tracked in [ARCHITECTURE.md](./ARCHITECTURE.md), decoded
+asset formats and importer research in
+[ASSETFORMATS.md](./ASSETFORMATS.md), the current rendering architecture is
 in [RENDERING.md](./RENDERING.md), and general framework contributions are
 in [UPSTREAM.md](./UPSTREAM.md).
+
+## 2026-11-22 asset name hash and BXML headers
+
+Static analysis of the retail executable and the 56 local `data\*.tgz`
+bundles, with no runtime change. The binary-XML (`BXML`) descriptors and
+`BXSD` schemas store names as 32-bit hashes. The routine `sub_00238370`
+lowercases each byte through the table at guest VA `0x3BC550` and applies a
+reflected CRC-32 with initial value `0xFFFFFFFF` and a final complement,
+using the table at `0x3BC150`. That table matches the standard
+`0xEDB88320` generator run with an arithmetic right shift; all 256 entries
+were reproduced, and the executable's precomputed schema hashes match. The
+BXML header, namespace table and name table parse consistently in all 759
+nonempty members. Name recovery, partial token-grammar observations,
+payload observations and the importer plan are in
+[ASSETFORMATS.md](./ASSETFORMATS.md). No importer or payload decoder is
+claimed.
 
 ## 2026-11-20 v0.18 framework and retail acceptance
 

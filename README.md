@@ -58,6 +58,10 @@ This is an experimental Windows release for the North American retail game:
   D3D11 remains selectable through both parity gates.
 - Tutorial gameplay is running, but full-game correctness is not established.
 - Networking is not supported.
+- Asset-format research for a future Blender importer has decoded the
+  resource bundles, the binary-XML name hash, and descriptor headers. Mesh,
+  texture, and animation payloads are not decoded yet, and no importer
+  exists.
 - Internal-resolution scaling retains a 4:3 picture; true widescreen is not
   implemented.
 - Experimental rendering and performance options remain default-off unless
@@ -118,6 +122,8 @@ benchmarking, and save isolation are documented in the
 - [Next steps](docs/NEXTSTEPS.md): active work and completion gates.
 - [Architecture](docs/ARCHITECTURE.md): executable, game data, runtime, and
   asset organization.
+- [Asset formats](docs/ASSETFORMATS.md): decoded resource formats and the
+  Blender-importer plan for characters, props, and levels.
 - [Rendering architecture](docs/RENDERING.md): graphics ownership,
   synchronization, presentation, and known differences.
 - [Performance plan](docs/PERFPLAN.md): performance targets and phase status.

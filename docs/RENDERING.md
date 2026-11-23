@@ -7,7 +7,8 @@ current host implementation. Guest addresses and layouts are revision
 specific; the executable fingerprint is in
 [retail.json](../fingerprints/retail.json).
 
-For the disc and asset investigation, see [ARCHITECTURE.md](./ARCHITECTURE.md).
+For the disc and asset investigation, see [ARCHITECTURE.md](./ARCHITECTURE.md)
+and [ASSETFORMATS.md](./ASSETFORMATS.md).
 [FINDINGS.md](./FINDINGS.md) records observations, experiments and their
 evidence; [PERFPLAN.md](./PERFPLAN.md) defines performance and correctness
 gates. The framework version and ordered patches are pinned by

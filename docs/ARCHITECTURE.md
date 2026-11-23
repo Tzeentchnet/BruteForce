@@ -9,8 +9,9 @@ runtime captures remain local.
 
 For the guest-to-host graphics pipeline, renderer systems and their validation
 limits, see [RENDERING.md](./RENDERING.md). This document focuses on the disc,
-resources and asset formats rather than inferring an original engine design
-from the current renderer.
+resources and their organization rather than inferring an original engine
+design from the current renderer. Decoded asset-format details, the name
+hash, and the Blender-importer plan are in [ASSETFORMATS.md](./ASSETFORMATS.md).
 
 ## Disc layout and ownership
 
@@ -201,14 +202,16 @@ isolation is described in
 
 The table distinguishes observed names and signatures from unverified roles.
 Examples are tar member paths, not files that this project distributes.
+[ASSETFORMATS.md](./ASSETFORMATS.md) has the full 56-bundle inventory and
+the decoded structure behind each row.
 
 | Resource | Observation | Remaining uncertainty |
 | --- | --- | --- |
-| `.xmb` | All 35 nonempty `.xmb` members in `common.tgz`, and all 13 in each of `e01.tgz` and `m01_a.tgz`, begin with `BXML`. Names include `objects`, `levels`, `materials`, `textures`, `animations`, and character/game configuration. | The `BXML` signature does not establish a standard XML encoding or a decoded schema. Byte order, records, strings, references, and version semantics are unknown. |
-| `.xsb` | The seven `common/schemas/*.xsb` members begin with `BXSD`. In contrast, disc files `cdxmedia\cdx.xsb` and `media\Sound.xsb` begin with `SDBK`. | The extension identifies at least two different content families here. Do not feed the `BXSD` schema-named files to a sound-bank parser solely because of their suffix; neither layout has been decoded. |
-| `.ipn`, `.ivd` | `objects-<bundle>.ipn`, `.ivd`, and `.xmb` occur together in the three sampled resource bundles. The beginning of the sampled `.ivd` files can be read as small little-endian 16-bit integers. | They are promising geometry-related candidates by association, but their roles, element types, strides, offsets, topology, and compression are unverified. Small integers alone do not prove an index buffer. |
-| `.tex`, `.xmb` | `textures-<bundle>.tex` accompanies `textures-<bundle>.xmb` in the same samples. | Texture metadata/payload linkage, formats, dimensions, mipmaps, and any Xbox swizzle or tiling are unknown. Do not assume the `.tex` payload is DDS. |
-| `.chnl`, `.xmb` | `animations-<bundle>.chnl` accompanies `animations-<bundle>.xmb`. | Animation channels, skeleton representation, timing, and transforms are unverified. |
+| `.xmb` | All 759 nonempty `.xmb` members begin with `BXML`. Names include `objects`, `levels`, `materials`, `textures`, `animations`, and character/game configuration. The header, namespace table and name-hash table are decoded; element and attribute names are stored as 32-bit case-insensitive CRC-style hashes that are now reproducible. | The body token grammar and value encoding are only partly decoded; see [ASSETFORMATS.md](./ASSETFORMATS.md#layer-3-bxml-descriptors-xmb). |
+| `.xsb` | The seven `common/schemas/*.xsb` members begin with `BXSD` and use the same name hashes as BXML. In contrast, disc files `cdxmedia\cdx.xsb` and `media\Sound.xsb` begin with `SDBK`. | The extension identifies at least two different content families here. Do not feed the `BXSD` schema-named files to a sound-bank parser solely because of their suffix. The BXSD declaration grammar is only partly observed, and `SDBK` is not decoded. |
+| `.ipn`, `.ivd` | `objects-<bundle>.xmb` names both files, and its recovered vocabulary includes `mesh`, `geoset`, `vertex-type`, `vertex-buffer` and `index-buffer`. The start of `objects-tutorial.ivd` reads as triangle-strip-like 16-bit indices. | Which file holds vertices or indices, element types, strides, offsets, topology, and compression are unverified. |
+| `.tex`, `.xmb` | `textures-<bundle>.xmb` names its `textures-<bundle>.tex` and has `format`, `width`, `height`, `offset` and `size` names. The `.tex` file has no header signature. | Format codes, dimensions, mipmaps, and any Xbox swizzle or tiling are unknown. Do not assume the `.tex` payload is DDS. |
+| `.chnl`, `.xmb` | `animations-<bundle>.xmb` names its `animations-<bundle>.chnl` and has `channel`, `num-frames`, `frame-type`, `compressed`, `offset` and `size` names. | Animation channels, skeleton representation, timing, and transforms are unverified. |
 | `.mem`, `.xmb` | `sounds-<bundle>.mem` accompanies `sounds-<bundle>.xmb`. | Their relationship and audio encodings are unverified; names alone are not a decoder specification. |
 | `.gscr` | The sampled `e01` and `m01_a` bundles contain script-named files that start with ASCII text. | Full encoding, grammar, and runtime semantics have not been established. |
 | `.xbx` | `common/camp-save-image.xbx` begins with `XPR0`; sampled direct `.xpr` files under `fx` and `cdxmedia` share that prefix. | The individual resource layouts and texture encodings have not been decoded. |
@@ -257,29 +260,12 @@ Use the local runtime diagnostic described in the README to reproduce the
 `D:` and `Z:` observations. Its logs and any read-byte traces can contain
 game-derived data and should stay local.
 
-## Future Blender importer: staged investigation
+## Future Blender importer
 
-1. Inventory additional owned-disc bundles, including empty and unusual
-   entries. Read tar members in place or validate paths, sizes, and member
-   types before extraction; reject traversal, links, overflows, and excessive
-   allocations. Record revision and sample provenance.
-2. Reverse `BXML`/`BXSD` using small, independently comparable resources.
-   Establish header fields, bounds, strings, record types, and links between
-   resources; do not infer a complete schema from magic bytes.
-3. Trace the relationship between `objects-*.xmb`, `.ipn`, and `.ivd`.
-   Prove offsets, lengths, strides, index width, topology, and vertex
-   attributes against more than one object and bundle. Check every range and
-   index before allocating or constructing geometry.
-4. Map material and texture references; validate dimensions, format, mip
-   ranges, and whether a swizzle or tile transform is actually required.
-   Separately establish skeletons, bind poses, animation channels, coordinate
-   system, units, winding, normals, and UV conventions.
-5. Keep the binary parser independent of Blender and expose a validated
-   intermediate scene representation to an add-on. Use synthetic fixtures for
-   malformed, empty, truncated, and boundary cases; run owned-asset checks
-   locally without committing payloads. Validate at least one known object
-   visually and numerically, then repeat with a second distinct bundle before
-   claiming general support.
-
-No Blender importer or validated mesh, material, texture, or animation schema
+The importer investigation, its evidence, and its milestones are now
+maintained in [ASSETFORMATS.md](./ASSETFORMATS.md). As of 2026-11-22, the
+bundle layer, the name hash, and the BXML header, namespace and name tables
+are verified across the local disc. The BXML token grammar, value typing,
+and every geometry, texture and animation payload layout remain open. No
+Blender importer or validated mesh, material, texture, or animation decoder
 exists in this project yet.

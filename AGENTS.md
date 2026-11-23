@@ -11,8 +11,10 @@ status. Update them in the same change as the work, not afterward:
   candidates, overlap, tests, and remaining follow-up.
 - `docs/FINDINGS.md`: Brute Force-specific executable, runtime, and bring-up
   findings, including measured performance results.
-- `docs/ARCHITECTURE.md`: game and resource organization, asset-format
-  evidence, and the future Blender-importer investigation.
+- `docs/ARCHITECTURE.md`: game and resource organization and disc
+  inventory.
+- `docs/ASSETFORMATS.md`: decoded asset formats, name hashing, evidence
+  levels, and the Blender-importer plan and milestones.
 - `docs/RENDERING.md`: renderer ownership and synchronization boundaries,
   CPU/GPU reference behavior, presentation, scaling, and widescreen design.
 - `docs/PERFPLAN.md`: the performance plan, its gates, and phase status. Mark

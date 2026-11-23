@@ -1455,6 +1455,29 @@ migration; the CPU reference and D3D11 comparison path still work; and any
 performance result follows the same-generation A/B/A protocol with distinct
 world frames reported separately from flips.
 
+## G. Asset formats and Blender importer (name hash decoded)
+
+Goal: a Blender importer for characters, props and levels from the
+user's own disc. The evidence, open questions and milestones M0-M5 are in
+[ASSETFORMATS.md](ASSETFORMATS.md#importer-architecture-and-milestones).
+As of 2026-11-22, the bundle layer, the name hash, and the BXML header,
+namespace and name tables are verified on the local disc; about half of the
+2,019 name hashes have candidate names, and those still need curating.
+
+- G1 (next): finish M0 by tracing the game's BXML reader from callers of
+  `sub_00238370`, then decode every token kind, the structure-block header
+  and value typing, using BXSD where needed. Gate: every nonempty `.xmb`
+  and `.xsb` parses to its end.
+- G2: build the local name-map script and the Blender-independent
+  bundle/BXML/BXSD parsers, with synthetic malformed-input fixtures.
+- G3-G6: textures, static meshes, multi-part props, levels and characters
+  in the ASSETFORMATS milestone order, each validated against runtime or
+  reference captures that stay local.
+
+This work is independent of the renderer and audio workstreams and does not
+change the runtime. Commit no decoded game content or name dictionaries
+derived from the disc.
+
 ## Decisions (settled 2026-10-30; updated 2026-11-20)
 
 1. **Rendering reference:** xemu, run on the same disc at matched states (A2).
@@ -1555,6 +1578,8 @@ Still open: access to a native 4K display. Optional 5.1 output is deferred.
    automated audio probes only for a new symptom or materially different
    audio-heavy scene.
 7. Continue D's compatibility work without weakening audio or GPU ordering.
+8. Advance G's asset-format milestones independently of the runtime work,
+   starting with G1's complete BXML decode.
 
-Update FINDINGS, UPSTREAM, PERFPLAN, ARCHITECTURE and the README in the same
-change as each milestone, as AGENTS requires.
+Update FINDINGS, UPSTREAM, PERFPLAN, ARCHITECTURE, ASSETFORMATS and the
+README in the same change as each milestone, as AGENTS requires.

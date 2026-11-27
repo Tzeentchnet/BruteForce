@@ -851,7 +851,9 @@ for live backend switching is outside this workstream.
    now renders physical color/depth images with box-resolved guest readback
    and bilinear guest seeding. `native` follows the presentation provider's
    fitted output through a scale epoch that resamples color surfaces on the
-   GPU and recreates depth/stencil cleared (synthetic, both vendors). Direct
+   GPU and recreates depth/stencil cleared (synthetic, both vendors). Both
+   modes now have validation-clean retail runs, including live window
+   resizes. Direct
    raw-stream fetch, complete native-presentation parity and wider parity
    remain F7 scope.
 6. **Host-owned Vulkan presentation (retail bring-up in progress).** Patch
@@ -873,15 +875,25 @@ for live backend switching is outside this workstream.
    Basic Controls comparison (134 pixels over 8/255), the gathered GPU-VSH
    interpreter and verifier, the first reviewed movement pair, the reduced
    no-capture diagnostic, the Vulkan counter run, deferred visibility polls,
-   fixed numeric render scaling and synthetic native-mode scaling are
-   complete; see [COMPLETED](COMPLETED.md#f-vulkan-default-renderer-migration). Open:
+   fixed numeric render scaling, synthetic native-mode scaling and the first
+   fixed and native scaled retail runs are complete; see
+   [COMPLETED](COMPLETED.md#f-vulkan-default-renderer-migration). Open:
    - Investigate the remaining `0x80000000` staged-memory conflict through
      the generic color-DMA/lifetime gap; do not change the conservative
-     GPU-wins policy.
-   - Run scaled Vulkan in retail: a fixed numeric scale, then native mode
-     with a window resize during play. Record whether the cleared
-     depth/stencil after a scale epoch is visible before the guest clears it
-     (D3D11 has the same gap). No scaled Vulkan retail run exists yet.
+     GPU-wins policy. In the 2026-11-23 native runs it grows by about one
+     per flip once movement starts, with or without resizes.
+   - Attribute the movement-phase rise in WSI CPU presentations with no
+     exact native source (from about one third to over half), seen in every
+     native run with or without resizes. Use the bounded counters, not
+     continuous capture.
+   - Make native mode follow physical pixels on scaled displays. The
+     executable is not DPI-aware, so at 150% the provider sizes the swap
+     chain and render scale in logical pixels (UPSTREAM item 51). Decide
+     between a per-title manifest and a framework window change, and measure
+     D3D11 native mode on the same display first.
+   - Compare a scaled Vulkan capture with a same-scale D3D11 capture at a
+     reviewed matched state. The scale-2 run has a reviewed hold capture but
+     no D3D11 scale-2 counterpart.
    - Close the remaining automatable renderer-state gaps next; reserve a
      multi-run A/B/A campaign for M5, and only when its acceptance evidence is
      actionable. Do not reuse the invalidated first no-capture set or schedule
@@ -1008,8 +1020,8 @@ Still open: access to a native 4K display. Optional 5.1 output is deferred.
 2. Continue Vulkan parity and native presentation through F5-F7. The
    completed parity, presentation and diagnostic steps are in
    [COMPLETED](COMPLETED.md#f-vulkan-default-renderer-migration). Preserve the unresolved color-DMA conflict policy,
-   continue synthetic renderer-state parity and a first scaled retail run without
-   scheduling the deferred M5 campaign, and do not prioritize direct
+   continue synthetic renderer-state parity, the DPI-awareness decision and
+   a matched scaled comparison without scheduling the deferred M5 campaign, and do not prioritize direct
    raw-stream fetch from the measured 0.56% backend vertex-copy cost alone.
    Submit no upstream work without approval. Implement D3D12 in F8, promote
    `auto` only after F9, and retain D3D11 and CPU as F10 requires.

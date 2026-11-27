@@ -835,10 +835,83 @@ produced a 240x240 output and scale 0.5 in a 320x240 window. For Brute
 Force's 640x480 frame the two rules agree; a title with a non-4:3 frame
 would get a different native scale from the D3D11 path.
 
-These are synthetic semantics. No scaled or native Vulkan retail run,
-matched-frame comparison or performance measurement has been made, and
-whether a cleared depth buffer after a scale epoch is ever visible in play
-is unverified.
+These are synthetic semantics. The first retail runs follow.
+
+### Vulkan scaled and native-mode retail runs (2026-11-23)
+
+All runs used generation `20261121-005939-bc768cc6`, executable SHA-256
+`41780d88c03eafa50ad00d9e6a271bae85b7e21e242009cec12c3f280f31976e`
+(rebuilt from `b79a1d9`), the NVIDIA GeForce RTX 5070, four raster threads,
+`RECOMP_VULKAN_VALIDATION=1`, supplied mips, asynchronous visibility, the
+zero-delay sleep fix, no audio and the unattended legacy menu script. Each
+is a single correctness run, not a performance result; flip rates below are
+flips, not distinct world frames. Logs and captures stay local under
+`analysis/bench/vulkan-*-retail-20261123`.
+
+**Fixed scale 2, CPU-presented.** The run reached the tutorial world at
+95.9 seconds and completed the stationary hold. The backend logged
+1280x960 physical rendering for the 640x480 screen, one box resolve per
+readback and no scale migration. Five hold captures are byte-identical
+(SHA-256 prefix `f1978347b629e99f`), and review shows Basic Controls with
+the world, HUD and panel intact. No validation message was logged. The
+known `0x80000000` guest/GPU conflict appeared at flip 4,704 and accumulated
+to 110 by flip 4,800, the same surface and policy as the unscaled runs. The
+stationary interval measured 10.857 flips/s.
+
+**Native mode with native presentation.** `RECOMP_GPU_SCALE=native` with
+`RECOMP_VULKAN_PRESENT=1`, FIFO and linear filtering, in the movement scene.
+An external script resized the window four times, starting 100 seconds
+after the window appeared, so two resizes fell in the Basic Controls hold
+and two in scripted movement. It captured the game window alone with
+`PrintWindow(PW_RENDERFULLCONTENT)` about every 40 ms for the first
+320 ms after each resize, then at about 0.4, 0.5, 0.9 and 1.9 seconds and
+after settling. In the reviewed run:
+
+| Epoch | Trigger | Swap chain | Fitted picture | Scale |
+| --- | --- | --- | --- | --- |
+| 1 | startup | 640x480 | 640x480 | 1.000 |
+| 2 | resize | 884x661 | 881x661 | 1.377 |
+| 3 | resize | 544x401 | 534x401 | 0.835 |
+| 4 | resize | 1084x661 | 881x661 | 1.377 |
+| 5 | resize | 684x521 | 684x513 | 1.069 |
+
+Each resize epoch migrated five color surfaces and cleared two resized
+depth/stencil surfaces. Validation logged no message, the WSI provider
+reported no failure and the run completed the stationary and movement
+phases. The 1084x661 window was pillarboxed to a 4:3 picture.
+
+None of the 52 post-resize window images shows a depth artifact, missing
+geometry or a black frame, including the two resizes during movement.
+Each epoch is committed at flip readback, and the title appears to clear
+depth before drawing the next frame. That explanation is a hypothesis: the
+images were taken at about 40 ms intervals against roughly 17 flips/s, so
+they very likely, but not provably, include the first presented frame after
+each epoch. An earlier run with larger resizes logged the same epoch
+pattern (scales 1.308, 0.808, 1.308, 1.017) and no validation message. Its
+images were screen copies that showed whatever window was on top rather
+than the game, so they were deleted unreviewed; use `PrintWindow` for
+window evidence.
+
+Startup always begins with an epoch. Native mode configures scale 2.000
+until the provider reports a size, then commits epoch 1 at 640x480. That
+first epoch also cleared one depth/stencil surface. It completes before the
+world loads, so it was not visible in these runs.
+
+**DPI virtualization.** The display uses 150% scaling. A DPI-aware probe
+measured the 640x480 window's client area as 960x720 physical pixels and
+the first resize as 1276x942, while the provider created an 851x628 swap
+chain and committed scale 1.308. The executable declares no DPI awareness,
+so native mode follows logical pixels and Windows stretches the result 1.5x.
+D3D11 native mode reads the same client rectangle and is expected to
+behave the same; that was not measured. This is recorded as UPSTREAM item 51.
+
+**Observations not caused by scaling.** Four native runs were made; in two
+the resize script never acted (one launch failure, one window-lookup bug).
+All four had the same profile: once movement started the
+`0x80000000` conflict count grew by about 300 per 300 flips, and the CPU
+route with no exact native source rose from about one third to over half
+of WSI presentations. Both appear without resizing and need separate
+attribution.
 
 ## Earlier v0.17 integrated synthetic validation boundary
 

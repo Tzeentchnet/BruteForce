@@ -524,7 +524,11 @@ slow diagnostic and is inactive unless requested.
 Vulkan's native presentation and window clipping remain explicit,
 default-off bring-up paths. Vulkan accepts fixed numeric `RECOMP_GPU_SCALE`
 values and `RECOMP_GPU_SCALE=native`; native mode follows window changes
-only with `RECOMP_VULKAN_PRESENT=1`. Vulkan has no direct raw guest-stream vertex
+only with `RECOMP_VULKAN_PRESENT=1`. On a display scaled above 100%, native
+mode follows the window's logical size, not its physical pixels, because the
+executable does not yet declare DPI awareness; Windows then stretches the
+picture. At 150% scaling, a window 1,276 physical pixels wide renders at
+about 851. Vulkan has no direct raw guest-stream vertex
 fetch. Surface layout
 changes after creation and incompatible render-target overlaps fail
 explicitly. The retained matched tutorial capture predates the GPU-VSH path,

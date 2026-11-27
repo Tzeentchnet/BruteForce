@@ -688,6 +688,11 @@ moved. Open items for F6 and F7 are listed in NEXTSTEPS.
    surfaces from their old physical images, recreates depth/stencil cleared
    and passes a validation-enabled native child fixture on both vendors,
    including injected allocation failure and live provider-driven epochs.
+   The first scaled retail runs (2026-11-23) then completed. Fixed scale 2
+   reached a reviewed Basic Controls hold, and native mode committed four
+   resize epochs during the hold and movement, all without validation
+   errors. No depth artifact appeared in 52 post-resize window images; see
+   [FINDINGS](FINDINGS.md#vulkan-scaled-and-native-mode-retail-runs-2026-11-23).
    Close the
    remaining automatable renderer-state gaps next; reserve a multi-run A/B/A campaign for M5,
    and only when its acceptance evidence is actionable.

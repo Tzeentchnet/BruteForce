@@ -2313,7 +2313,10 @@ own GPU back end, an extended interface for it, and its own pacing fixes.
     client area to the last presented frame's aspect, whereas the D3D11
     shared path uses a fixed 4:3 picture; the two agree for 640x480 frames,
     and any upstream render-scale proposal should state which rule it
-    adopts.
+    adopts. The first scaled retail runs (2026-11-23) exercised fixed scale 2
+    and five native epochs, four of them from live window resizes, without
+    validation errors; they also exposed the missing DPI awareness recorded
+    as item 51.
     A wider-scene profile then attributed
     58.7% of NV2A-thread samples to CPU vertex-program interpretation. The
     existing optional `draw_vsh` contract was sufficient for a Vulkan static
@@ -2514,6 +2517,42 @@ own GPU back end, an extended interface for it, and its own pacing fixes.
     layout/snapshot/filter/default-combiner helpers have not been proposed
     upstream. No Vulkan backend PR exists, and no upstream interaction was
     performed.
+
+51. **Declare DPI awareness for the framebuffer window.**
+    *Problem:* neither the framework's `XboxRecompFramebuffer` window nor the
+    executables built on it declare DPI awareness. On a display scaled above
+    100%, Windows virtualizes the process: client rectangles and swap chains
+    are reported in logical pixels and the compositor bitmap-stretches the
+    result. Any presenter or native render scale that follows the client size
+    therefore renders below the display's physical resolution and is then
+    blurred upward, whatever the backend.
+    *Evidence:* observed 2026-11-23 in three native-mode Vulkan retail runs on
+    a 150% display (generation `20261121-005939-bc768cc6`). An external
+    DPI-aware probe measured a 1276x942 physical client while the Vulkan
+    provider created an 851x628 swap chain and committed scale 1.308 rather
+    than about 1.96. No DPI-awareness call or manifest entry exists in this
+    project, its patches or the framework sources. D3D11 native mode reads the
+    same client rectangle, so it is expected to share the gap; that was
+    inferred from the code, not measured.
+    *Change:* none yet. A plain fix is a per-monitor-v2 awareness manifest or
+    `SetProcessDpiAwarenessContext` before window creation, plus
+    `WM_DPICHANGED` handling so the initial 640x480 window keeps its
+    on-screen size. Changing the default window size on scaled displays is a
+    behaviour change and belongs behind a `RECOMP_*` switch until agreed.
+    *Tests:* a synthetic window fixture that sets a per-monitor-v2 context and
+    checks the physical client size reported to the presenter's output-size
+    query, plus a `WM_DPICHANGED` resize; existing presenter fixtures at 100%
+    must stay unchanged. CI displays are normally at 100%, so the scaled case
+    needs a forced-DPI or manual check.
+    *Overlap:* checked 2026-11-23. No open or merged PR among the 337 listed
+    and no issue mentions DPI. Merged
+    [#215](https://github.com/sp00nznet/xboxrecomp/pull/215) owns the scalable
+    framebuffer window and is the code this would touch; item 39's
+    output-size contract would consume the physical size.
+    *Before filing:* decide whether awareness belongs in the framework window
+    or each title's manifest, measure D3D11 on a scaled display, and get
+    approval.
+    *Status:* planned; not patched or filed.
 
 ### Open upstream work to select or coordinate with
 

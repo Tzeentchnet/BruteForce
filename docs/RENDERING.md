@@ -470,7 +470,11 @@ process covering clears, exact half-surface coverage, sub-guest-pixel
 coverage, CPU-written seeding, window clipping, normalized visibility,
 physical depth testing, full and subregion aliases, clear rectangles and the
 native presentation routes. It establishes synthetic backend semantics, not
-scaled retail parity or performance.
+scaled retail parity or performance. Validation-clean retail runs at fixed
+scale 2 and in native mode with live window resizes are recorded in
+[FINDINGS](FINDINGS.md#vulkan-scaled-and-native-mode-retail-runs-2026-11-23).
+They also show that, because the executable is not DPI-aware, the
+provider's output size is in logical pixels on scaled displays.
 
 ### Extended combiners, GPU vertex programs, and visibility
 

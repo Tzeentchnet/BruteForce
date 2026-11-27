@@ -24,7 +24,7 @@ This is an experimental Windows release for the North American retail game:
   register combiners, cube maps, default-off supplied mip chains, exact
   texture caching, compatible color render-target aliases, precise visibility,
   depth/stencil, opt-in window clipping, fixed numeric and native render
-  scaling (synthetic only),
+  scaling (first retail runs complete, no matched comparison yet),
   bounded submission, RGB565 conversion, and mandatory guest readback. An additional default-off host-owned Vulkan presentation path now
   has a bounded completed-image queue, Win32 surface and swap chain, resize,
   aspect-fit blit, VSync selection, and required CPU fallback. Eligible

@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Windows launcher for Brute Force."""
 
+import argparse
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 import json
@@ -223,15 +224,19 @@ def game_environment(values, base_env=None):
     return env
 
 
-def start_game(values, base_env=None):
+def start_game(values, base_env=None, log_path=None):
     settings = validate_settings(values)
     command, boot_dir, env = build.prepare_game_run(
         config=settings["config"],
         experimental_tutorial=True,
         base_env=game_environment(settings, base_env),
     )
-    log_path = boot_dir / "launcher.log"
-    with log_path.open("x", encoding="utf-8") as log:
+    if log_path is None:
+        log_path, log_mode = boot_dir / "launcher.log", "x"
+    else:
+        log_path, log_mode = Path(log_path), "w"
+        log_path.parent.mkdir(parents=True, exist_ok=True)
+    with log_path.open(log_mode, encoding="utf-8") as log:
         log.write("Brute Force launcher: game stdout and stderr\n")
         log.flush()
         process = subprocess.Popen(
@@ -399,7 +404,67 @@ class Launcher:
         self.root.destroy()
 
 
-def main():
+# Exit codes of --play when the game cannot start; recomplauncher.json explains them.
+PLAY_START_FAILED = 120
+PLAY_SETTINGS_INVALID = 121
+
+
+def play(config=None, log_path=None, base_env=None):
+    """Start the game with the saved settings and wait for it to close."""
+    try:
+        values = load_settings(settings_path(base_env))
+        if config is not None:
+            values = {**values, "config": config}
+        process, log = start_game(values, base_env, log_path)
+    except (LauncherError, json.JSONDecodeError) as exc:
+        print(f"Error: settings: {exc}", file=sys.stderr)
+        return PLAY_SETTINGS_INVALID
+    except (build.BuildError, OSError) as exc:
+        print(f"Error: {exc}", file=sys.stderr)
+        return PLAY_START_FAILED
+    print(f"Game output: {log}", flush=True)
+    return process.wait()
+
+
+def run_headless(argv):
+    parser = argparse.ArgumentParser(
+        prog="Brute Force.cmd",
+        description="Set up or start Brute Force without the launcher window, for other launchers.",
+    )
+    mode = parser.add_mutually_exclusive_group(required=True)
+    mode.add_argument(
+        "--prepare", action="store_true",
+        help="set the game up without prompts and print progress lines",
+    )
+    mode.add_argument(
+        "--play", action="store_true", help="start the game with the saved launcher settings",
+    )
+    parser.add_argument(
+        "--game", metavar="XISO",
+        help="with --prepare: the disc image; omit to reuse the files already extracted",
+    )
+    parser.add_argument("--config", choices=("Release", "Debug", "RelWithDebInfo"))
+    parser.add_argument(
+        "--log", metavar="FILE", type=Path,
+        help="with --play: write the game's output here instead of its boot directory",
+    )
+    args = parser.parse_args(argv)
+    if args.prepare:
+        if args.log is not None:
+            parser.error("--log is only used with --play")
+        command = ["prepare", "--config", args.config or "Release"]
+        if args.game:
+            command += ["--disc", args.game]
+        return build.main(command)
+    if args.game is not None:
+        parser.error("--game is only used with --prepare")
+    return play(args.config, args.log)
+
+
+def main(argv=None):
+    argv = sys.argv[1:] if argv is None else argv
+    if argv:
+        return run_headless(argv)
     root = tk.Tk()
     try:
         path = settings_path()

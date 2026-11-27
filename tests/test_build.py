@@ -4,6 +4,7 @@ import json
 from pathlib import Path
 import struct
 import sys
+import time
 from types import SimpleNamespace
 
 import pytest
@@ -647,3 +648,158 @@ def test_run_cli_passes_graphics_tutorial_audio_and_isolation_options(monkeypatc
         ("Release", False, True, False, Path("fresh"), False, "default"),
         ("Release", False, False, False, None, False, "ltcg"),
     ]
+
+
+def stub_prepare_stages(monkeypatch, calls, generation_ok=True):
+    monkeypatch.setattr(build, "check_build_tools", lambda: calls.append("tools"))
+    monkeypatch.setattr(build, "setup_toolkit", lambda: calls.append("toolkit"))
+    monkeypatch.setattr(build, "setup_dependencies", lambda: calls.append("dependencies"))
+    monkeypatch.setattr(build, "extract_disc", lambda disc: calls.append(("extract", disc)))
+    monkeypatch.setattr(build, "generate", lambda: calls.append("generate"))
+    monkeypatch.setattr(
+        build, "build", lambda config, parallel: calls.append(("build", config, parallel))
+    )
+
+    def latest():
+        calls.append("latest")
+        if not generation_ok:
+            raise build.BuildError("Latest generation does not match")
+        return Path("run"), Path("gen")
+
+    monkeypatch.setattr(build, "latest_generation", latest)
+
+
+def progress_lines(output):
+    lines = [line for line in output.splitlines() if line.startswith("progress ")]
+    fractions = [float(line.split()[1]) for line in lines]
+    assert fractions == sorted(fractions) and fractions[0] == 0 and fractions[-1] == 1
+    return lines
+
+
+def test_prepare_extracts_the_disc_and_regenerates_only_when_stale(monkeypatch, capsys):
+    monkeypatch.delenv("RECOMPLAUNCHER", raising=False)
+    calls = []
+    stub_prepare_stages(monkeypatch, calls, generation_ok=False)
+    assert build.main(["prepare", "--disc", "F:/disc.iso"]) == 0
+    assert calls == [
+        "tools", "toolkit", "dependencies", ("extract", "F:/disc.iso"), "latest", "generate",
+        ("build", "Release", 4),
+    ]
+    assert progress_lines(capsys.readouterr().out)[-1] == "progress 1.00 Ready to play"
+
+    calls.clear()
+    stub_prepare_stages(monkeypatch, calls, generation_ok=True)
+    assert build.main(["prepare", "--disc", "F:/disc.iso", "--parallel", "8"]) == 0
+    assert "generate" not in calls and calls[-1] == ("build", "Release", 8)
+    assert "up to date" in capsys.readouterr().out
+
+
+def test_prepare_without_a_disc_reuses_verified_files(tmp_path, monkeypatch, capsys):
+    monkeypatch.delenv("RECOMPLAUNCHER", raising=False)
+    calls = []
+    stub_prepare_stages(monkeypatch, calls)
+    monkeypatch.setattr(build, "GAME_DIR", tmp_path)
+    monkeypatch.setattr(build, "load_json", lambda path: {})
+    verified = []
+    monkeypatch.setattr(build, "verify_xbe", lambda path, fingerprint: verified.append(path))
+    assert build.main(["prepare"]) == 0
+    assert verified == [tmp_path / "default.xbe"]
+    assert not any(isinstance(call, tuple) and call[0] == "extract" for call in calls)
+    progress_lines(capsys.readouterr().out)
+
+    def missing(path, fingerprint):
+        raise build.BuildError(f"Game executable not found: {path}")
+
+    monkeypatch.setattr(build, "verify_xbe", missing)
+    calls.clear()
+    assert build.main(["prepare"]) == 1
+    error = capsys.readouterr().err.strip().splitlines()[-1]
+    assert error.endswith("Pick your disc image again.")
+    assert "toolkit" in calls and "latest" not in calls
+
+
+def test_prepare_names_every_missing_build_tool(monkeypatch, capsys):
+    monkeypatch.setattr(build.shutil, "which", lambda name: None)
+    monkeypatch.setattr(build, "visual_studio_installed", lambda: False)
+
+    def no_capstone():
+        raise build.BuildError("Install the packages in tools\\requirements.txt first")
+
+    monkeypatch.setattr(build, "check_python_dependencies", no_capstone)
+    monkeypatch.setattr(build, "setup_toolkit", lambda: pytest.fail("set up without tools"))
+    assert build.main(["prepare", "--disc", "F:/disc.iso"]) == 1
+    error = capsys.readouterr().err.strip().splitlines()[-1]
+    for name in ("Git", "CMake", "Visual Studio 2022", "requirements.txt", "set the game up again"):
+        assert name in error
+
+
+def test_build_tools_check_accepts_a_complete_toolchain(monkeypatch):
+    monkeypatch.setattr(build.shutil, "which", lambda name: f"C:/bin/{name}.exe")
+    monkeypatch.setattr(build, "visual_studio_installed", lambda: True)
+    monkeypatch.setattr(build, "check_python_dependencies", lambda: None)
+    build.check_build_tools()
+
+
+def test_visual_studio_check_uses_vswhere(tmp_path, monkeypatch):
+    monkeypatch.setenv("ProgramFiles(x86)", str(tmp_path))
+    assert build.visual_studio_installed() is False
+    vswhere = tmp_path / "Microsoft Visual Studio" / "Installer" / "vswhere.exe"
+    vswhere.parent.mkdir(parents=True)
+    vswhere.write_bytes(b"")
+    seen = []
+
+    def run(command, **kwargs):
+        seen.append(command)
+        return SimpleNamespace(returncode=0, stdout=seen_output.pop(0))
+
+    seen_output = ["C:/VS/BuildTools\n", ""]
+    monkeypatch.setattr(build.subprocess, "run", run)
+    assert build.visual_studio_installed() is True
+    assert build.visual_studio_installed() is False
+    assert seen[0][0] == str(vswhere)
+    assert build.VISUAL_STUDIO_VERSIONS in seen[0]
+
+
+def test_launcher_prepare_moves_only_stale_pinned_downloads_aside(tmp_path, monkeypatch):
+    current = tmp_path / ".deps" / "vulkan-headers"
+    stale = tmp_path / ".deps" / "xboxrecomp"
+    for path in (current, stale):
+        path.mkdir(parents=True)
+        (path / "marker").write_text(path.name, encoding="utf-8")
+
+    def verify(path):
+        if path.name == "xboxrecomp":
+            raise build.ToolkitError("Unexpected xboxrecomp revision")
+        return path
+
+    build.retire_stale_dependency(current, verify)
+    build.retire_stale_dependency(stale, verify)
+    build.retire_stale_dependency(tmp_path / ".deps" / "dxc", verify)
+    assert (current / "marker").is_file()
+    assert not stale.exists()
+    moved = list((tmp_path / ".deps" / "stale").iterdir())
+    assert len(moved) == 1 and moved[0].name.startswith("xboxrecomp-")
+    assert (moved[0] / "marker").read_text(encoding="utf-8") == "xboxrecomp"
+
+
+def test_prepare_retires_stale_downloads_only_under_a_launcher(monkeypatch):
+    calls = []
+    stub_prepare_stages(monkeypatch, calls)
+    monkeypatch.setattr(
+        build, "retire_stale_dependency", lambda path, verify: calls.append(("retire", path.name))
+    )
+    monkeypatch.delenv("RECOMPLAUNCHER", raising=False)
+    build.prepare("F:/disc.iso")
+    assert not any(isinstance(call, tuple) and call[0] == "retire" for call in calls)
+    monkeypatch.setenv("RECOMPLAUNCHER", "1")
+    calls.clear()
+    build.prepare("F:/disc.iso")
+    assert calls[1:4] == [("retire", "xboxrecomp"), ("retire", "vulkan-headers"), ("retire", "dxc")]
+
+
+def test_heartbeat_repeats_progress_during_long_stages(capsys):
+    with build.heartbeat(0.3, "Recompiling", interval=0.01):
+        time.sleep(0.1)
+    lines = capsys.readouterr().out.splitlines()
+    assert lines[0] == "progress 0.30 Recompiling"
+    assert len(lines) > 1 and all(line.startswith("progress 0.30 Recompiling (") for line in lines[1:])

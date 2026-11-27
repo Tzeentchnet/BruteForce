@@ -3,21 +3,28 @@
 
 import argparse
 from collections import deque
+from contextlib import contextmanager
 import hashlib
 import importlib.metadata
 import json
 import os
 from pathlib import Path, PureWindowsPath
 import re
+import shutil
 import subprocess
 import sys
+import threading
 import time
 import uuid
 
 from toolkit import (
-    ROOT, TOOLKIT_BASE, TOOLKIT_TREE, ToolkitError, codegen_tree, setup_toolkit, verify_toolkit,
+    ROOT, TOOLKIT_BASE, TOOLKIT_DIR, TOOLKIT_TREE, ToolkitError, codegen_tree, setup_toolkit,
+    verify_toolkit,
 )
-from dependencies import DependencyError, setup_dependencies, verify_dependencies
+from dependencies import (
+    DXC_DIR, VULKAN_HEADERS_DIR, DependencyError, setup_dependencies, verify_dependencies,
+    verify_dxc, verify_vulkan_headers,
+)
 
 
 GAME_DIR = ROOT / "game" / "disc"
@@ -635,6 +642,119 @@ def run_game(config="Release", graphics=False, experimental_tutorial=False,
     return subprocess.run(command, cwd=boot_dir, env=env, check=False).returncode
 
 
+# Windowless setup for launchers such as RecompLauncher. It prints
+# "progress <0..1> <text>" lines, never prompts, and ends a failure with one
+# line the player can act on.
+HEARTBEAT_SECONDS = 300
+VISUAL_STUDIO_VERSIONS = "[17.5,18.0)"
+BUILD_TOOLS_HINT = "Install them, then set the game up again. The README's Quick start lists them."
+
+
+def report_progress(fraction, text):
+    print(f"progress {fraction:.2f} {text}", flush=True)
+
+
+@contextmanager
+def heartbeat(fraction, text, interval=HEARTBEAT_SECONDS):
+    """Repeat a progress line during long silent stages."""
+    stop = threading.Event()
+    started = time.monotonic()
+
+    def beat():
+        while not stop.wait(interval):
+            minutes = int((time.monotonic() - started) // 60)
+            report_progress(fraction, f"{text} ({minutes} min so far)")
+
+    report_progress(fraction, text)
+    thread = threading.Thread(target=beat, daemon=True)
+    thread.start()
+    try:
+        yield
+    finally:
+        stop.set()
+        thread.join()
+
+
+def visual_studio_installed():
+    program_files = os.environ.get("ProgramFiles(x86)", r"C:\Program Files (x86)")
+    vswhere = Path(program_files) / "Microsoft Visual Studio" / "Installer" / "vswhere.exe"
+    if not vswhere.is_file():
+        return False
+    result = subprocess.run(
+        [str(vswhere), "-products", "*", "-version", VISUAL_STUDIO_VERSIONS,
+         "-requires", "Microsoft.VisualStudio.Component.VC.Tools.x86.x64",
+         "-property", "installationPath"],
+        capture_output=True, text=True, stdin=subprocess.DEVNULL, check=False,
+    )
+    return result.returncode == 0 and bool(result.stdout.strip())
+
+
+def check_build_tools():
+    missing = []
+    if shutil.which("git") is None:
+        missing.append("Git")
+    if shutil.which("cmake") is None:
+        missing.append("CMake 3.20 or later")
+    if not visual_studio_installed():
+        missing.append("Visual Studio 2022 Build Tools 17.5 or later with the C++ workload")
+    try:
+        check_python_dependencies()
+    except BuildError:
+        missing.append(
+            f"the Python packages (python -m pip install -r \"{ROOT / 'tools' / 'requirements.txt'}\")"
+        )
+    if missing:
+        raise BuildError(f"Missing: {'; '.join(missing)}. {BUILD_TOOLS_HINT}")
+
+
+def retire_stale_dependency(path, verify):
+    """Move a pinned download that no longer matches this release aside."""
+    path = Path(path)
+    if not path.exists():
+        return
+    try:
+        verify(path)
+        return
+    except (ToolkitError, DependencyError, OSError, subprocess.CalledProcessError):
+        pass
+    stale = path.parent / "stale" / f"{path.name}-{time.strftime('%Y%m%d-%H%M%S')}"
+    stale.parent.mkdir(parents=True, exist_ok=True)
+    path.rename(stale)
+    print(f"Moved the previous {path.name} to {stale}", flush=True)
+
+
+def prepare(disc=None, config="Release", parallel=4):
+    """Set the game up from a disc image, or from the files kept by a previous run."""
+    report_progress(0, "Checking the build tools")
+    check_build_tools()
+    if os.environ.get("RECOMPLAUNCHER") == "1":
+        # A launcher-managed install owns its downloads; an update can change the pins.
+        retire_stale_dependency(TOOLKIT_DIR, verify_toolkit)
+        retire_stale_dependency(VULKAN_HEADERS_DIR, verify_vulkan_headers)
+        retire_stale_dependency(DXC_DIR, verify_dxc)
+    with heartbeat(0.05, "Downloading the pinned framework and build tools"):
+        setup_toolkit()
+        setup_dependencies()
+    if disc:
+        with heartbeat(0.15, "Checking and extracting your disc"):
+            extract_disc(disc)
+    else:
+        report_progress(0.15, "Checking the game files kept from your disc")
+        try:
+            verify_xbe(GAME_DIR / "default.xbe", load_json(FINGERPRINT))
+        except BuildError as exc:
+            raise BuildError(f"{exc}. Pick your disc image again.") from exc
+    try:
+        latest_generation()
+        report_progress(0.6, "The recompiled game code is up to date")
+    except (BuildError, OSError, ValueError, KeyError):
+        with heartbeat(0.3, "Recompiling the game code; this can take a long time"):
+            generate()
+    with heartbeat(0.6, "Building the game; this can take a long time"):
+        build(config, parallel)
+    report_progress(1, "Ready to play")
+
+
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
     commands = parser.add_subparsers(dest="command", required=True)
@@ -654,6 +774,15 @@ def main(argv=None):
         )
         if name == "all":
             command.add_argument("--disc", required=True, help="path to the local XISO")
+    prepare_command = commands.add_parser(
+        "prepare",
+        help="set up without prompts for a launcher: extract, regenerate only when stale, build",
+    )
+    prepare_command.add_argument(
+        "--disc", help="path to the local XISO; omit to reuse the files already extracted",
+    )
+    prepare_command.add_argument("--config", choices=("Release", "Debug", "RelWithDebInfo"), default="Release")
+    prepare_command.add_argument("--parallel", type=int, default=4)
     run = commands.add_parser("run", help="run a previously built executable")
     run.add_argument("--config", choices=("Release", "Debug", "RelWithDebInfo"), default="Release")
     run.add_argument(
@@ -691,6 +820,8 @@ def main(argv=None):
             generate()
         elif args.command == "build":
             build(args.config, args.parallel, args.extra_target, args.compiler_profile)
+        elif args.command == "prepare":
+            prepare(args.disc, args.config, args.parallel)
         elif args.command == "run":
             return run_game(
                 args.config, args.graphics, args.experimental_tutorial, args.experimental_audio,

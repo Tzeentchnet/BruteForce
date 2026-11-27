@@ -1,1 +1,3 @@
 *.patch text eol=lf -whitespace
+*.bat text eol=crlf
+*.cmd text eol=crlf

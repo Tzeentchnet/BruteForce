@@ -322,3 +322,155 @@ def test_launcher_reports_save_and_start_failures(tmp_path, monkeypatch):
         assert str(app.play_button["state"]) == "normal"
     finally:
         app.close()
+
+
+@pytest.mark.skipif(sys.platform != "win32", reason="Windows batch launcher")
+def test_batch_with_arguments_runs_headless_and_returns_the_exit_code(tmp_path):
+    python = Path(sys.executable).with_name("python.exe")
+    if not python.is_file():
+        pytest.skip("python.exe is unavailable")
+
+    root = tmp_path / "Brute Force (launcher) & co"
+    root.mkdir()
+    shutil.copyfile(ROOT / "Brute Force.cmd", root / "Brute Force.cmd")
+    tools = root / "tools"
+    tools.mkdir()
+    marker = tmp_path / "headless.json"
+    (tools / "launcher.py").write_text(
+        "import json, os, sys\n"
+        "from pathlib import Path\n"
+        "Path(os.environ['BRUTEFORCE_BATCH_TEST_MARKER']).write_text("
+        "json.dumps({'cwd': os.getcwd(), 'argv': sys.argv[1:]}), encoding='utf-8')\n"
+        "sys.exit(7)\n",
+        encoding="utf-8",
+    )
+    env = os.environ.copy()
+    env["PATH"] = str(python.parent) + os.pathsep + env.get("PATH", "")
+    env["BRUTEFORCE_BATCH_TEST_MARKER"] = str(marker)
+    disc = tmp_path / "My Games (USA)" / "Brute Force.iso"
+    result = subprocess.run(
+        [str(root / "Brute Force.cmd"), "--prepare", f"--game={disc}"],
+        cwd=tmp_path, env=env, capture_output=True, text=True, timeout=30,
+    )
+    assert result.returncode == 7, f"{result.stdout}\n{result.stderr}"
+    started = json.loads(marker.read_text(encoding="utf-8"))
+    assert Path(started["cwd"]).resolve() == root.resolve()
+    assert started["argv"] == ["--prepare", f"--game={disc}"]
+
+
+def test_headless_prepare_forwards_to_the_build_setup(monkeypatch):
+    calls = []
+    monkeypatch.setattr(launcher.build, "main", lambda argv: calls.append(argv) or 0)
+    assert launcher.main(["--prepare", r"--game=F:\disc.iso"]) == 0
+    assert launcher.main(["--prepare", "--game="]) == 0
+    assert launcher.main(["--prepare", "--config", "Debug"]) == 0
+    assert calls == [
+        ["prepare", "--config", "Release", "--disc", r"F:\disc.iso"],
+        ["prepare", "--config", "Release"],
+        ["prepare", "--config", "Debug"],
+    ]
+    for argv in (["--play", "--game", "x.iso"], ["--prepare", "--log", "x.log"], ["--unknown"]):
+        with pytest.raises(SystemExit):
+            launcher.main(argv)
+
+
+def test_headless_play_uses_saved_settings_and_waits(tmp_path, monkeypatch):
+    env = {"LOCALAPPDATA": str(tmp_path)}
+    launcher.save_settings(
+        launcher.settings_path(env), {**launcher.DEFAULTS, "config": "Debug", "vsync": "0"}
+    )
+    calls = {}
+
+    class Process:
+        def wait(self):
+            return 5
+
+    def start(values, base_env, log_path):
+        calls.update(values=values, base_env=base_env, log_path=log_path)
+        return Process(), log_path
+
+    monkeypatch.setattr(launcher, "start_game", start)
+    log = tmp_path / "data" / "logs" / "bruteforce.log"
+    assert launcher.play("Release", log, env) == 5
+    assert calls["values"]["config"] == "Release"
+    assert calls["values"]["vsync"] == "0"
+    assert calls["log_path"] == log
+    assert launcher.play(None, None, env) == 5
+    assert calls["values"]["config"] == "Debug"
+
+
+class SimpleProcess:
+    def wait(self):
+        return 0
+
+
+def test_headless_play_without_a_settings_file_uses_defaults(tmp_path, monkeypatch):
+    seen = []
+    monkeypatch.setattr(
+        launcher, "start_game",
+        lambda values, base_env, log_path: (seen.append(values) or SimpleProcess(), log_path),
+    )
+    assert launcher.play(None, None, {"LOCALAPPDATA": str(tmp_path)}) == 0
+    assert seen == [launcher.DEFAULTS]
+
+
+def test_headless_play_reports_start_and_settings_failures(tmp_path, monkeypatch, capsys):
+    env = {"LOCALAPPDATA": str(tmp_path)}
+
+    def missing_build(**kwargs):
+        raise launcher.build.BuildError("No Release executable; run the build command first")
+
+    monkeypatch.setattr(launcher.build, "prepare_game_run", missing_build)
+    assert launcher.play("Release", None, env) == launcher.PLAY_START_FAILED
+    assert "No Release executable" in capsys.readouterr().err
+
+    launcher.save_settings(
+        launcher.settings_path(env), {**launcher.DEFAULTS, "resolution": "2.25", "stencil_alias": "1"}
+    )
+    assert launcher.play("Release", None, env) == launcher.PLAY_SETTINGS_INVALID
+    assert "cannot be combined" in capsys.readouterr().err
+
+    launcher.settings_path(env).write_text("{", encoding="utf-8")
+    assert launcher.play("Release", None, env) == launcher.PLAY_SETTINGS_INVALID
+
+
+def test_start_writes_output_to_a_requested_log(tmp_path, monkeypatch):
+    boot = tmp_path / "boot"
+    boot.mkdir()
+    monkeypatch.setattr(
+        launcher.build, "prepare_game_run", lambda **kwargs: (["game.exe"], boot, {})
+    )
+    monkeypatch.setattr(launcher.subprocess, "Popen", lambda *args, **kwargs: "process")
+    log = tmp_path / "recompdata" / "logs" / "bruteforce.log"
+    log.parent.mkdir(parents=True)
+    log.write_text("previous run\n", encoding="utf-8")
+    assert launcher.start_game({}, {}, log) == ("process", log)
+    assert log.read_text(encoding="utf-8") == "Brute Force launcher: game stdout and stderr\n"
+    assert not (boot / "launcher.log").exists()
+
+
+def test_recomplauncher_settings_match_the_launcher():
+    manifest = json.loads((ROOT / "recomplauncher.json").read_text(encoding="utf-8"))
+    config = manifest["config"][0]
+    assert config["format"] == "json"
+    assert config["file"] == [{"path": "{local}/BruteForce/settings.json"}]
+    assert json.loads(config["new"]["version"]) == launcher.SETTINGS_VERSION
+    written = {}
+    for setting in manifest["settings"]:
+        for choice in setting["choices"]:
+            for key, value in choice["set"].items():
+                written.setdefault(key, set()).add(json.loads(value))
+        for key, value in {**setting.get("defaults", {}), **setting.get("when", {})}.items():
+            name = key.removeprefix("settings/")
+            assert json.loads(value) in dict(launcher.BY_KEY[name].choices), key
+    for setting in manifest["settings"]:
+        for key, value in setting.get("defaults", {}).items():
+            if any(key in choice["set"] for choice in setting["choices"]):
+                assert json.loads(value) == launcher.BY_KEY[key.removeprefix("settings/")].default
+    for key, values in written.items():
+        assert key.startswith("settings/")
+        setting = launcher.BY_KEY[key.removeprefix("settings/")]
+        assert values == set(dict(setting.choices)), key
+    assert {key.removeprefix("settings/") for key in written} == set(launcher.BY_KEY) - {"config"}
+    code = str(launcher.PLAY_START_FAILED), str(launcher.PLAY_SETTINGS_INVALID)
+    assert set(code) <= set(manifest["exit_codes"])

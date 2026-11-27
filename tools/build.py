@@ -35,6 +35,9 @@ FINGERPRINT = ROOT / "fingerprints" / "retail.json"
 SEED_FUNCTIONS = ROOT / "fingerprints" / "retail-seeds.json"
 MANUAL_SOURCE = ROOT / "src" / "recomp_manual.c"
 CHUNK_SIZE = 1024 * 1024
+TITLE_ID = "4d53001e"
+# Earlier releases left saves in the framework's shared default folder.
+PREVIOUS_SAVE_FOLDER = "xboxrecomp"
 
 
 class BuildError(Exception):
@@ -561,6 +564,89 @@ def build(config="Release", parallel=4, extra_targets=(), compiler_profile="defa
     print(f"Built: {executable}", flush=True)
 
 
+def data_dir(env=None):
+    """The one folder for settings, saves, caches and logs.
+
+    BRUTEFORCE_DATA wins, then RECOMPLAUNCHER_DATA (set by RecompLauncher),
+    then %LOCALAPPDATA%\\BruteForce.
+    """
+    env = os.environ if env is None else env
+    for name in ("BRUTEFORCE_DATA", "RECOMPLAUNCHER_DATA"):
+        if env.get(name):
+            return Path(env[name]).resolve()
+    local_app_data = env.get("LOCALAPPDATA")
+    if not local_app_data:
+        raise BuildError("LOCALAPPDATA is not set; set BRUTEFORCE_DATA to a data folder")
+    return Path(local_app_data) / "BruteForce"
+
+
+def data_paths(root):
+    root = Path(root)
+    return {
+        "settings": root / "settings.json",
+        "saves": root / "saves",
+        "console": root / "cache" / "console",
+        "shader_cache": root / "cache" / "shader-cache",
+        "logs": root / "logs",
+    }
+
+
+def adopt_previous_data(root, env=None):
+    """Copy saves from earlier locations and move the old shader cache, once."""
+    env = os.environ if env is None else env
+    paths = data_paths(root)
+    local_app_data = env.get("LOCALAPPDATA")
+    sources = []
+    if local_app_data:
+        # The default data folder (for a launcher's own folder), then the old location.
+        sources = [
+            data_paths(Path(local_app_data) / "BruteForce")["saves"],
+            Path(local_app_data) / PREVIOUS_SAVE_FOLDER,
+        ]
+    for kind in ("UDATA", "TDATA"):
+        destination = paths["saves"] / kind / TITLE_ID
+        if destination.exists():
+            continue
+        for source_root in sources:
+            source = source_root / kind / TITLE_ID
+            if not source.is_dir() or source.resolve() == destination.resolve():
+                continue
+            partial = destination.with_name(f"{destination.name}.{uuid.uuid4().hex}.tmp")
+            shutil.copytree(source, partial)
+            partial.rename(destination)
+            print(f"Copied {kind} saves from {source} to {destination}", flush=True)
+            break
+    old_cache = Path(root) / "shader-cache"
+    if old_cache.is_dir() and not paths["shader_cache"].exists():
+        paths["shader_cache"].parent.mkdir(parents=True, exist_ok=True)
+        old_cache.rename(paths["shader_cache"])
+
+
+def configure_data_dir(env):
+    """Point saves and the shader cache into the data folder unless already set."""
+    root = data_dir(env)
+    paths = data_paths(root)
+    saves_configured = env.get("BRUTEFORCE_SAVE_ROOT") or env.get("RECOMP_SAVE_DIR")
+    if not saves_configured:
+        adopt_previous_data(root, env)
+        paths["saves"].mkdir(parents=True, exist_ok=True)
+        if str(paths["saves"]).isascii():
+            # Partition images and the cache drives go under cache\, saves alone
+            # under saves\. RECOMP_SAVE_DIR is read as a narrow string, so only
+            # an ASCII path survives it.
+            paths["console"].mkdir(parents=True, exist_ok=True)
+            env["BRUTEFORCE_SAVE_ROOT"] = str(paths["console"])
+            env["RECOMP_SAVE_DIR"] = str(paths["saves"])
+        else:
+            # BRUTEFORCE_SAVE_ROOT is read as Unicode and also holds the saves.
+            env["BRUTEFORCE_SAVE_ROOT"] = str(paths["saves"])
+            env.pop("RECOMP_SAVE_DIR", None)
+    if not env.get("RECOMP_GPU_PSCACHE_DIR"):
+        paths["shader_cache"].mkdir(parents=True, exist_ok=True)
+        env["RECOMP_GPU_PSCACHE_DIR"] = str(paths["shader_cache"])
+    return root
+
+
 def prepare_game_run(config="Release", graphics=False, experimental_tutorial=False,
                      experimental_audio=False, isolated_saves=None, base_env=None,
                      no_audio=False, compiler_profile="default"):
@@ -615,6 +701,8 @@ def prepare_game_run(config="Release", graphics=False, experimental_tutorial=Fal
         env["BRUTEFORCE_SAVE_ROOT"] = str(save_root)
         # The host derives RECOMP_SAVE_DIR from the wide path as UTF-8.
         env.pop("RECOMP_SAVE_DIR", None)
+    else:
+        print(f"Data folder: {configure_data_dir(env)}", flush=True)
     if graphics or experimental_tutorial:
         env.update({
             "RECOMP_PB_EXEC": "1",

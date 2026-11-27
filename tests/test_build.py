@@ -526,6 +526,9 @@ def test_run_isolates_each_runtime_working_directory(tmp_path, monkeypatch):
     )
     monkeypatch.setattr(build, "BUILD_DIR", build_dir)
     calls = []
+    data = tmp_path / "data"
+    monkeypatch.setenv("BRUTEFORCE_DATA", str(data))
+    monkeypatch.delenv("RECOMP_GPU_PSCACHE_DIR", raising=False)
     monkeypatch.setenv("RECOMP_D3D_PRESENT", "0")
     monkeypatch.setenv("RECOMP_VBLANK", "0")
     for name in (
@@ -595,6 +598,12 @@ def test_run_isolates_each_runtime_working_directory(tmp_path, monkeypatch):
     assert calls[9][2]["RECOMP_ZERO_DELAY_SLEEP"] == "0"
     assert all("RECOMP_AC97_READY" not in calls[i][2] for i in range(5))
     assert calls[5][2]["RECOMP_AC97_READY"] == "existing"
+    assert all(
+        calls[i][2]["BRUTEFORCE_SAVE_ROOT"] == str(data / "cache" / "console")
+        and calls[i][2]["RECOMP_SAVE_DIR"] == str(data / "saves")
+        and calls[i][2]["RECOMP_GPU_PSCACHE_DIR"] == str(data / "cache" / "shader-cache")
+        for i in range(7)
+    )
     assert calls[7][2]["BRUTEFORCE_SAVE_ROOT"] == "previous partition root"
     assert calls[7][2]["RECOMP_SAVE_DIR"] == "previous user-data root"
     assert calls[8][2]["BRUTEFORCE_SAVE_ROOT"] == str(save_root.resolve())
@@ -803,3 +812,86 @@ def test_heartbeat_repeats_progress_during_long_stages(capsys):
     lines = capsys.readouterr().out.splitlines()
     assert lines[0] == "progress 0.30 Recompiling"
     assert len(lines) > 1 and all(line.startswith("progress 0.30 Recompiling (") for line in lines[1:])
+
+
+def test_data_folder_prefers_explicit_then_launcher_then_local_app_data(tmp_path):
+    local = tmp_path / "local"
+    assert build.data_dir({"LOCALAPPDATA": str(local)}) == local / "BruteForce"
+    launcher_data = tmp_path / "recompdata"
+    env = {"LOCALAPPDATA": str(local), "RECOMPLAUNCHER_DATA": str(launcher_data)}
+    assert build.data_dir(env) == launcher_data.resolve()
+    env["BRUTEFORCE_DATA"] = str(tmp_path / "portable")
+    assert build.data_dir(env) == (tmp_path / "portable").resolve()
+    with pytest.raises(build.BuildError, match="BRUTEFORCE_DATA"):
+        build.data_dir({})
+
+
+def write_title_saves(root, marker):
+    for kind in ("UDATA", "TDATA"):
+        folder = root / kind / build.TITLE_ID
+        folder.mkdir(parents=True)
+        (folder / "save.bin").write_text(f"{marker} {kind}", encoding="utf-8")
+
+
+def test_data_folder_adopts_previous_saves_and_shader_cache_once(tmp_path, capsys):
+    local = tmp_path / "local"
+    write_title_saves(local / "xboxrecomp", "previous")
+    (local / "xboxrecomp" / "UDATA" / "other-title").mkdir()
+    old_cache = local / "BruteForce" / "shader-cache"
+    old_cache.mkdir(parents=True)
+    (old_cache / "ps_1.bin").write_bytes(b"shader")
+    env = {"LOCALAPPDATA": str(local)}
+
+    root = build.configure_data_dir(env)
+    assert root == local / "BruteForce"
+    saves = root / "saves"
+    for kind in ("UDATA", "TDATA"):
+        copied = saves / kind / build.TITLE_ID / "save.bin"
+        assert copied.read_text(encoding="utf-8") == f"previous {kind}"
+        assert (local / "xboxrecomp" / kind / build.TITLE_ID / "save.bin").is_file()
+    assert not (saves / "UDATA" / "other-title").exists()
+    assert (root / "cache" / "shader-cache" / "ps_1.bin").read_bytes() == b"shader"
+    assert not old_cache.exists()
+    assert env["BRUTEFORCE_SAVE_ROOT"] == str(root / "cache" / "console")
+    assert env["RECOMP_SAVE_DIR"] == str(saves)
+    assert env["RECOMP_GPU_PSCACHE_DIR"] == str(root / "cache" / "shader-cache")
+    assert (root / "cache" / "console").is_dir()
+    assert capsys.readouterr().out.count("Copied") == 2
+
+    (saves / "UDATA" / build.TITLE_ID / "save.bin").write_text("newer", encoding="utf-8")
+    build.configure_data_dir({"LOCALAPPDATA": str(local)})
+    assert (saves / "UDATA" / build.TITLE_ID / "save.bin").read_text(encoding="utf-8") == "newer"
+    assert "Copied" not in capsys.readouterr().out
+
+
+def test_launcher_data_folder_copies_saves_from_the_default_data_folder(tmp_path):
+    local = tmp_path / "local"
+    write_title_saves(local / "BruteForce" / "saves", "default")
+    write_title_saves(local / "xboxrecomp", "older")
+    recompdata = tmp_path / "install" / "recompdata"
+    env = {"LOCALAPPDATA": str(local), "RECOMPLAUNCHER_DATA": str(recompdata)}
+    assert build.configure_data_dir(env) == recompdata.resolve()
+    copied = recompdata / "saves" / "UDATA" / build.TITLE_ID / "save.bin"
+    assert copied.read_text(encoding="utf-8") == "default UDATA"
+
+
+def test_data_folder_respects_explicit_save_and_cache_settings(tmp_path):
+    env = {
+        "BRUTEFORCE_DATA": str(tmp_path / "data"),
+        "RECOMP_SAVE_DIR": "chosen saves",
+        "RECOMP_GPU_PSCACHE_DIR": "chosen cache",
+    }
+    build.configure_data_dir(env)
+    assert env["RECOMP_SAVE_DIR"] == "chosen saves"
+    assert "BRUTEFORCE_SAVE_ROOT" not in env
+    assert env["RECOMP_GPU_PSCACHE_DIR"] == "chosen cache"
+    assert not (tmp_path / "data" / "saves").exists()
+
+
+def test_non_ascii_data_folder_keeps_saves_under_the_unicode_root(tmp_path):
+    root = tmp_path / "José"
+    env = {"BRUTEFORCE_DATA": str(root), "RECOMP_SAVE_DIR": ""}
+    build.configure_data_dir(env)
+    assert env["BRUTEFORCE_SAVE_ROOT"] == str(root.resolve() / "saves")
+    assert "RECOMP_SAVE_DIR" not in env
+    assert (root / "saves").is_dir()

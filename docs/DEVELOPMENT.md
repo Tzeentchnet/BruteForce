@@ -16,13 +16,13 @@ option recording have a focused selection:
 python -m pytest -q tests\test_build.py tests\test_bench_performance.py
 ```
 
-The RecompLauncher setup and play modes, the batch file's argument path, and
-the agreement between `recomplauncher.json` settings and the launcher's
-choices have a focused selection. The batch tests need Windows:
+The RecompLauncher setup and play modes, the batch file's argument path, the
+data folder, and the agreement between `recomplauncher.json` settings and the
+launcher's choices have a focused selection. The batch tests need Windows:
 
 ```powershell
 python -m pytest -q tests\test_build.py tests\test_launcher.py `
-  -k "prepare or build_tools or visual_studio or stale or heartbeat or headless or recomplauncher or requested_log"
+  -k "prepare or build_tools or visual_studio or stale or heartbeat or headless or recomplauncher or requested_log or data_folder or settings_follow"
 ```
 
 To validate `recomplauncher.json` itself, check it against the published

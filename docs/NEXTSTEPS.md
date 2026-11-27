@@ -573,10 +573,10 @@ These are synthetic results, not a title comparison.
   settings page and Play, then submit the project to the catalog and point the
   README badge at its game page. Add Redump sizes and CRC32s to the manifest's
   `dumps` only after verifying them against Redump. Larger gaps against the
-  Recomp Standards: accept an extracted game folder besides disc images, keep
-  saves, settings, logs and the shader cache under one data folder
-  (`RECOMPLAUNCHER_DATA`), and start through a native executable so the
-  launcher's ReShade looks can be enabled.
+  Recomp Standards: accept an extracted game folder besides disc images, and
+  start through a native executable so the launcher's ReShade looks can be
+  enabled. The executable started directly still uses the framework's save
+  defaults rather than the [data folder](USER_GUIDE.md#data-folder).
 - The current-generation guest surface-read diagnostic is complete; see
   [COMPLETED](COMPLETED.md#d-pipeline-and-compatibility). Treat it as a requirement to retain readback, not proof
   of a live title surface read, and do not repeat it unless its live

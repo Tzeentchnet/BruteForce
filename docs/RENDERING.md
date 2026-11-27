@@ -1204,8 +1204,10 @@ are interpolated affinely while texture coordinates are perspective-correct.
 The backend caches shader and D3D11 state objects.
 
 The optional persistent **combiner pixel-shader** cache is separate from the
-texture cache. `RECOMP_GPU_PSCACHE=1` stores validated bytecode under
-`%LOCALAPPDATA%\BruteForce\shader-cache` by default, keyed by generated
+texture cache. `RECOMP_GPU_PSCACHE=1` stores validated bytecode under the data folder's
+`cache\shader-cache` when launched through `build.py` or a launcher, and
+under `%LOCALAPPDATA%\BruteForce\shader-cache` when the executable is started
+directly, keyed by generated
 source, compiler binary and compilation inputs. It is off by default; other
 shader types are not covered. Cache errors are logged and compiled shaders
 can still run. See the [launcher and cache findings](./FINDINGS.md#launcher-and-pixel-shader-cache).

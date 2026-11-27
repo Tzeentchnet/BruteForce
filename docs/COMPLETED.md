@@ -549,6 +549,17 @@ long-session acceptance remain open.
   focused tests are listed in [DEVELOPMENT](DEVELOPMENT.md#tests). No release
   has been published, and RecompLauncher itself has not installed or run a
   release; open follow-ups are in [NEXTSTEPS](NEXTSTEPS.md#d-remaining-pipeline-and-compatibility-work).
+- Settings, saves, caches and the headless play log were moved into one
+  [data folder](USER_GUIDE.md#data-folder) on 2026-11-26:
+  `%LOCALAPPDATA%\BruteForce`, `BRUTEFORCE_DATA`, or RecompLauncher's
+  `RECOMPLAUNCHER_DATA`. Launches copy saves from the earlier
+  `%LOCALAPPDATA%\xboxrecomp` once and leave the originals. On the retail
+  generation `20261121-005939-bc768cc6`, one `--play --data` run under a
+  25-second watchdog placed the partition images under `cache\console`,
+  resolved UDATA and TDATA under `saves`, wrote its log to `logs`, and logged
+  the same four failed optional-file opens as a run with the previous layout.
+  Synthetic tests cover precedence, the one-time copy, explicit overrides and
+  the non-ASCII fallback.
 - The current-generation guest surface-read diagnostic is complete. One
   no-retry null-backend attempt reached 104 stationary flips, completed the
   40.01-second movement phase, resolved two accesses inside an accumulated

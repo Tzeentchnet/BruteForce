@@ -474,3 +474,33 @@ def test_recomplauncher_settings_match_the_launcher():
     assert {key.removeprefix("settings/") for key in written} == set(launcher.BY_KEY) - {"config"}
     code = str(launcher.PLAY_START_FAILED), str(launcher.PLAY_SETTINGS_INVALID)
     assert set(code) <= set(manifest["exit_codes"])
+
+
+def test_settings_follow_the_data_folder(tmp_path):
+    env = {"LOCALAPPDATA": str(tmp_path / "local"), "RECOMPLAUNCHER_DATA": str(tmp_path / "recompdata")}
+    assert launcher.settings_path(env) == (tmp_path / "recompdata").resolve() / "settings.json"
+    env["BRUTEFORCE_DATA"] = str(tmp_path / "portable")
+    assert launcher.settings_path(env) == (tmp_path / "portable").resolve() / "settings.json"
+
+
+def test_headless_play_logs_to_the_data_folder_by_default(tmp_path, monkeypatch):
+    seen = []
+    monkeypatch.setattr(
+        launcher, "start_game",
+        lambda values, base_env, log_path: (seen.append(log_path) or SimpleProcess(), log_path),
+    )
+    assert launcher.play(None, None, {"BRUTEFORCE_DATA": str(tmp_path / "data")}) == 0
+    assert seen == [(tmp_path / "data").resolve() / "logs" / "bruteforce.log"]
+
+
+def test_headless_data_option_sets_the_data_folder_for_play_only(tmp_path, monkeypatch):
+    calls = []
+    monkeypatch.setattr(
+        launcher, "play", lambda config, log, env: calls.append((config, log, env)) or 0
+    )
+    assert launcher.main(["--play", "--data", str(tmp_path / "recompdata")]) == 0
+    assert launcher.main(["--play"]) == 0
+    assert calls[0][2]["BRUTEFORCE_DATA"] == str((tmp_path / "recompdata").resolve())
+    assert calls[1][2] is None
+    with pytest.raises(SystemExit):
+        launcher.main(["--prepare", "--data", str(tmp_path)])

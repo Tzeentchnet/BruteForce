@@ -193,11 +193,42 @@ window. To isolate the alias's effect, leave shared GPU presentation and
 other options unchanged; set the alias option back to Off to restore the
 previous behavior. It has no effect on the CPU renderer.
 
-Settings are saved to `%LOCALAPPDATA%\BruteForce\settings.json` on Save or
-Play. The chosen values override the corresponding environment variables for
+Settings are saved to `settings.json` in the [data folder](#data-folder) on
+Save or Play. The chosen values override the corresponding environment variables for
 the launched process only; unrelated environment variables are inherited.
 An invalid settings file is reported and left unchanged. Choose the build
 configuration that matches the most recent build.
+
+## Data folder
+
+Settings, saves, caches and the headless play log share one folder. It is
+`%LOCALAPPDATA%\BruteForce` unless `BRUTEFORCE_DATA` names another folder;
+when RecompLauncher starts the game, `RECOMPLAUNCHER_DATA` (its `recompdata`
+folder inside the game's install folder) is used instead.
+`Brute Force.cmd --play --data <folder>` sets it for one run.
+
+| Path | Contents |
+| --- | --- |
+| `settings.json` | Launcher settings |
+| `saves\UDATA\4d53001e`, `saves\TDATA\4d53001e` | Game saves and title data |
+| `cache\console` | Sparse console hard-disk partition images and the cache drives |
+| `cache\shader-cache` | The optional persistent pixel-shader cache |
+| `logs\bruteforce.log` | The game's output from the last `--play` run |
+
+Launches through the launcher window, `--play` and `build.py run` use this
+folder. `--isolated-saves`, or a `BRUTEFORCE_SAVE_ROOT`, `RECOMP_SAVE_DIR` or
+`RECOMP_GPU_PSCACHE_DIR` set before launch, takes precedence for its part.
+Starting `bruteforce.exe` directly keeps the framework's defaults.
+
+On the first launch, saves that are not yet in the data folder are copied
+from `%LOCALAPPDATA%\BruteForce\saves` or the earlier location
+`%LOCALAPPDATA%\xboxrecomp`. The originals are left in place; once the
+game runs from the new folder, delete `%LOCALAPPDATA%\xboxrecomp` yourself
+if no other xboxrecomp title uses it. An earlier
+`%LOCALAPPDATA%\BruteForce\shader-cache` is moved to `cache\shader-cache`.
+`RECOMP_SAVE_DIR` is read as a narrow string, so when the data folder's path
+is not plain ASCII, the partition images and cache drives are kept in
+`saves` as well.
 
 ## RecompLauncher
 
@@ -224,18 +255,19 @@ Both launcher steps run `Brute Force.cmd` with arguments. Without arguments,
   a pinned download in `.deps` that no longer matches the release is moved to
   `.deps\stale` rather than stopping setup; outside the launcher, setup still
   refuses to replace it.
-- **Play:** `Brute Force.cmd --play --config Release --log <file>` starts the
-  same tutorial configuration as the launcher window with the saved settings
-  and waits for the game to close, returning its exit code. It writes the
-  game's output to `--log` instead of the boot directory. Exit code 120 means
-  the build is missing or stale, and 121 means the saved settings are invalid
-  or conflict.
+- **Play:** `Brute Force.cmd --play --config Release --data <folder>` starts
+  the same tutorial configuration as the launcher window with the saved
+  settings and waits for the game to close, returning its exit code. It
+  writes the game's output to `logs\bruteforce.log` in the data folder, or to
+  `--log <file>`. Exit code 120 means the build is missing or stale, and 121
+  means the saved settings are invalid or conflict.
 
-RecompLauncher shows the launcher settings on the game's page by editing
-`%LOCALAPPDATA%\BruteForce\settings.json`, the same file the launcher window
-uses; the build configuration is not shown. It backs up saves from
-`%LOCALAPPDATA%\xboxrecomp\UDATA\4d53001e` and `TDATA\4d53001e`. Its
-ReShade looks are turned off because the game starts through a script.
+RecompLauncher passes its own `recompdata` folder as the
+[data folder](#data-folder), so a launcher install keeps its settings, saves,
+caches and logs with the game. It shows the launcher settings on the game's
+page by editing that folder's `settings.json`, without the build
+configuration, and backs up `saves\UDATA\4d53001e` and `saves\TDATA\4d53001e`.
+Its ReShade looks are turned off because the game starts through a script.
 
 Pushing a `v*` tag runs `.github/workflows/release.yml`, which drafts a
 release with `BruteForce-<tag>-Windows-x64.zip`. The zip holds only tracked
@@ -827,7 +859,9 @@ original-hardware validation has been completed.
 `RECOMP_GPU_PSCACHE=1` enables the optional persistent combiner pixel-shader
 cache (also available in the launcher). It is off by default. After a shader
 has compiled successfully, later launches can reuse its bytecode from
-`%LOCALAPPDATA%\BruteForce\shader-cache`; vertex and other shaders still
+`cache\shader-cache` in the [data folder](#data-folder) (or
+`%LOCALAPPDATA%\BruteForce\shader-cache` when the executable is started
+directly); vertex and other shaders still
 compile as before. The key covers the generated HLSL, compiler binary,
 source name, entry point, target, and compile flags. Files have bounded sizes,
 checksums, and atomic replacement. A blocked replacement is retried briefly;
@@ -1512,11 +1546,12 @@ python tools\build.py run --graphics --isolated-saves $save
 `--isolated-saves` requires an existing empty directory and routes both toolkit
 roots to it, overriding inherited root settings for that process only. It
 does not delete the directory; the partition images and diagnostic data remain
-there after the run. Use a new directory for each isolated run. To retain and
-reload progress across runs, deliberately configure a persistent save root
-instead of reusing this fresh-directory option.
+there after the run. Use a new directory for each isolated run. Without
+this option, runs keep progress in the [data folder](#data-folder).
 
-`BRUTEFORCE_SAVE_ROOT` controls the toolkit's partition-image root and must
+Setting `BRUTEFORCE_SAVE_ROOT` or `RECOMP_SAVE_DIR` before launch replaces
+the data folder's save locations. `BRUTEFORCE_SAVE_ROOT` controls the
+toolkit's partition-image root and must
 name an existing directory with room for additional save paths. It also sets
 `RECOMP_SAVE_DIR` if that variable is unset; an existing `RECOMP_SAVE_DIR`
 overrides the user-data location, so set both to the same fresh directory when

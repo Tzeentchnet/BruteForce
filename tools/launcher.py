@@ -135,11 +135,10 @@ class LauncherError(ValueError):
 
 
 def settings_path(env=None):
-    env = os.environ if env is None else env
-    local_app_data = env.get("LOCALAPPDATA")
-    if not local_app_data:
-        raise LauncherError("LOCALAPPDATA is not set; the launcher cannot save its settings")
-    return Path(local_app_data) / "BruteForce" / "settings.json"
+    try:
+        return build.data_paths(build.data_dir(env))["settings"]
+    except build.BuildError as exc:
+        raise LauncherError(f"{exc}; the launcher cannot save its settings") from exc
 
 
 def validate_settings(values):
@@ -410,11 +409,17 @@ PLAY_SETTINGS_INVALID = 121
 
 
 def play(config=None, log_path=None, base_env=None):
-    """Start the game with the saved settings and wait for it to close."""
+    """Start the game with the saved settings and wait for it to close.
+
+    The game's output goes to bruteforce.log in the data folder's logs folder
+    unless log_path is given.
+    """
     try:
         values = load_settings(settings_path(base_env))
         if config is not None:
             values = {**values, "config": config}
+        if log_path is None:
+            log_path = build.data_paths(build.data_dir(base_env))["logs"] / "bruteforce.log"
         process, log = start_game(values, base_env, log_path)
     except (LauncherError, json.JSONDecodeError) as exc:
         print(f"Error: settings: {exc}", file=sys.stderr)
@@ -446,19 +451,28 @@ def run_headless(argv):
     parser.add_argument("--config", choices=("Release", "Debug", "RelWithDebInfo"))
     parser.add_argument(
         "--log", metavar="FILE", type=Path,
-        help="with --play: write the game's output here instead of its boot directory",
+        help="with --play: write the game's output here instead of the data folder's logs",
+    )
+    parser.add_argument(
+        "--data", metavar="DIR", type=Path,
+        help="with --play: the folder for settings, saves, caches and logs "
+             "(default: BRUTEFORCE_DATA, RECOMPLAUNCHER_DATA, then %%LOCALAPPDATA%%\\BruteForce)",
     )
     args = parser.parse_args(argv)
     if args.prepare:
-        if args.log is not None:
-            parser.error("--log is only used with --play")
+        for name in ("log", "data"):
+            if getattr(args, name) is not None:
+                parser.error(f"--{name} is only used with --play")
         command = ["prepare", "--config", args.config or "Release"]
         if args.game:
             command += ["--disc", args.game]
         return build.main(command)
     if args.game is not None:
         parser.error("--game is only used with --prepare")
-    return play(args.config, args.log)
+    env = None
+    if args.data is not None:
+        env = {**os.environ, "BRUTEFORCE_DATA": str(args.data.resolve())}
+    return play(args.config, args.log, env)
 
 
 def main(argv=None):

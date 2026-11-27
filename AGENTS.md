@@ -5,6 +5,8 @@
 Keep these documents current when related work changes the evidence or
 status. Update them in the same change as the work, not afterward:
 
+- `docs/STATUS.md`: the user-facing summary of what works, what is
+  experimental, and what remains open.
 - `docs/NEXTSTEPS.md`: active workstreams, ordering, settled decisions, and
   completion gates.
 - `docs/COMPLETED.md`: completed and closed work moved out of NEXTSTEPS:
@@ -27,8 +29,9 @@ status. Update them in the same change as the work, not afterward:
 - `docs/DEVELOPMENT.md`: synthetic test and developer validation commands.
 
 Distinguish observations from hypotheses and unverified behavior; identify the
-game revision, evidence, and test coverage when relevant. Update `README.md`
-when user-facing build instructions or status change. Keep relative links
+game revision, evidence, and test coverage when relevant. Update
+`docs/STATUS.md` when the project's status changes, and `README.md` when
+user-facing build instructions change. Keep relative links
 valid when documentation moves.
 
 ## Framework changes and upstream candidates
@@ -65,7 +68,8 @@ the same problems.
   user's explicit approval for that action.
 - **Record filed work immediately.** After an approved submission, record its
   PR number, commit, validation, and status in `docs/UPSTREAM.md`; update
-  `docs/NEXTSTEPS.md` and `README.md` when their status or ordering changes.
+  `docs/NEXTSTEPS.md` and `docs/STATUS.md` when their status or ordering
+  changes.
 
 ## Validation
 

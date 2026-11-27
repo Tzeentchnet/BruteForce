@@ -6,8 +6,27 @@ An early Windows port of the original Xbox game built with
 [xboxrecomp](https://github.com/sp00nznet/xboxrecomp).
 
 This repository contains no game executable, assets, or generated game code.
-You must supply an XDVDFS/XISO image made from your own North American retail
-copy.
+You must supply a disc image made from your own copy of the supported version
+below.
+
+## Supported game version
+
+Only one version of the game is supported: the **North American (USA) retail
+release for the original Xbox**.
+
+| | |
+| --- | --- |
+| Title | Brute Force (USA), the multi-language English, French, German, Spanish and Italian disc |
+| Title ID | `4D53001E` |
+| Region | North America |
+| Executable version | 6, certificate dated 2003-05-09 |
+| `default.xbe` | 4,366,336 bytes, SHA-256 `25b1389b9593f280f1ab0382a776a050977ccb1e4b90611c59e2938286292e16` |
+| Disc image | XDVDFS/XISO, or a full disc dump (Redump layout) |
+
+The build checks `default.xbe` against this fingerprint, recorded in
+[`fingerprints/retail.json`](fingerprints/retail.json), and rejects any other
+executable. European (PAL) and Japanese releases, other revisions, demo discs
+and modified executables are not supported.
 
 > [!NOTE]
 > **Blood Wake acknowledgement:** This project owes a great deal to the
@@ -58,10 +77,8 @@ first; the launcher then asks for your disc image, builds the game on your PC
 in the background, and offers the launcher settings on the game's page. See
 the [user guide](docs/USER_GUIDE.md#recomplauncher).
 
-The supported executable fingerprint is recorded in
-[`fingerprints/retail.json`](fingerprints/retail.json); other revisions are
-rejected. Launcher settings, keyboard controls, rebuilding, diagnostics,
-benchmarking, and save isolation are documented in the
+Launcher settings, keyboard controls, rebuilding, diagnostics, benchmarking,
+the data folder, and save isolation are documented in the
 [user guide](docs/USER_GUIDE.md).
 
 ## Documentation

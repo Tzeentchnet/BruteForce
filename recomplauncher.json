@@ -1,0 +1,231 @@
+{
+  "$schema": "https://recomplauncher.com/schema/recomplauncher.json",
+  "format": 1,
+  "name": "Brute Force",
+  "repo": "Tzeentchnet/BruteForce",
+  "inputs": [
+    {
+      "id": "game",
+      "label": "Your Xbox disc image (.iso: XISO or full dump) of the North American release of Brute Force. Setting up builds the game on your PC: it needs Python 3.10+, Git, CMake and Visual Studio 2022 Build Tools (C++), and can take a long time.",
+      "formats": [{ "type": "file", "extensions": ["iso", "xiso"] }],
+      "check": { "xdvdfs": "default.xbe" }
+    }
+  ],
+  "prepare": {
+    "program": ["Brute Force.cmd"],
+    "args": ["--prepare", "--game={input:game}"],
+    "label": "Recompiling and building the game from your disc",
+    "done": ["{install}/build/Release/bruteforce.exe", "{install}/build/latest.json"],
+    "keeps_copy": true
+  },
+  "start": {
+    "program": ["Brute Force.cmd"],
+    "args": ["--play", "--config", "Release", "--log", "{data}/logs/bruteforce.log"]
+  },
+  "system": {
+    "windows": { "version": "10", "graphics": { "d3d11": "11_0" } }
+  },
+  "config": [
+    {
+      "id": "main",
+      "format": "json",
+      "file": [{ "path": "{local}/BruteForce/settings.json" }],
+      "new": { "version": "4", "settings/renderer": "\"d3d11\"" }
+    }
+  ],
+  "saves": [
+    "{local}/xboxrecomp/UDATA/4d53001e",
+    "{local}/xboxrecomp/TDATA/4d53001e"
+  ],
+  "folders": {
+    "game": [{ "path": "{install}/game/disc" }],
+    "saves": [{ "path": "{local}/xboxrecomp/UDATA/4d53001e" }],
+    "logs": [{ "path": "{data}/logs" }],
+    "settings": [{ "path": "{local}/BruteForce" }]
+  },
+  "exit_codes": {
+    "120": "The game's build is missing or out of date. Press Set Up Again on the game's page.",
+    "121": "These settings can't be used together: scaled resolutions don't work with the depth or stencil aliases. Change one of them and play again."
+  },
+  "looks": {
+    "allowed": false,
+    "reason": "Brute Force starts through a script, so the looks can't be added to it yet."
+  },
+  "groups": [{ "id": "Experimental", "advanced": true }],
+  "settings": [
+    {
+      "id": "window", "label": "Window", "group": "Display",
+      "help": "Alt+Enter or F11 also switches while you play.",
+      "choices": [
+        { "label": "Windowed", "set": { "settings/window": "\"windowed\"" } },
+        { "label": "Borderless fullscreen", "set": { "settings/window": "\"fullscreen\"" } }
+      ],
+      "defaults": { "settings/window": "\"windowed\"" }
+    },
+    {
+      "id": "window_scale", "label": "Window size", "group": "Display",
+      "help": "The window's starting size. It shrinks to fit your screen and doesn't change the resolution the game draws at.",
+      "choices": [
+        { "label": "1x", "set": { "settings/window_scale": "\"1\"" } },
+        { "label": "2x", "set": { "settings/window_scale": "\"2\"" } },
+        { "label": "3x", "set": { "settings/window_scale": "\"3\"" } }
+      ],
+      "defaults": { "settings/window_scale": "\"2\"" }
+    },
+    {
+      "id": "present_filter", "label": "Display scaling", "group": "Display",
+      "help": "Smooth or sharp pixels when the picture is stretched to the window.",
+      "choices": [
+        { "label": "Smooth", "set": { "settings/present_filter": "\"linear\"" } },
+        { "label": "Sharp", "set": { "settings/present_filter": "\"point\"" } }
+      ],
+      "defaults": { "settings/present_filter": "\"linear\"" }
+    },
+    {
+      "id": "vsync", "label": "VSync", "group": "Display",
+      "help": "Waits for your screen when showing each frame. It doesn't unlock the game's frame rate.",
+      "choices": [
+        { "label": "On", "set": { "settings/vsync": "\"1\"" } },
+        { "label": "Off", "set": { "settings/vsync": "\"0\"" } }
+      ],
+      "defaults": { "settings/vsync": "\"1\"" }
+    },
+    {
+      "id": "renderer", "label": "Renderer", "group": "Graphics",
+      "help": "Direct3D 11 uses your graphics card. CPU is the slower reference renderer.",
+      "choices": [
+        { "label": "Direct3D 11", "set": { "settings/renderer": "\"d3d11\"" } },
+        { "label": "CPU", "set": { "settings/renderer": "\"cpu\"" } }
+      ],
+      "defaults": { "settings/renderer": "\"d3d11\"" }
+    },
+    {
+      "id": "resolution", "label": "Resolution", "group": "Graphics",
+      "help": "What the game draws at, in 4:3. 480p is the console's own; Native matches your window.",
+      "choices": [
+        { "label": "480p", "set": { "settings/resolution": "\"1\"" } },
+        { "label": "720p", "set": { "settings/resolution": "\"1.5\"" } },
+        { "label": "1080p", "set": { "settings/resolution": "\"2.25\"" } },
+        { "label": "1440p", "set": { "settings/resolution": "\"3\"" } },
+        { "label": "4K", "set": { "settings/resolution": "\"4.5\"" } },
+        { "label": "Native", "set": { "settings/resolution": "\"native\"" } }
+      ],
+      "defaults": { "settings/resolution": "\"1\"", "settings/renderer": "\"d3d11\"" },
+      "when": { "settings/renderer": "\"d3d11\"" }
+    },
+    {
+      "id": "shader_cache", "label": "Shader cache", "group": "Graphics",
+      "help": "Keeps compiled shaders between sessions. Experimental.",
+      "choices": [
+        { "label": "Off", "set": { "settings/shader_cache": "\"0\"" } },
+        { "label": "On", "set": { "settings/shader_cache": "\"1\"" } }
+      ],
+      "defaults": { "settings/shader_cache": "\"0\"", "settings/renderer": "\"d3d11\"" },
+      "when": { "settings/renderer": "\"d3d11\"" }
+    },
+    {
+      "id": "gpu_vsh", "label": "Vertex programs", "group": "Graphics", "advanced": true,
+      "help": "Runs them on your graphics card. CPU is for comparison.",
+      "choices": [
+        { "label": "GPU", "set": { "settings/gpu_vsh": "\"1\"" } },
+        { "label": "CPU", "set": { "settings/gpu_vsh": "\"0\"" } }
+      ],
+      "defaults": { "settings/gpu_vsh": "\"1\"", "settings/renderer": "\"d3d11\"" },
+      "when": { "settings/renderer": "\"d3d11\"" }
+    },
+    {
+      "id": "gpu_textures", "label": "Texture decoding", "group": "Graphics", "advanced": true,
+      "help": "Decodes textures on your graphics card. CPU is for comparison.",
+      "choices": [
+        { "label": "GPU", "set": { "settings/gpu_textures": "\"1\"" } },
+        { "label": "CPU", "set": { "settings/gpu_textures": "\"0\"" } }
+      ],
+      "defaults": { "settings/gpu_textures": "\"1\"", "settings/renderer": "\"d3d11\"" },
+      "when": { "settings/renderer": "\"d3d11\"" }
+    },
+    {
+      "id": "audio", "label": "Game audio", "group": "Audio",
+      "help": "Music, dialogue, effects and cutscene sound.",
+      "choices": [
+        { "label": "On", "set": { "settings/audio": "\"1\"" } },
+        { "label": "Off", "set": { "settings/audio": "\"0\"" } }
+      ],
+      "defaults": { "settings/audio": "\"1\"" }
+    },
+    {
+      "id": "audio_dsp", "label": "Sound processor", "group": "Audio",
+      "help": "Simple is the recommended wide-stereo sound. Accurate runs the Xbox's own sound programs and is experimental.",
+      "choices": [
+        { "label": "Simple", "set": { "settings/audio_dsp": "\"fold\"" } },
+        { "label": "Accurate", "set": { "settings/audio_dsp": "\"xemu\"" } }
+      ],
+      "defaults": { "settings/audio_dsp": "\"fold\"", "settings/audio": "\"1\"" },
+      "when": { "settings/audio": "\"1\"" }
+    },
+    {
+      "id": "program_near_zero", "label": "Near-plane clipping", "group": "Experimental",
+      "help": "HUD-safe keeps the HUD visible without extra glow. The others are for comparison.",
+      "choices": [
+        { "label": "HUD-safe", "set": { "settings/program_near_zero": "\"hud\"" } },
+        { "label": "Legacy", "set": { "settings/program_near_zero": "\"inherit\"" } },
+        { "label": "Legacy (forced)", "set": { "settings/program_near_zero": "\"0\"" } },
+        { "label": "Screen-zero", "set": { "settings/program_near_zero": "\"1\"" } }
+      ],
+      "defaults": { "settings/program_near_zero": "\"hud\"" }
+    },
+    {
+      "id": "window_clip", "label": "Window clipping", "group": "Experimental",
+      "help": "Applies the game's own clipping rectangle. Tested on little of the game.",
+      "choices": [
+        { "label": "Off", "set": { "settings/window_clip": "\"0\"" } },
+        { "label": "On", "set": { "settings/window_clip": "\"1\"" } }
+      ],
+      "defaults": { "settings/window_clip": "\"0\"" }
+    },
+    {
+      "id": "visibility", "label": "Visibility reports", "group": "Experimental",
+      "help": "Asynchronous may change timing and is barely tested in play.",
+      "choices": [
+        { "label": "Synchronous", "set": { "settings/visibility": "\"sync\"" } },
+        { "label": "Asynchronous", "set": { "settings/visibility": "\"async\"" } }
+      ],
+      "defaults": { "settings/visibility": "\"sync\"", "settings/renderer": "\"d3d11\"" },
+      "when": { "settings/renderer": "\"d3d11\"" }
+    },
+    {
+      "id": "depth_texture", "label": "Depth texture aliases", "group": "Experimental",
+      "help": "Only at 480p. Allows supported depth aliases.",
+      "choices": [
+        { "label": "Off", "set": { "settings/depth_texture": "\"0\"" } },
+        { "label": "On", "set": { "settings/depth_texture": "\"1\"" } }
+      ],
+      "defaults": { "settings/depth_texture": "\"0\"", "settings/renderer": "\"d3d11\"", "settings/resolution": "\"1\"" },
+      "when": { "settings/renderer": "\"d3d11\"", "settings/resolution": "\"1\"" }
+    },
+    {
+      "id": "stencil_alias", "label": "Depth/stencil aliases", "group": "Experimental",
+      "help": "Only at 480p. May darken glow; not checked against the console.",
+      "choices": [
+        { "label": "Off", "set": { "settings/stencil_alias": "\"0\"" } },
+        { "label": "On", "set": { "settings/stencil_alias": "\"1\"" } }
+      ],
+      "defaults": { "settings/stencil_alias": "\"0\"", "settings/renderer": "\"d3d11\"", "settings/resolution": "\"1\"" },
+      "when": { "settings/renderer": "\"d3d11\"", "settings/resolution": "\"1\"" }
+    },
+    {
+      "id": "direct_present", "label": "Shared GPU presentation", "group": "Experimental",
+      "help": "Shows a GPU copy of the frame when it can. Always on above 480p.",
+      "choices": [
+        { "label": "Off", "set": { "settings/direct_present": "\"0\"" } },
+        { "label": "On", "set": { "settings/direct_present": "\"1\"" } }
+      ],
+      "defaults": { "settings/direct_present": "\"0\"", "settings/renderer": "\"d3d11\"" },
+      "when": { "settings/renderer": "\"d3d11\"" }
+    }
+  ],
+  "actions": [
+    { "id": "saves", "label": "Saves", "help": "Your Brute Force saves.", "open": "saves" },
+    { "id": "logs", "label": "Logs", "help": "The game's output from the last time it was played.", "open": "logs" },
+    { "id": "shader_cache", "label": "Shader cache", "help": "Shaders kept between sessions. Clearing only helps if graphics look wrong after an update.", "clear": "settings/shader-cache" }
+  ]
+}

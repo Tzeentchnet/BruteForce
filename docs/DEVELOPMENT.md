@@ -16,6 +16,19 @@ option recording have a focused selection:
 python -m pytest -q tests\test_build.py tests\test_bench_performance.py
 ```
 
+The RecompLauncher setup and play modes, the batch file's argument path, and
+the agreement between `recomplauncher.json` settings and the launcher's
+choices have a focused selection. The batch tests need Windows:
+
+```powershell
+python -m pytest -q tests\test_build.py tests\test_launcher.py `
+  -k "prepare or build_tools or visual_studio or stale or heartbeat or headless or recomplauncher or requested_log"
+```
+
+To validate `recomplauncher.json` itself, check it against the published
+schema at <https://recomplauncher.com/schema/recomplauncher.json> with any
+JSON Schema (draft 7) validator.
+
 Vulkan interval-counter parsing can be checked without game data:
 
 ```powershell

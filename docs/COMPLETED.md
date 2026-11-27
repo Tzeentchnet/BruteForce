@@ -536,6 +536,19 @@ long-session acceptance remain open.
 
 ## D. Pipeline and compatibility
 
+- RecompLauncher support was added on 2026-11-26: `recomplauncher.json`, a
+  windowless `--prepare` setup step and headless `--play` mode behind
+  `Brute Force.cmd` arguments, and a tag-triggered draft-release workflow.
+  The manifest validates against the published schema with zero errors. On
+  the retail generation `20261121-005939-bc768cc6`, one setup run through the
+  batch file with the disc image exited 0 in 117 seconds (disc verification
+  and an up-to-date incremental build), one run without the disc reused
+  `game\disc` and exited 0, and one `--play` run under a 25-second watchdog
+  with isolated saves booted the game and wrote its output to the requested
+  log. Without arguments, the batch file still opens the launcher window. The
+  focused tests are listed in [DEVELOPMENT](DEVELOPMENT.md#tests). No release
+  has been published, and RecompLauncher itself has not installed or run a
+  release; open follow-ups are in [NEXTSTEPS](NEXTSTEPS.md#d-remaining-pipeline-and-compatibility-work).
 - The current-generation guest surface-read diagnostic is complete. One
   no-retry null-backend attempt reached 104 stationary flips, completed the
   40.01-second movement phase, resolved two accesses inside an accumulated

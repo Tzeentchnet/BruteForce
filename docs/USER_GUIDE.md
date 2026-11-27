@@ -199,6 +199,49 @@ the launched process only; unrelated environment variables are inherited.
 An invalid settings file is reported and left unchanged. Choose the build
 configuration that matches the most recent build.
 
+## RecompLauncher
+
+[`recomplauncher.json`](../recomplauncher.json) lets
+[RecompLauncher](https://recomplauncher.com) set the game up and start it.
+Releases are source zips: they contain no game files or prebuilt executable,
+so setup builds the game on the player's PC from their own disc. The
+[build requirements](#requirements-and-build-workflow) apply unchanged:
+install Python with the packages in `tools\requirements.txt`, Git, CMake and
+Visual Studio 2022 Build Tools before setting the game up.
+
+Both launcher steps run `Brute Force.cmd` with arguments. Without arguments,
+`Brute Force.cmd` still opens the launcher window described above.
+
+- **Setup:** `Brute Force.cmd --prepare --game=<disc image>` runs without a
+  window or prompts. It checks the build tools, installs the pinned
+  dependencies, extracts or verifies the disc, regenerates only when the
+  latest generation no longer matches, and builds Release. It prints
+  `progress <fraction> <text>` lines, repeating one every five minutes during
+  long stages, and ends a failure with one line naming what to fix. Without
+  `--game` it reuses the verified files in `game\disc`, so a later release can
+  be rebuilt without the disc. The same step is available as
+  `python tools\build.py prepare [--disc <image>]`. When `RECOMPLAUNCHER=1`,
+  a pinned download in `.deps` that no longer matches the release is moved to
+  `.deps\stale` rather than stopping setup; outside the launcher, setup still
+  refuses to replace it.
+- **Play:** `Brute Force.cmd --play --config Release --log <file>` starts the
+  same tutorial configuration as the launcher window with the saved settings
+  and waits for the game to close, returning its exit code. It writes the
+  game's output to `--log` instead of the boot directory. Exit code 120 means
+  the build is missing or stale, and 121 means the saved settings are invalid
+  or conflict.
+
+RecompLauncher shows the launcher settings on the game's page by editing
+`%LOCALAPPDATA%\BruteForce\settings.json`, the same file the launcher window
+uses; the build configuration is not shown. It backs up saves from
+`%LOCALAPPDATA%\xboxrecomp\UDATA\4d53001e` and `TDATA\4d53001e`. Its
+ReShade looks are turned off because the game starts through a script.
+
+Pushing a `v*` tag runs `.github/workflows/release.yml`, which drafts a
+release with `BruteForce-<tag>-Windows-x64.zip`. The zip holds only tracked
+files, with `recomplauncher.json` at its top. Review and publish the draft by
+hand.
+
 ## Tutorial and input path
 
 After building, start a fresh PowerShell session and opt into the tutorial

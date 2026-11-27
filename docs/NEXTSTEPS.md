@@ -566,6 +566,17 @@ memory, decoder, PFB and display-awake fixtures passed 17 cases, and the
 separate synchronization, presenter, pushbuffer and toolkit suite passed 61.
 These are synthetic results, not a title comparison.
 
+- RecompLauncher support is implemented but unpublished; see
+  [COMPLETED](COMPLETED.md#d-pipeline-and-compatibility). Remaining: push a
+  first `v*` tag and publish its draft release, install that release through
+  RecompLauncher's developer tools ("Add a build") and confirm setup, the
+  settings page and Play, then submit the project to the catalog and point the
+  README badge at its game page. Add Redump sizes and CRC32s to the manifest's
+  `dumps` only after verifying them against Redump. Larger gaps against the
+  Recomp Standards: accept an extracted game folder besides disc images, keep
+  saves, settings, logs and the shader cache under one data folder
+  (`RECOMPLAUNCHER_DATA`), and start through a native executable so the
+  launcher's ReShade looks can be enabled.
 - The current-generation guest surface-read diagnostic is complete; see
   [COMPLETED](COMPLETED.md#d-pipeline-and-compatibility). Treat it as a requirement to retain readback, not proof
   of a live title surface read, and do not repeat it unless its live

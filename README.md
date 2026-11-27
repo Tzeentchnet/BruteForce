@@ -1,5 +1,7 @@
 # Brute Force static recompilation
 
+<a href="https://recomplauncher.com"><picture><source media="(prefers-color-scheme: dark)" srcset="https://recomplauncher.com/assets/press/launcher/badge-light.svg"><img alt="Get it on RecompLauncher" src="https://recomplauncher.com/assets/press/launcher/badge-dark.svg" height="48"></picture></a>
+
 An early Windows port of the original Xbox game built with
 [xboxrecomp](https://github.com/sp00nznet/xboxrecomp).
 
@@ -109,6 +111,14 @@ sources, logs, saves, and build products remain local and are excluded from
 Git. If an older framework checkout is already installed, preserve and move
 it before rerunning setup; generations from the previous pin must be
 regenerated.
+
+### With RecompLauncher
+
+Releases include a [`recomplauncher.json`](recomplauncher.json) for
+[RecompLauncher](https://recomplauncher.com). Install the same build tools
+first; the launcher then asks for your disc image, builds the game on your PC
+in the background, and offers the launcher settings on the game's page. See
+the [user guide](docs/USER_GUIDE.md#recomplauncher).
 
 The supported executable fingerprint is recorded in
 [`fingerprints/retail.json`](fingerprints/retail.json); other revisions are

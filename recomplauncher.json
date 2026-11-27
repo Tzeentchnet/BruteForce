@@ -20,7 +20,7 @@
   },
   "start": {
     "program": ["Brute Force.cmd"],
-    "args": ["--play", "--config", "Release", "--log", "{data}/logs/bruteforce.log"]
+    "args": ["--play", "--config", "Release", "--data", "{data}"]
   },
   "system": {
     "windows": { "version": "10", "graphics": { "d3d11": "11_0" } }
@@ -29,19 +29,19 @@
     {
       "id": "main",
       "format": "json",
-      "file": [{ "path": "{local}/BruteForce/settings.json" }],
+      "file": [{ "path": "{data}/settings.json" }],
       "new": { "version": "4", "settings/renderer": "\"d3d11\"" }
     }
   ],
   "saves": [
-    "{local}/xboxrecomp/UDATA/4d53001e",
-    "{local}/xboxrecomp/TDATA/4d53001e"
+    "{data}/saves/UDATA/4d53001e",
+    "{data}/saves/TDATA/4d53001e"
   ],
   "folders": {
     "game": [{ "path": "{install}/game/disc" }],
-    "saves": [{ "path": "{local}/xboxrecomp/UDATA/4d53001e" }],
+    "saves": [{ "path": "{data}/saves" }],
     "logs": [{ "path": "{data}/logs" }],
-    "settings": [{ "path": "{local}/BruteForce" }]
+    "cache": [{ "path": "{data}/cache" }]
   },
   "exit_codes": {
     "120": "The game's build is missing or out of date. Press Set Up Again on the game's page.",
@@ -226,6 +226,6 @@
   "actions": [
     { "id": "saves", "label": "Saves", "help": "Your Brute Force saves.", "open": "saves" },
     { "id": "logs", "label": "Logs", "help": "The game's output from the last time it was played.", "open": "logs" },
-    { "id": "shader_cache", "label": "Shader cache", "help": "Shaders kept between sessions. Clearing only helps if graphics look wrong after an update.", "clear": "settings/shader-cache" }
+    { "id": "shader_cache", "label": "Shader cache", "help": "Shaders kept between sessions. Clearing only helps if graphics look wrong after an update.", "clear": "cache/shader-cache" }
   ]
 }

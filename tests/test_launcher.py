@@ -453,7 +453,9 @@ def test_recomplauncher_settings_match_the_launcher():
     manifest = json.loads((ROOT / "recomplauncher.json").read_text(encoding="utf-8"))
     config = manifest["config"][0]
     assert config["format"] == "json"
-    assert config["file"] == [{"path": "{local}/BruteForce/settings.json"}]
+    assert config["file"] == [{"path": "{data}/settings.json"}]
+    assert manifest["start"]["args"][-2:] == ["--data", "{data}"]
+    assert all(path.startswith("{data}/saves/") for path in manifest["saves"])
     assert json.loads(config["new"]["version"]) == launcher.SETTINGS_VERSION
     written = {}
     for setting in manifest["settings"]:

@@ -272,7 +272,8 @@ Its ReShade looks are turned off because the game starts through a script.
 Pushing a `v*` tag runs `.github/workflows/release.yml`, which drafts a
 release with `BruteForce-<tag>-Windows-x64.zip`. The zip holds only tracked
 files, with `recomplauncher.json` at its top. Review and publish the draft by
-hand.
+hand, as a full release: RecompLauncher installs the latest full release and
+treats pre-releases as betas.
 
 ## Tutorial and input path
 

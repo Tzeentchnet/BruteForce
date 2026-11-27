@@ -546,9 +546,12 @@ long-session acceptance remain open.
   `game\disc` and exited 0, and one `--play` run under a 25-second watchdog
   with isolated saves booted the game and wrote its output to the requested
   log. Without arguments, the batch file still opens the launcher window. The
-  focused tests are listed in [DEVELOPMENT](DEVELOPMENT.md#tests). No release
-  has been published, and RecompLauncher itself has not installed or run a
-  release; open follow-ups are in [NEXTSTEPS](NEXTSTEPS.md#d-remaining-pipeline-and-compatibility-work).
+  focused tests are listed in [DEVELOPMENT](DEVELOPMENT.md#tests). The first
+  release, `v0.1.0` (tag commit `600e091`), was published on 2026-11-26 from
+  the release workflow; its 247-file zip was checked to contain the manifest
+  at its top, a CRLF batch file, and no game data, binaries or logs.
+  RecompLauncher itself has not installed or run it yet; open follow-ups are
+  in [NEXTSTEPS](NEXTSTEPS.md#d-remaining-pipeline-and-compatibility-work).
 - Settings, saves, caches and the headless play log were moved into one
   [data folder](USER_GUIDE.md#data-folder) on 2026-11-26:
   `%LOCALAPPDATA%\BruteForce`, `BRUTEFORCE_DATA`, or RecompLauncher's

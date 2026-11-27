@@ -566,12 +566,11 @@ memory, decoder, PFB and display-awake fixtures passed 17 cases, and the
 separate synchronization, presenter, pushbuffer and toolkit suite passed 61.
 These are synthetic results, not a title comparison.
 
-- RecompLauncher support is implemented but unpublished; see
-  [COMPLETED](COMPLETED.md#d-pipeline-and-compatibility). Remaining: push a
-  first `v*` tag and publish its draft release, install that release through
-  RecompLauncher's developer tools ("Add a build") and confirm setup, the
-  settings page and Play, then submit the project to the catalog and point the
-  README badge at its game page. Add Redump sizes and CRC32s to the manifest's
+- RecompLauncher support shipped in release `v0.1.0`; see
+  [COMPLETED](COMPLETED.md#d-pipeline-and-compatibility). Remaining: install
+  that release through RecompLauncher's developer tools ("Add a build") and
+  confirm setup, the settings page and Play, then submit the project to the
+  catalog and point the README badge at its game page. Add Redump sizes and CRC32s to the manifest's
   `dumps` only after verifying them against Redump. Larger gaps against the
   Recomp Standards: accept an extracted game folder besides disc images, and
   start through a native executable so the launcher's ReShade looks can be

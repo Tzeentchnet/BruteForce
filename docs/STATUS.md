@@ -62,8 +62,9 @@ This is an experimental Windows release for the North American retail game:
   player's disc image and start it, using the build tools listed in the
   README; releases are source zips because the game is built on the player's
   PC. Settings, saves, caches and logs share one
-  [data folder](USER_GUIDE.md#data-folder). RecompLauncher itself has not yet
-  been confirmed to install a release, and the project is not in its catalog.
+  [data folder](USER_GUIDE.md#data-folder). Release `v0.1.0` carries the
+  manifest; RecompLauncher itself has not yet been confirmed to install it,
+  and the project is not in its catalog.
 - The pinned framework is xboxrecomp v0.18.0. Its clean patch replay, focused
   synthetic fixtures, retail regeneration, and bounded CPU and D3D11 Basic
   Controls smokes pass. Brute Force also enables a default-off framework
